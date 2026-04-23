@@ -7,6 +7,7 @@ from typing import Optional
 from app.database import get_db
 from app.models import User
 from app.dependencies import get_current_user
+from app.services.wechat_ws_service import wechat_ws_service
 
 router = APIRouter(tags=["企微全局配置"])
 
@@ -98,4 +99,5 @@ async def save_wechat_config(
         "callback_timeout": payload.callback_timeout or 5,
     })
     db.commit()
+    await wechat_ws_service.auto_connect_from_saved_config()
     return json_response(message="配置已保存")

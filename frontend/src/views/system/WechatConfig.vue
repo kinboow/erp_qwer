@@ -150,73 +150,15 @@
         <el-icon color="var(--lark-primary)"><InfoFilled /></el-icon>
         <span>当前绑定实例：<strong>{{ savedInstance.name || savedInstance.wxid }}</strong></span>
       </div>
-    </div>
 
-    <div class="config-section">
-      <div class="section-title">
-        <el-icon><Connection /></el-icon>
-        <span>消息回调配置</span>
+      <div class="auto-receive-tip">
+        <el-icon color="var(--lark-primary)"><Connection /></el-icon>
+        <div class="auto-receive-content">
+          <div class="auto-receive-title">消息接收已改为自动模式</div>
+          <div class="auto-receive-text">保存 API 连接信息并绑定实例后，系统会自动开始接收消息；后端重启后也会自动恢复，无需手动配置回调或点击启动。</div>
+          <div class="auto-receive-text">HTTP 接收入口固定为 <strong>/api/wechat/callback/http</strong>，WebSocket 会按已保存实例自动连接。</div>
+        </div>
       </div>
-
-      <div v-if="!selectedInstanceKey" class="empty-hint callback-empty">
-        请先选择并保存一个企业微信实例
-      </div>
-
-      <el-form v-else :model="callbackForm" label-position="top" class="config-form callback-form">
-        <el-form-item label="实例标识">
-          <el-input :model-value="selectedInstanceKey" readonly />
-        </el-form-item>
-
-        <div class="form-row callback-row">
-          <el-form-item label="WS 接入路径" class="form-col">
-            <el-input v-model="callbackForm.wsPath" placeholder="如：/ws/wechat/messages" />
-          </el-form-item>
-
-          <el-form-item label="HTTP 回调路径" class="form-col">
-            <el-input v-model="callbackForm.httpPath" placeholder="如：/api/wechat/callback/http" />
-          </el-form-item>
-        </div>
-
-        <el-form-item label="WS 消息接收地址">
-          <el-input :model-value="generatedWsUrl" readonly>
-            <template #append>
-              <el-button @click="copyText(generatedWsUrl)" :disabled="!generatedWsUrl">复制</el-button>
-            </template>
-          </el-input>
-        </el-form-item>
-
-        <el-form-item label="HTTP 消息接收地址">
-          <el-input :model-value="generatedHttpUrl" readonly>
-            <template #append>
-              <el-button @click="copyText(generatedHttpUrl)" :disabled="!generatedHttpUrl">复制</el-button>
-            </template>
-          </el-input>
-        </el-form-item>
-
-        <el-form-item label="回调超时(秒)">
-          <el-input-number v-model="callbackForm.timeout" :min="1" :max="300" />
-        </el-form-item>
-
-        <div class="form-actions callback-actions">
-          <el-button type="primary" @click="handleConnectWs" :loading="wsConnecting" :disabled="!generatedWsUrl || !selectedInstanceKey">
-            启动 WS 连接
-          </el-button>
-          <el-button @click="handleDisconnectWs" :disabled="!selectedInstanceKey">
-            断开 WS 连接
-          </el-button>
-          <el-button @click="fetchWsStatus" :disabled="!selectedInstanceKey">
-            刷新 WS 状态
-          </el-button>
-        </div>
-
-        <div v-if="wsStatus" class="callback-status">
-          当前 WS 状态：{{ wsStatus.readyState || 'unknown' }}
-        </div>
-
-        <div class="callback-tip">
-          当前地址使用配置中的 IP/端口自动生成，并附带当前选择实例标识 `instanceId`。
-        </div>
-      </el-form>
     </div>
 
     <!-- 登录二维码弹窗 -->
@@ -259,20 +201,18 @@ import {
   Connection, Check, Refresh, Monitor, User, Select,
   SuccessFilled, CircleCloseFilled, InfoFilled, Plus
 } from '@element-plus/icons-vue'
-import { getInstances, createInstance, updateInstance, checkInstanceStatus, connectWechatWs, disconnectWechatWs, getWechatWsStatus, getWechatGlobalConfig, saveWechatGlobalConfig, proxyStartWechat, proxyWaitLogin, proxyRefreshQrcode, proxyLoginWindowScreenshot } from '@/api/wechat'
+import { getInstances, createInstance, updateInstance, getWechatGlobalConfig, saveWechatGlobalConfig, proxyStartWechat, proxyWaitLogin, proxyRefreshQrcode, proxyLoginWindowScreenshot } from '@/api/wechat'
 import request from '@/utils/request'
 
 const formRef = ref(null)
 const testing = ref(false)
 const saving = ref(false)
 const fetchingInstances = ref(false)
-const wsConnecting = ref(false)
 const connectionTested = ref(false)
 const testResult = ref(null)
 const instances = ref([])
 const selectedWxid = ref('')
 const savedInstance = ref(null)
-const wsStatus = ref(null)
 
 const startingInstance = ref(false)
 const qrDialogVisible = ref(false)
@@ -296,12 +236,6 @@ const configForm = reactive({
   apiKey: ''
 })
 
-const callbackForm = reactive({
-  wsPath: '/ws/wechat/messages',
-  httpPath: '/api/wechat/callback/http',
-  timeout: 5
-})
-
 const rules = {
   host: [{ required: true, message: '请输入服务器地址', trigger: 'blur' }],
   port: [{ required: true, message: '请输入端口', trigger: 'blur' }]
@@ -316,28 +250,6 @@ const configLoaded = ref(false)
 const hasApiConfig = computed(() => configLoaded.value && !!(configForm.host && configForm.port))
 const loggedInCount = computed(() => instances.value.filter(item => item.login_status).length)
 const runningCount = computed(() => instances.value.filter(item => item.status).length)
-const selectedInstanceKey = computed(() => {
-  if (savedInstance.value?.wxid === selectedWxid.value && savedInstance.value?.id) {
-    return String(savedInstance.value.id)
-  }
-  return selectedWxid.value || ''
-})
-const normalizedWsPath = computed(() => {
-  if (!callbackForm.wsPath) return '/ws/wechat/messages'
-  return callbackForm.wsPath.startsWith('/') ? callbackForm.wsPath : `/${callbackForm.wsPath}`
-})
-const normalizedHttpPath = computed(() => {
-  if (!callbackForm.httpPath) return '/api/wechat/callback/http'
-  return callbackForm.httpPath.startsWith('/') ? callbackForm.httpPath : `/${callbackForm.httpPath}`
-})
-const generatedWsUrl = computed(() => {
-  if (!configForm.host || !configForm.port || !selectedInstanceKey.value) return ''
-  return `ws://${configForm.host}:${configForm.port}${normalizedWsPath.value}?instanceId=${encodeURIComponent(selectedInstanceKey.value)}`
-})
-const generatedHttpUrl = computed(() => {
-  if (!configForm.host || !configForm.port || !selectedInstanceKey.value) return ''
-  return `http://${configForm.host}:${configForm.port}${normalizedHttpPath.value}?instanceId=${encodeURIComponent(selectedInstanceKey.value)}`
-})
 
 const getInstanceStatusClass = (inst) => {
   if (inst.login_status) return 'online'
@@ -357,9 +269,6 @@ async function loadConfig() {
     configForm.port = cfg.port || ''
     configForm.apiKey = cfg.api_key || ''
     selectedWxid.value = cfg.selected_wxid || ''
-    callbackForm.wsPath = cfg.ws_path || '/ws/wechat/messages'
-    callbackForm.httpPath = cfg.http_path || '/api/wechat/callback/http'
-    callbackForm.timeout = Number(cfg.callback_timeout) || 5
     if (cfg.bound_instance_id) {
       savedInstance.value = {
         id: cfg.bound_instance_id,
@@ -374,66 +283,18 @@ async function loadConfig() {
   } catch { /* first time, no config yet */ }
 }
 
-async function fetchWsStatus() {
-  if (!selectedInstanceKey.value) return
-  try {
-    const res = await getWechatWsStatus({ instanceId: selectedInstanceKey.value })
-    wsStatus.value = res.data || null
-  } catch (error) {
-    wsStatus.value = null
-  }
-}
-
-async function handleConnectWs() {
-  if (!selectedInstanceKey.value || !generatedWsUrl.value) return
-  wsConnecting.value = true
-  try {
-    await connectWechatWs({
-      instanceId: selectedInstanceKey.value,
-      url: generatedWsUrl.value
-    })
-    ElMessage.success('WS 客户端连接已启动')
-    await fetchWsStatus()
-  } catch (error) {
-    ElMessage.error(error?.response?.data?.message || '启动 WS 连接失败')
-  } finally {
-    wsConnecting.value = false
-  }
-}
-
-async function handleDisconnectWs() {
-  if (!selectedInstanceKey.value) return
-  try {
-    await disconnectWechatWs(selectedInstanceKey.value)
-    wsStatus.value = null
-    ElMessage.success('WS 客户端连接已断开')
-  } catch (error) {
-    ElMessage.error(error?.response?.data?.message || '断开 WS 连接失败')
-  }
-}
-
 async function saveConfigToDb(extraFields = {}) {
   await saveWechatGlobalConfig({
     host: configForm.host,
     port: configForm.port,
     api_key: configForm.apiKey,
     selected_wxid: selectedWxid.value,
-    ws_path: normalizedWsPath.value,
-    http_path: normalizedHttpPath.value,
-    callback_timeout: callbackForm.timeout,
+    ws_path: '/ws/wechat/messages',
+    http_path: '/api/wechat/callback/http',
+    callback_timeout: 5,
     ...extraFields
   })
   configLoaded.value = true
-}
-
-async function copyText(text) {
-  if (!text) return
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success('已复制到剪贴板')
-  } catch (error) {
-    ElMessage.error('复制失败')
-  }
 }
 
 async function handleTestConnection() {
@@ -503,7 +364,7 @@ async function handleSave() {
       bound_instance_name: boundName
     })
 
-    ElMessage.success('配置已保存')
+    ElMessage.success('配置已保存，消息接收已自动开启')
     handleFetchInstances()
   } catch (error) {
     ElMessage.error(error?.response?.data?.message || '保存失败')
@@ -544,8 +405,6 @@ function handleSelectInstance(inst) {
     return
   }
   selectedWxid.value = inst.wxid
-  wsStatus.value = null
-  fetchWsStatus()
 }
 
 function clearQrTimers() {
@@ -792,21 +651,9 @@ onMounted(async () => {
   max-width: 600px;
 }
 
-.callback-form {
-  max-width: 900px;
-}
-
 .form-row {
   display: flex;
   gap: 12px;
-}
-
-.callback-row {
-  align-items: flex-start;
-}
-
-.callback-actions {
-  margin-top: 4px;
 }
 
 .form-col { flex: 1; }
@@ -1006,20 +853,32 @@ onMounted(async () => {
   color: #00B365;
 }
 
-.callback-tip {
-  font-size: 12px;
-  color: var(--lark-text-secondary);
-  margin-top: 4px;
+.auto-receive-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: var(--lark-radius-sm);
+  background: var(--lark-bg-hover);
 }
 
-.callback-status {
-  margin-top: 8px;
-  font-size: 12px;
+.auto-receive-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auto-receive-title {
+  font-size: 14px;
+  font-weight: 600;
   color: var(--lark-text-primary);
 }
 
-.callback-empty {
-  padding: 20px 0;
+.auto-receive-text {
+  font-size: 13px;
+  color: var(--lark-text-secondary);
+  line-height: 1.6;
 }
 
 .empty-hint {

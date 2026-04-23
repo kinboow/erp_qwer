@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders
+from app.services.wechat_ws_service import wechat_ws_service
 
 # 创建FastAPI应用实例
 app = FastAPI(
@@ -30,6 +31,11 @@ app.include_router(wechat.router, prefix="/api/wechat", tags=["企业微信管�
 app.include_router(wechat_runtime.router, prefix="/api/wechat")
 app.include_router(wechat_config.router, prefix="/api/wechat")
 app.include_router(downstream_orders.router, prefix="/api/downstream-orders")
+
+
+@app.on_event("startup")
+async def restore_wechat_message_receivers():
+    await wechat_ws_service.auto_connect_from_saved_config()
 
 
 @app.get("/", summary="根路径", tags=["系统"])
