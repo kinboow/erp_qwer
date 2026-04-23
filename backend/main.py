@@ -1,6 +1,11 @@
 from fastapi import FastAPI
+from fastapi import Body, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+
+from app.database import SessionLocal
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders
+from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 
 # 创建FastAPI应用实例
@@ -36,6 +41,59 @@ app.include_router(downstream_orders.router, prefix="/api/downstream-orders")
 @app.on_event("startup")
 async def restore_wechat_message_receivers():
     await wechat_ws_service.auto_connect_from_saved_config()
+
+
+@app.api_route("/sync", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调", tags=["企业微信运行时"])
+async def root_sync_callback(
+    request_body: dict | None = Body(default=None),
+    wxid: str = Query(default=""),
+    instanceId: str = Query(default=""),
+):
+    db: Session = SessionLocal()
+    try:
+        result = await ingest_runtime_message(
+            db,
+            request_body or {},
+            source="http_callback",
+            instance_id=instanceId or None,
+            wxid=wxid or None,
+        )
+        return {"code": 200, "message": "回调接收成功", "data": result}
+    finally:
+        db.close()
+
+
+@app.websocket("/ws")
+async def root_ws_callback(websocket: WebSocket):
+    await websocket.accept()
+    wxid = (websocket.query_params.get("wxid") or "").strip()
+    instance_id = (websocket.query_params.get("instanceId") or "").strip()
+    db: Session = SessionLocal()
+    try:
+        while True:
+            message = await websocket.receive()
+            payload = None
+            if message.get("text") is not None:
+                payload = message.get("text")
+            elif message.get("bytes") is not None:
+                try:
+                    payload = message.get("bytes", b"").decode("utf-8")
+                except Exception:
+                    payload = {"raw_bytes": message.get("bytes", b"").hex()}
+            if payload is None:
+                continue
+            await ingest_runtime_message(
+                db,
+                payload,
+                source="websocket",
+                instance_id=instance_id or None,
+                wxid=wxid or None,
+            )
+            await websocket.send_json({"code": 200, "message": "received"})
+    except WebSocketDisconnect:
+        return
+    finally:
+        db.close()
 
 
 @app.get("/", summary="根路径", tags=["系统"])

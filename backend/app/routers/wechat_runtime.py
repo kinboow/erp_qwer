@@ -6,8 +6,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.dependencies import get_current_user
-from app.services.downstream_orders import create_review_from_callback
-from app.services.message_logs import record_message_log
+from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 
 router = APIRouter(tags=["企业微信运行时"])
@@ -29,16 +28,34 @@ def json_response(code=200, message="success", data=None):
 async def receive_http_callback(
     body: Optional[dict] = Body(default=None),
     instanceId: Optional[str] = Query(None),
+    wxid: Optional[str] = Query(None),
     db: Session = Depends(get_db)
 ):
-    if body is not None:
-        record_message_log(db, body, source="http_callback", instance_id=instanceId)
-    created = await create_review_from_callback(db, body, instanceId) if body else None
-    return json_response(message="回调接收成功", data={
-        "instanceId": instanceId or (body or {}).get("instanceId", ""),
-        "received": True,
-        "review": created,
-    })
+    data = await ingest_runtime_message(
+        db,
+        body or {},
+        source="http_callback",
+        instance_id=instanceId,
+        wxid=wxid,
+    )
+    return json_response(message="回调接收成功", data=data)
+
+
+@router.api_route("/sync", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调")
+async def receive_sync_callback(
+    body: Optional[dict] = Body(default=None),
+    wxid: Optional[str] = Query(None),
+    instanceId: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    data = await ingest_runtime_message(
+        db,
+        body or {},
+        source="http_callback",
+        instance_id=instanceId,
+        wxid=wxid,
+    )
+    return json_response(message="回调接收成功", data=data)
 
 
 @router.get("/ws/status", summary="获取企业微信 WS 状态")
