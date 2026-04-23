@@ -1,10 +1,5 @@
 <template>
   <div class="lark-erp-sync-config">
-    <div class="lark-page-header">
-      <div class="header-title">ERP 同步配置</div>
-      <div class="header-desc">配置弘兆云 ERP 连接信息和销售订单自动同步策略</div>
-    </div>
-
     <!-- 连接配置 -->
     <div class="config-section">
       <div class="section-title">
@@ -233,25 +228,6 @@ onMounted(async () => {
 
 <style scoped>
 .lark-erp-sync-config {
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 24px;
-}
-
-.lark-page-header {
-  margin-bottom: 24px;
-}
-
-.header-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: #1f2329;
-}
-
-.header-desc {
-  font-size: 13px;
-  color: #8f959e;
-  margin-top: 4px;
 }
 
 .config-section {

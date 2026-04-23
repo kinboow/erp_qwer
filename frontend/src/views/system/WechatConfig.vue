@@ -1,10 +1,5 @@
 <template>
   <div class="lark-wechat-config">
-    <div class="lark-page-header">
-      <div class="header-title">企微配置</div>
-      <div class="header-desc">配置企业微信机器人 API 连接信息，管理实例绑定</div>
-    </div>
-
     <!-- 连接配置 -->
     <div class="config-section">
       <div class="section-title">

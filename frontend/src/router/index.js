@@ -39,10 +39,10 @@ const routes = [
         meta: { title: '系统日志' }
       },
       {
-        path: 'wechat-config',
-        name: 'WechatConfig',
-        component: () => import('@/views/system/WechatConfig.vue'),
-        meta: { title: '企微配置' }
+        path: 'external-config',
+        name: 'ExternalConfig',
+        component: () => import('@/views/system/ExternalConfig.vue'),
+        meta: { title: '外部服务配置' }
       },
       {
         path: 'downstream-order-reviews',
@@ -56,12 +56,6 @@ const routes = [
         component: () => import('@/views/wechat/RoomListeners.vue'),
         meta: { title: '群聊监听配置' }
       },
-      {
-        path: 'erp-sync',
-        name: 'ErpSyncConfig',
-        component: () => import('@/views/system/ErpSyncConfig.vue'),
-        meta: { title: 'ERP同步配置' }
-      }
     ]
   }
 ]

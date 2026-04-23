@@ -40,13 +40,9 @@
               <el-icon><Stamp /></el-icon>
               <template #title>权限管理</template>
             </el-menu-item>
-            <el-menu-item index="/wechat-config">
+            <el-menu-item index="/external-config">
               <el-icon><Link /></el-icon>
-              <template #title>企微配置</template>
-            </el-menu-item>
-            <el-menu-item index="/erp-sync">
-              <el-icon><Refresh /></el-icon>
-              <template #title>ERP同步配置</template>
+              <template #title>外部服务配置</template>
             </el-menu-item>
             <el-menu-item index="/logs">
               <el-icon><Document /></el-icon>
@@ -164,7 +160,7 @@ import { ElMessageBox } from 'element-plus'
 import {
   DataLine, User, Setting, Fold, Expand, Box, UserFilled,
   Search, Bell, SwitchButton, Stamp, Management, Goods, List, QuestionFilled,
-  ChatDotRound, Monitor, Link, Document, Refresh
+  ChatDotRound, Monitor, Link, Document
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 
