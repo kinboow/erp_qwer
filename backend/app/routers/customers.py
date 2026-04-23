@@ -1,0 +1,221 @@
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from typing import Optional, List
+from pydantic import BaseModel
+
+from app.database import get_db
+from app.models import User
+from app.dependencies import get_current_user
+from app.services.downstream_support import ensure_downstream_support_tables
+
+router = APIRouter(tags=["客户管理"])
+
+
+class CustomerWechatRoomDto(BaseModel):
+    instance_id: int
+    room_id: str
+    room_name: Optional[str] = None
+
+
+class CustomerCreateDto(BaseModel):
+    customer_name: str
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    company_name: Optional[str] = None
+    address: Optional[str] = None
+    remark: Optional[str] = None
+    erp_customer_id: Optional[str] = None
+    status: Optional[int] = 1
+    wechat_rooms: Optional[List[CustomerWechatRoomDto]] = []
+
+
+class CustomerUpdateDto(BaseModel):
+    customer_name: Optional[str] = None
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    company_name: Optional[str] = None
+    address: Optional[str] = None
+    remark: Optional[str] = None
+    erp_customer_id: Optional[str] = None
+    status: Optional[int] = None
+    wechat_rooms: Optional[List[CustomerWechatRoomDto]] = None
+
+
+def json_response(code=200, message="success", data=None):
+    resp = {"code": code, "message": message}
+    if data is not None:
+        resp["data"] = data
+    return resp
+
+
+def get_rooms_map(db: Session, customer_ids: List[int]):
+    room_map = {}
+    if not customer_ids:
+        return room_map
+
+    sql = text(
+        f"SELECT customer_id, instance_id, room_id, room_name FROM downstream_customer_wechat_rooms WHERE customer_id IN ({','.join([str(item) for item in customer_ids])}) ORDER BY id ASC"
+    )
+    rows = db.execute(sql).mappings().all()
+    for row in rows:
+        room_map.setdefault(row["customer_id"], []).append({
+            "instance_id": row["instance_id"],
+            "room_id": row["room_id"],
+            "room_name": row["room_name"]
+        })
+    return room_map
+
+
+def get_customer_rooms(db: Session, customer_id: int):
+    rows = db.execute(
+        text("SELECT instance_id, room_id, room_name FROM downstream_customer_wechat_rooms WHERE customer_id = :customer_id ORDER BY id ASC"),
+        {"customer_id": customer_id}
+    ).mappings().all()
+    return [
+        {"instance_id": row["instance_id"], "room_id": row["room_id"], "room_name": row["room_name"]}
+        for row in rows
+    ]
+
+
+def replace_customer_rooms(db: Session, customer_id: int, rooms: Optional[List[CustomerWechatRoomDto]]):
+    db.execute(text("DELETE FROM downstream_customer_wechat_rooms WHERE customer_id = :customer_id"), {"customer_id": customer_id})
+    if not rooms:
+        return
+    for room in rooms:
+        if not room.instance_id or not room.room_id:
+            continue
+        db.execute(
+            text("INSERT INTO downstream_customer_wechat_rooms (customer_id, instance_id, room_id, room_name) VALUES (:customer_id, :instance_id, :room_id, :room_name)"),
+            {
+                "customer_id": customer_id,
+                "instance_id": room.instance_id,
+                "room_id": room.room_id,
+                "room_name": room.room_name or ""
+            }
+        )
+
+
+@router.get("", summary="获取客户列表")
+async def get_customer_list(
+    page: int = Query(1, ge=1),
+    pageSize: int = Query(10, ge=1, le=100),
+    keyword: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ensure_downstream_support_tables(db)
+    params = {}
+    where_sql = "WHERE deleted_at IS NULL"
+    if keyword:
+        where_sql += " AND (customer_name LIKE :keyword OR contact_person LIKE :keyword OR phone LIKE :keyword OR company_name LIKE :keyword)"
+        params["keyword"] = f"%{keyword}%"
+
+    list_sql = text(f"SELECT id, customer_name, contact_person, phone, email, company_name, address, remark, erp_customer_id, status, created_at, updated_at FROM downstream_customers {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset")
+    params.update({"limit": pageSize, "offset": (page - 1) * pageSize})
+    rows = db.execute(list_sql, params).mappings().all()
+
+    count_params = dict(params)
+    count_params.pop("limit", None)
+    count_params.pop("offset", None)
+    count_sql = text(f"SELECT COUNT(*) as total FROM downstream_customers {where_sql}")
+    total = db.execute(count_sql, count_params).mappings().first()["total"]
+
+    customer_ids = [row["id"] for row in rows]
+    room_map = get_rooms_map(db, customer_ids)
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["wechat_rooms"] = room_map.get(row["id"], [])
+        result.append(item)
+
+    return json_response(message="获取成功", data={"list": result, "total": total, "page": page, "pageSize": pageSize})
+
+
+@router.get("/{customer_id}", summary="获取客户详情")
+async def get_customer_by_id(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ensure_downstream_support_tables(db)
+    row = db.execute(
+        text("SELECT id, customer_name, contact_person, phone, email, company_name, address, remark, erp_customer_id, status, created_at, updated_at FROM downstream_customers WHERE id = :customer_id AND deleted_at IS NULL"),
+        {"customer_id": customer_id}
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="客户不存在")
+
+    result = dict(row)
+    result["wechat_rooms"] = get_customer_rooms(db, customer_id)
+    return json_response(message="获取成功", data=result)
+
+
+@router.post("", summary="创建客户")
+async def create_customer(
+    payload: CustomerCreateDto,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ensure_downstream_support_tables(db)
+    if not payload.customer_name:
+        raise HTTPException(status_code=400, detail="客户名称不能为空")
+
+    result = db.execute(
+        text("INSERT INTO downstream_customers (customer_name, contact_person, phone, email, company_name, address, remark, erp_customer_id, status) VALUES (:customer_name, :contact_person, :phone, :email, :company_name, :address, :remark, :erp_customer_id, :status)"),
+        {
+            "customer_name": payload.customer_name,
+            "contact_person": payload.contact_person or "",
+            "phone": payload.phone or "",
+            "email": payload.email or "",
+            "company_name": payload.company_name or "",
+            "address": payload.address or "",
+            "remark": payload.remark or "",
+            "erp_customer_id": payload.erp_customer_id or "",
+            "status": payload.status or 1,
+        }
+    )
+    customer_id = result.lastrowid
+    replace_customer_rooms(db, customer_id, payload.wechat_rooms)
+    db.commit()
+    return json_response(message="创建成功", data={"id": customer_id, "customer_name": payload.customer_name})
+
+
+@router.put("/{customer_id}", summary="更新客户")
+async def update_customer(
+    customer_id: int,
+    payload: CustomerUpdateDto,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ensure_downstream_support_tables(db)
+    updates = []
+    params = {"customer_id": customer_id}
+    for key in ["customer_name", "contact_person", "phone", "email", "company_name", "address", "remark", "erp_customer_id", "status"]:
+        value = getattr(payload, key)
+        if value is not None:
+            updates.append(f"{key} = :{key}")
+            params[key] = value
+
+    if updates:
+        db.execute(text(f"UPDATE downstream_customers SET {', '.join(updates)}, updated_at = NOW() WHERE id = :customer_id AND deleted_at IS NULL"), params)
+
+    if payload.wechat_rooms is not None:
+        replace_customer_rooms(db, customer_id, payload.wechat_rooms)
+
+    db.commit()
+    return json_response(message="更新成功")
+
+
+@router.delete("/{customer_id}", summary="删除客户")
+async def delete_customer(
+    customer_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    db.execute(text("UPDATE downstream_customers SET deleted_at = NOW() WHERE id = :customer_id"), {"customer_id": customer_id})
+    db.execute(text("DELETE FROM downstream_customer_wechat_rooms WHERE customer_id = :customer_id"), {"customer_id": customer_id})
+    db.commit()
+    return json_response(message="删除成功")

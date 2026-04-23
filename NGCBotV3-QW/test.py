@@ -1,0 +1,51 @@
+from NGCBotApi import NGCBotApi
+
+bot = NGCBotApi()
+
+async def test():
+    res = await bot.sendText(robotId='1688855801554941', receive='S:1688855801554941_1688855801556699', content='测试123')
+    # res = await bot.sendText(robotId='wxid_ssy71mv9fb3y22', receive='wxid_7bizfilssbwi22', content='测试')
+    # res = await bot.sendAtText(robotId='wxid_ssy71mv9fb3y22', receive='56198206776@chatroom', content='测试', atList=['notify@all'])
+    # res = await bot.cdnDownloadWecom(robotId='wxid_iemewc0wrqyk22', url='3057020100044b304902010002043df595ba02032dcd030204441daa2402046911fedf042439393832613330642d313337312d343761382d626635622d3639316261303635646536330204052400050201000405004c55cf00', aesKey='6181705141bbdf996b61b47680cf11d8', authKey='v1_0PZhNrF7FiSNKMfHxNPLhjtFCWGh/XeDjBUm+Dz5OZlt1mIjWUZ17YKIRoCj42elBSLSRXOPruIdqOU9LN1CBNyaREBnRJi1IDknPrYyDuTSq2OwlQWYy/mOeMYgjxfzAC4rMvnn6yqquZfvsiJQte+AGASXrnz0LqD95hF9UPe3DOXjpLWErmWSSu6DbipWtiYJldA8UtA9/YTo505J4Fs1wZehCUu+lzICuQ==', savePath='C:/Users/Administrator/Downloads/1.txt')
+    #res = await bot.cdnDownload(robotId='wxid_iemewc0wrqyk22', fileId='3057020100044b304902010002043df595ba02032dcd030204441daa2402046911fedf042439393832613330642d313337312d343761382d626635622d3639316261303635646536330204052400050201000405004c55cf00', savePath='C:/Users/Administrator/Downloads/1.txt', fileType=5, aesKey='6181705141bbdf996b61b47680cf11d8')
+   # res = await bot.getInternalContacts(robotId='1688855118748144', pageNum=1, pageSize=100)
+   # res = await bot.getLoginInfo(robotId='1688855118748144')
+   #  res = await bot.getBotInfo(robotId='1688855801556699‘')
+    #res = await bot.refershQrcode(robotId='1688855118748144')
+    #res = await bot.logout(robotId='1688855118748144')
+    #res = await bot.getSelfQrcode(robotId='1688855118748144')
+    #res = await bot.getSelfQrcode(robotId='1688855118748144')
+    #res = await bot.cdnUpload(robotId='1688855118748144', filePath='C:/Users/Administrator/Downloads/mumu.jpg ', fileType=5)
+    #res = await bot.cdnDownload(robotId='1688855118748144', fileId='306a020102046330610201000204396e19f002030f55cb0204509f216f0204691c7065042466346461383436662d656464332d343164302d396265332d623731356464363561653461020310000502021f500410b0201685b60ccef514a709bdac1d67e80201050201000400', savePath='C:/Users/Administrator/Downloads/1.jpg', fileType=5, aesKey='37616263643865313531353231373037', fileSize=8006)
+    #res = await bot.getRooms(robotId='1688855118748144', pageNum=1, pageSize=100)
+    #res = await bot.getRoomMembers(robotId='1688855118748144', conversationId='R:10964725984753898', pageNum=1, pageSize=100)
+    #res = await bot.createRoom(robotId='1688855118748144', userList=['7881303224909748','7881301409264886'])
+    #res = await bot.modifyRoomName(robotId='1688855118748144', conversationId='R:10702010211595106', name='测试群')
+    #res = await bot.inviteRoomMember(robotId='1688855118748144', conversationId='R:10702010211595106', userList=['7881303224909748'])
+    #res = await bot.delRoomMember(robotId='1688855118748144', conversationId='R:10702010211595106', userList=['7881303224909748'])
+    #res = await bot.modifyRoomNotice(robotId='1688855118748144', roomConversationId='R:10702010211595106', notice='测试群公告')
+    #res = await bot.quitRoom(robotId='1688855118748144', conversationId='R:10964725984753898 ')
+    #res = await bot.dismissRoom(robotId='1688855118748144', conversationId='R:10702010211595106')
+    #res = await bot.addMemberAsContact(robotId='1688855118748144', roomConversationId='R:10702010211595106', userId='7881303224909748', corpId='1688855118748144', verify='测试')
+    #res = await bot.getInternalContacts(robotId='1688855118748144', pageNum=1, pageSize=100)
+    #res = await bot.getExternalContacts(robotId='1688855118748144', pageNum=1, pageSize=100)
+    #res = await bot.getContactInfo(robotId='1688855118748144', userId='7881303224909748')
+    #res = await bot.searchContact(robotId='1688855118748144', keyword='18310378278')
+    #res = await bot.modifyDesc(robotId='1688855118748144', userId='7881303224909748', desc='测试')
+    #res = await bot.modifyPhone(robotId='1688855118748144', userId='7881303224909748', phoneList=['18310378278'])
+    #res = await bot.sendText(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', content='测试')
+    #res = await bot.sendAtText(robotId='1688855118748144', receive='R:10784562348406459', content='测试', atList=['0'])
+    #res = await bot.sendFriendCard(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', wxId='7881303224909748')
+    #res = await bot.sendLinkCard(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', title='测试', desc='测试', url='https://www.baidu.com', imageUrl='https://www.baidu.com/img/bd_logo1.png')
+    #res = await bot.sendImage(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', imagePath='C:/Users/Administrator/Downloads/mumu.jpg')
+    #res = await bot.sendFile(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', filePath='C:/Users/Administrator/Downloads/mumu.jpg')
+    #res = await bot.sendVideo(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', videoPath='C:/Users/Administrator/Downloads/mumu.mp4')
+    #res = await bot.sendMiniapp(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', username='wxid_7bizfilssbwi22', appid='wxid_7bizfilssbwi22', title='测试', pagePath='pages/index/index', fileId='3057020100044b304902010002043df595ba02032dcd030204441daa2402046911fedf042439393832613330642d313337312d343761382d626635622d3639316261303635646536330204052400050201000405004c55cf00', aesKey='6181705141bbdf996b61b47680cf11d8', md5='37616263643865313531353231373037', size=8006)
+    # res = await bot.sendFinderVideo(robotId='1688855118748144', receive='S:1688855118748144_7881303224909748', avatar='https://www.baidu.com/img/bd_logo1.png', coverUrl='https://www.baidu.com/img/bd_logo1.png', desc='测试', feedType=1, nickname='测试', thumbUrl='https://www.baidu.com/img/bd_logo1.png', url='https://www.baidu.com')
+    print(res)
+
+if __name__ == '__main__':
+    import asyncio
+
+    asyncio.run(test())
+

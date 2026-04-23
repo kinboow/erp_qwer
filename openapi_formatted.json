@@ -1,0 +1,4003 @@
+{
+    "openapi": "3.1.0",
+    "info": {
+        "title": "ncloud2API",
+        "version": "0.2.0"
+    },
+    "paths": {
+        "/api/login": {
+            "post": {
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Api Login",
+                "operationId": "api_login_api_login_post",
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/LoginResult"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/account-set": {
+            "get": {
+                "tags": [
+                    "auth"
+                ],
+                "summary": "Api Account Set",
+                "operationId": "api_account_set_api_account_set_get",
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "additionalProperties": true,
+                                    "type": "object",
+                                    "title": "Response Api Account Set Api Account Set Get"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/products": {
+            "get": {
+                "tags": [
+                    "base"
+                ],
+                "summary": "Api Products",
+                "operationId": "api_products_api_products_get",
+                "parameters": [
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1,
+                            "title": "Page"
+                        }
+                    },
+                    {
+                        "name": "rows",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "maximum": 500,
+                            "minimum": 1,
+                            "default": 20,
+                            "title": "Rows"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ProductListResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sales-orders": {
+            "get": {
+                "tags": [
+                    "sales_orders"
+                ],
+                "summary": "Api Sales Orders",
+                "operationId": "api_sales_orders_api_sales_orders_get",
+                "parameters": [
+                    {
+                        "name": "dates",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "description": "\u5f00\u59cb\u65e5\u671f, \u4f8b\u5982 2026-04-01",
+                            "title": "Dates"
+                        },
+                        "description": "\u5f00\u59cb\u65e5\u671f, \u4f8b\u5982 2026-04-01"
+                    },
+                    {
+                        "name": "datee",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "description": "\u7ed3\u675f\u65e5\u671f, \u4f8b\u5982 2026-04-13",
+                            "title": "Datee"
+                        },
+                        "description": "\u7ed3\u675f\u65e5\u671f, \u4f8b\u5982 2026-04-13"
+                    },
+                    {
+                        "name": "state",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "description": "\u5355\u636e\u72b6\u6001, \u9ed8\u8ba4 0 \u548c 1",
+                            "title": "State"
+                        },
+                        "description": "\u5355\u636e\u72b6\u6001, \u9ed8\u8ba4 0 \u548c 1"
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1,
+                            "title": "Page"
+                        }
+                    },
+                    {
+                        "name": "rows",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "maximum": 1000,
+                            "minimum": 1,
+                            "default": 20,
+                            "title": "Rows"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SalesOrderListResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "sales_orders"
+                ],
+                "summary": "Api Create Sales Order",
+                "operationId": "api_create_sales_order_api_sales_orders_post",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CreateSalesOrderRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WriteOperationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sales-orders/{dh}": {
+            "get": {
+                "tags": [
+                    "sales_orders"
+                ],
+                "summary": "Api Sales Order Detail",
+                "operationId": "api_sales_order_detail_api_sales_orders__dh__get",
+                "parameters": [
+                    {
+                        "name": "dh",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dh"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/SalesOrderDetail"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "put": {
+                "tags": [
+                    "sales_orders"
+                ],
+                "summary": "Api Update Sales Order",
+                "operationId": "api_update_sales_order_api_sales_orders__dh__put",
+                "parameters": [
+                    {
+                        "name": "dh",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dh"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/UpdateSalesOrderRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WriteOperationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sales-orders/{dh}/audit": {
+            "post": {
+                "tags": [
+                    "sales_orders"
+                ],
+                "summary": "Api Audit Sales Order",
+                "operationId": "api_audit_sales_order_api_sales_orders__dh__audit_post",
+                "parameters": [
+                    {
+                        "name": "dh",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dh"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AuditActionRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WriteOperationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sales-shipments": {
+            "get": {
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Api Shipments List",
+                "operationId": "api_shipments_list_api_sales_shipments_get",
+                "parameters": [
+                    {
+                        "name": "dates",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dates"
+                        }
+                    },
+                    {
+                        "name": "datee",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Datee"
+                        }
+                    },
+                    {
+                        "name": "state",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string"
+                                    }
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "State"
+                        }
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1,
+                            "title": "Page"
+                        }
+                    },
+                    {
+                        "name": "rows",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "maximum": 1000,
+                            "minimum": 1,
+                            "default": 20,
+                            "title": "Rows"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ShipmentListResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "post": {
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Api Create Shipment",
+                "operationId": "api_create_shipment_api_sales_shipments_post",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CreateShipmentRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "201": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WriteOperationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sales-shipments/{dh}": {
+            "get": {
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Api Shipment Detail",
+                "operationId": "api_shipment_detail_api_sales_shipments__dh__get",
+                "parameters": [
+                    {
+                        "name": "dh",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dh"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ShipmentDetail"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "put": {
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Api Update Shipment",
+                "operationId": "api_update_shipment_api_sales_shipments__dh__put",
+                "parameters": [
+                    {
+                        "name": "dh",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dh"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/UpdateShipmentRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WriteOperationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sales-shipments/{dh}/audit": {
+            "post": {
+                "tags": [
+                    "shipments"
+                ],
+                "summary": "Api Audit Shipment",
+                "operationId": "api_audit_shipment_api_sales_shipments__dh__audit_post",
+                "parameters": [
+                    {
+                        "name": "dh",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dh"
+                        }
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/AuditActionRequest"
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/WriteOperationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/sales-reconciliation": {
+            "get": {
+                "tags": [
+                    "reconciliation"
+                ],
+                "summary": "Api Reconciliation",
+                "operationId": "api_reconciliation_api_sales_reconciliation_get",
+                "parameters": [
+                    {
+                        "name": "dates",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "description": "\u8d77\u59cb\u65e5\u671f, \u4f8b\u5982 2026-04-01",
+                            "title": "Dates"
+                        },
+                        "description": "\u8d77\u59cb\u65e5\u671f, \u4f8b\u5982 2026-04-01"
+                    },
+                    {
+                        "name": "datee",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "description": "\u7ed3\u675f\u65e5\u671f, \u4f8b\u5982 2026-04-14",
+                            "title": "Datee"
+                        },
+                        "description": "\u7ed3\u675f\u65e5\u671f, \u4f8b\u5982 2026-04-14"
+                    },
+                    {
+                        "name": "customer_name",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Customer Name"
+                        }
+                    },
+                    {
+                        "name": "customer_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Customer Id"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/ReconciliationResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/unshipped-report": {
+            "get": {
+                "tags": [
+                    "unshipped-report"
+                ],
+                "summary": "Api Unshipped Report",
+                "operationId": "api_unshipped_report_api_unshipped_report_get",
+                "parameters": [
+                    {
+                        "name": "dates",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Dates"
+                        }
+                    },
+                    {
+                        "name": "datee",
+                        "in": "query",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "title": "Datee"
+                        }
+                    },
+                    {
+                        "name": "customer_id",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Customer Id"
+                        }
+                    },
+                    {
+                        "name": "brand",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Brand"
+                        }
+                    },
+                    {
+                        "name": "product_no",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Product No"
+                        }
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1,
+                            "title": "Page"
+                        }
+                    },
+                    {
+                        "name": "rows",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "maximum": 5000,
+                            "minimum": 1,
+                            "default": 200,
+                            "title": "Rows"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/UnshippedReportResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/unshipped-report/cancel": {
+            "post": {
+                "tags": [
+                    "unshipped-report"
+                ],
+                "summary": "Api Cancel Shipment",
+                "operationId": "api_cancel_shipment_api_unshipped_report_cancel_post",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CancelRestoreRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CancelRestoreResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/unshipped-report/restore": {
+            "post": {
+                "tags": [
+                    "unshipped-report"
+                ],
+                "summary": "Api Restore Order",
+                "operationId": "api_restore_order_api_unshipped_report_restore_post",
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/CancelRestoreRequest"
+                            }
+                        }
+                    },
+                    "required": true
+                },
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/CancelRestoreResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/api/inventory": {
+            "get": {
+                "tags": [
+                    "inventory"
+                ],
+                "summary": "Api Inventory",
+                "operationId": "api_inventory_api_inventory_get",
+                "parameters": [
+                    {
+                        "name": "warehouse",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Warehouse"
+                        }
+                    },
+                    {
+                        "name": "product_type",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Product Type"
+                        }
+                    },
+                    {
+                        "name": "product_no",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Product No"
+                        }
+                    },
+                    {
+                        "name": "product_name",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "null"
+                                }
+                            ],
+                            "title": "Product Name"
+                        }
+                    },
+                    {
+                        "name": "show_zero",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "boolean",
+                            "default": false,
+                            "title": "Show Zero"
+                        }
+                    },
+                    {
+                        "name": "show_negative",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "boolean",
+                            "default": false,
+                            "title": "Show Negative"
+                        }
+                    },
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1,
+                            "title": "Page"
+                        }
+                    },
+                    {
+                        "name": "rows",
+                        "in": "query",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "maximum": 5000,
+                            "minimum": 1,
+                            "default": 200,
+                            "title": "Rows"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/InventoryResponse"
+                                }
+                            }
+                        }
+                    },
+                    "422": {
+                        "description": "Validation Error",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/HTTPValidationError"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/health": {
+            "get": {
+                "summary": "Health",
+                "operationId": "health_health_get",
+                "responses": {
+                    "200": {
+                        "description": "Successful Response",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "additionalProperties": {
+                                        "type": "string"
+                                    },
+                                    "type": "object",
+                                    "title": "Response Health Health Get"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "schemas": {
+            "AuditAction": {
+                "type": "string",
+                "enum": [
+                    "audit",
+                    "unaudit",
+                    "void"
+                ],
+                "title": "AuditAction"
+            },
+            "AuditActionRequest": {
+                "properties": {
+                    "action": {
+                        "$ref": "#/components/schemas/AuditAction"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "action"
+                ],
+                "title": "AuditActionRequest"
+            },
+            "CancelRestoreRequest": {
+                "properties": {
+                    "ids": {
+                        "items": {
+                            "type": "string"
+                        },
+                        "type": "array",
+                        "minItems": 1,
+                        "title": "Ids",
+                        "description": "\u62a5\u8868\u884c ID \u5217\u8868"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "ids"
+                ],
+                "title": "CancelRestoreRequest"
+            },
+            "CancelRestoreResponse": {
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "title": "Message"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "message"
+                ],
+                "title": "CancelRestoreResponse"
+            },
+            "CreateOrderDetailRow": {
+                "properties": {
+                    "brand": {
+                        "type": "string",
+                        "title": "Brand",
+                        "default": ""
+                    },
+                    "product_no": {
+                        "type": "string",
+                        "title": "Product No"
+                    },
+                    "color": {
+                        "type": "string",
+                        "title": "Color",
+                        "default": ""
+                    },
+                    "sizes": {
+                        "items": {
+                            "$ref": "#/components/schemas/SizeQty"
+                        },
+                        "type": "array",
+                        "title": "Sizes"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "title": "Unit",
+                        "default": ""
+                    },
+                    "price": {
+                        "type": "number",
+                        "title": "Price",
+                        "default": 0
+                    },
+                    "discount": {
+                        "type": "integer",
+                        "title": "Discount",
+                        "default": 100
+                    },
+                    "packaging": {
+                        "type": "string",
+                        "title": "Packaging",
+                        "default": ""
+                    },
+                    "customer_product_no": {
+                        "type": "string",
+                        "title": "Customer Product No",
+                        "default": ""
+                    },
+                    "grade": {
+                        "type": "string",
+                        "title": "Grade",
+                        "default": ""
+                    },
+                    "product_spec": {
+                        "type": "string",
+                        "title": "Product Spec",
+                        "default": ""
+                    },
+                    "semi_product_no": {
+                        "type": "string",
+                        "title": "Semi Product No",
+                        "default": ""
+                    },
+                    "linked_order_ref": {
+                        "type": "string",
+                        "title": "Linked Order Ref",
+                        "default": ""
+                    },
+                    "remark": {
+                        "type": "string",
+                        "title": "Remark",
+                        "default": ""
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "product_no",
+                    "sizes"
+                ],
+                "title": "CreateOrderDetailRow"
+            },
+            "CreateSalesOrderRequest": {
+                "properties": {
+                    "customer_id": {
+                        "type": "string",
+                        "title": "Customer Id",
+                        "description": "\u5ba2\u6237\u7f16\u53f7 (ERP: khid)"
+                    },
+                    "order_date": {
+                        "type": "string",
+                        "title": "Order Date",
+                        "description": "\u8ba2\u5355\u65e5\u671f YYYY-MM-DD HH:mm:ss"
+                    },
+                    "customer_addr": {
+                        "type": "string",
+                        "title": "Customer Addr",
+                        "default": ""
+                    },
+                    "customer_tel": {
+                        "type": "string",
+                        "title": "Customer Tel",
+                        "default": ""
+                    },
+                    "shipping_addr": {
+                        "type": "string",
+                        "title": "Shipping Addr",
+                        "default": ""
+                    },
+                    "shipping_tel": {
+                        "type": "string",
+                        "title": "Shipping Tel",
+                        "default": ""
+                    },
+                    "shipping_method": {
+                        "type": "string",
+                        "title": "Shipping Method",
+                        "default": ""
+                    },
+                    "salesperson": {
+                        "type": "string",
+                        "title": "Salesperson",
+                        "default": ""
+                    },
+                    "order_ref": {
+                        "type": "string",
+                        "title": "Order Ref",
+                        "default": ""
+                    },
+                    "currency": {
+                        "type": "string",
+                        "title": "Currency",
+                        "default": ""
+                    },
+                    "brand": {
+                        "type": "string",
+                        "title": "Brand",
+                        "default": ""
+                    },
+                    "customer_type": {
+                        "type": "string",
+                        "title": "Customer Type",
+                        "default": ""
+                    },
+                    "delivery_date": {
+                        "type": "string",
+                        "title": "Delivery Date",
+                        "default": ""
+                    },
+                    "contact_person": {
+                        "type": "string",
+                        "title": "Contact Person",
+                        "default": ""
+                    },
+                    "plan": {
+                        "type": "string",
+                        "title": "Plan",
+                        "default": "\u5426"
+                    },
+                    "price_print": {
+                        "type": "integer",
+                        "title": "Price Print",
+                        "default": 1
+                    },
+                    "payment_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Payment Amount"
+                    },
+                    "remark": {
+                        "type": "string",
+                        "title": "Remark",
+                        "default": ""
+                    },
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/CreateOrderDetailRow"
+                        },
+                        "type": "array",
+                        "minItems": 1,
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "customer_id",
+                    "order_date",
+                    "detail"
+                ],
+                "title": "CreateSalesOrderRequest"
+            },
+            "CreateShipmentDetailRow": {
+                "properties": {
+                    "brand": {
+                        "type": "string",
+                        "title": "Brand",
+                        "default": ""
+                    },
+                    "product_no": {
+                        "type": "string",
+                        "title": "Product No"
+                    },
+                    "color": {
+                        "type": "string",
+                        "title": "Color"
+                    },
+                    "sizes": {
+                        "items": {
+                            "$ref": "#/components/schemas/SizeQty"
+                        },
+                        "type": "array",
+                        "title": "Sizes"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "title": "Unit",
+                        "default": ""
+                    },
+                    "price": {
+                        "type": "number",
+                        "title": "Price",
+                        "default": 0
+                    },
+                    "discount": {
+                        "type": "integer",
+                        "title": "Discount",
+                        "default": 100
+                    },
+                    "packaging": {
+                        "type": "string",
+                        "title": "Packaging",
+                        "default": ""
+                    },
+                    "customer_product_no": {
+                        "type": "string",
+                        "title": "Customer Product No",
+                        "default": ""
+                    },
+                    "order_ref_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Order Ref Id"
+                    },
+                    "product_spec": {
+                        "type": "string",
+                        "title": "Product Spec",
+                        "default": ""
+                    },
+                    "semi_product_no": {
+                        "type": "string",
+                        "title": "Semi Product No",
+                        "default": ""
+                    },
+                    "material": {
+                        "type": "string",
+                        "title": "Material",
+                        "default": ""
+                    },
+                    "remark": {
+                        "type": "string",
+                        "title": "Remark",
+                        "default": ""
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "product_no",
+                    "color",
+                    "sizes"
+                ],
+                "title": "CreateShipmentDetailRow"
+            },
+            "CreateShipmentRequest": {
+                "properties": {
+                    "customer_id": {
+                        "type": "string",
+                        "title": "Customer Id",
+                        "description": "\u5ba2\u6237\u7f16\u53f7 (ERP: khid)"
+                    },
+                    "shipment_date": {
+                        "type": "string",
+                        "title": "Shipment Date",
+                        "description": "\u53d1\u8d27\u65e5\u671f YYYY-MM-DD HH:mm:ss"
+                    },
+                    "warehouse": {
+                        "type": "string",
+                        "title": "Warehouse",
+                        "description": "\u53d1\u8d27\u4ed3\u5e93\u7f16\u53f7 (ERP: ck)"
+                    },
+                    "customer_addr": {
+                        "type": "string",
+                        "title": "Customer Addr",
+                        "default": ""
+                    },
+                    "shipping_addr": {
+                        "type": "string",
+                        "title": "Shipping Addr",
+                        "default": ""
+                    },
+                    "shipping_tel": {
+                        "type": "string",
+                        "title": "Shipping Tel",
+                        "default": ""
+                    },
+                    "shipping_method": {
+                        "type": "string",
+                        "title": "Shipping Method",
+                        "default": ""
+                    },
+                    "delivery_person": {
+                        "type": "string",
+                        "title": "Delivery Person",
+                        "default": ""
+                    },
+                    "tracking_no": {
+                        "type": "string",
+                        "title": "Tracking No",
+                        "default": ""
+                    },
+                    "freight": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Freight"
+                    },
+                    "salesperson": {
+                        "type": "string",
+                        "title": "Salesperson",
+                        "default": ""
+                    },
+                    "contact_person": {
+                        "type": "string",
+                        "title": "Contact Person",
+                        "default": ""
+                    },
+                    "contact_tel": {
+                        "type": "string",
+                        "title": "Contact Tel",
+                        "default": ""
+                    },
+                    "currency": {
+                        "type": "string",
+                        "title": "Currency",
+                        "default": ""
+                    },
+                    "customer_type": {
+                        "type": "string",
+                        "title": "Customer Type",
+                        "default": ""
+                    },
+                    "handler": {
+                        "type": "string",
+                        "title": "Handler",
+                        "default": ""
+                    },
+                    "price_print": {
+                        "type": "integer",
+                        "title": "Price Print",
+                        "default": 1
+                    },
+                    "payment_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Payment Amount"
+                    },
+                    "remark": {
+                        "type": "string",
+                        "title": "Remark",
+                        "default": ""
+                    },
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/CreateShipmentDetailRow"
+                        },
+                        "type": "array",
+                        "minItems": 1,
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "customer_id",
+                    "shipment_date",
+                    "warehouse",
+                    "detail"
+                ],
+                "title": "CreateShipmentRequest"
+            },
+            "HTTPValidationError": {
+                "properties": {
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/ValidationError"
+                        },
+                        "type": "array",
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "title": "HTTPValidationError"
+            },
+            "InventoryItem": {
+                "properties": {
+                    "warehouse": {
+                        "type": "string",
+                        "title": "Warehouse"
+                    },
+                    "product_type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Product Type",
+                        "default": ""
+                    },
+                    "product_no": {
+                        "type": "string",
+                        "title": "Product No"
+                    },
+                    "product_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Product Name",
+                        "default": ""
+                    },
+                    "material": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Material",
+                        "default": ""
+                    },
+                    "image_url": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Image Url",
+                        "default": ""
+                    },
+                    "color": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Color",
+                        "default": ""
+                    },
+                    "unit": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Unit",
+                        "default": ""
+                    },
+                    "qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Qty",
+                        "default": 0
+                    },
+                    "sale_price": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Sale Price",
+                        "default": 0
+                    },
+                    "cost_price": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Cost Price",
+                        "default": 0
+                    },
+                    "amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Amount",
+                        "default": 0
+                    },
+                    "in_transit_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "In Transit Qty",
+                        "default": 0
+                    },
+                    "sizes": {
+                        "items": {
+                            "$ref": "#/components/schemas/SizeQty"
+                        },
+                        "type": "array",
+                        "title": "Sizes",
+                        "default": []
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "warehouse",
+                    "product_no"
+                ],
+                "title": "InventoryItem"
+            },
+            "InventoryResponse": {
+                "properties": {
+                    "total": {
+                        "type": "integer",
+                        "title": "Total"
+                    },
+                    "rows": {
+                        "items": {
+                            "$ref": "#/components/schemas/InventoryItem"
+                        },
+                        "type": "array",
+                        "title": "Rows"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "total",
+                    "rows"
+                ],
+                "title": "InventoryResponse"
+            },
+            "LoginResult": {
+                "properties": {
+                    "account_set_name": {
+                        "type": "string",
+                        "title": "Account Set Name"
+                    },
+                    "qrcode": {
+                        "type": "string",
+                        "title": "Qrcode"
+                    },
+                    "project_url": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Project Url"
+                    },
+                    "login_rs": {
+                        "type": "string",
+                        "title": "Login Rs"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "account_set_name",
+                    "qrcode",
+                    "login_rs"
+                ],
+                "title": "LoginResult"
+            },
+            "ProductListResponse": {
+                "properties": {
+                    "total": {
+                        "type": "integer",
+                        "title": "Total"
+                    },
+                    "rows": {
+                        "items": {
+                            "additionalProperties": true,
+                            "type": "object"
+                        },
+                        "type": "array",
+                        "title": "Rows"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "total",
+                    "rows"
+                ],
+                "title": "ProductListResponse"
+            },
+            "ReconciliationResponse": {
+                "properties": {
+                    "summary": {
+                        "$ref": "#/components/schemas/ReconciliationSummary"
+                    },
+                    "total": {
+                        "type": "integer",
+                        "title": "Total",
+                        "default": 0
+                    },
+                    "rows": {
+                        "items": {
+                            "$ref": "#/components/schemas/ReconciliationRow"
+                        },
+                        "type": "array",
+                        "title": "Rows",
+                        "default": []
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "summary"
+                ],
+                "title": "ReconciliationResponse"
+            },
+            "ReconciliationRow": {
+                "properties": {
+                    "date": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Date"
+                    },
+                    "type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Type"
+                    },
+                    "qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Qty"
+                    },
+                    "amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Amount"
+                    },
+                    "receivable": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Receivable"
+                    },
+                    "received": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Received"
+                    },
+                    "balance": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Balance"
+                    },
+                    "order_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Order No"
+                    }
+                },
+                "type": "object",
+                "title": "ReconciliationRow"
+            },
+            "ReconciliationSummary": {
+                "properties": {
+                    "customer_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Name"
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "title": "Date From",
+                        "default": ""
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "title": "Date To",
+                        "default": ""
+                    },
+                    "opening_balance": {
+                        "type": "number",
+                        "title": "Opening Balance",
+                        "default": 0.0
+                    },
+                    "total_shipment": {
+                        "type": "number",
+                        "title": "Total Shipment",
+                        "default": 0.0
+                    },
+                    "total_return": {
+                        "type": "number",
+                        "title": "Total Return",
+                        "default": 0.0
+                    },
+                    "total_payment": {
+                        "type": "number",
+                        "title": "Total Payment",
+                        "default": 0.0
+                    },
+                    "closing_balance": {
+                        "type": "number",
+                        "title": "Closing Balance",
+                        "default": 0.0
+                    }
+                },
+                "type": "object",
+                "title": "ReconciliationSummary"
+            },
+            "SalesOrderDetail": {
+                "properties": {
+                    "main": {
+                        "$ref": "#/components/schemas/SalesOrderMainInfo"
+                    },
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/SalesOrderDetailRow"
+                        },
+                        "type": "array",
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "main",
+                    "detail"
+                ],
+                "title": "SalesOrderDetail"
+            },
+            "SalesOrderDetailRow": {
+                "properties": {
+                    "brand": {
+                        "type": "string",
+                        "title": "Brand"
+                    },
+                    "product_no": {
+                        "type": "string",
+                        "title": "Product No"
+                    },
+                    "sizes": {
+                        "items": {
+                            "$ref": "#/components/schemas/SizeQty"
+                        },
+                        "type": "array",
+                        "title": "Sizes"
+                    },
+                    "grade": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Grade",
+                        "default": ""
+                    },
+                    "customer_product_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Product No",
+                        "default": ""
+                    },
+                    "product_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Product Name",
+                        "default": ""
+                    },
+                    "packaging": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Packaging",
+                        "default": ""
+                    },
+                    "color": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Color",
+                        "default": ""
+                    },
+                    "price": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Price",
+                        "default": 0
+                    },
+                    "discount": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Discount",
+                        "default": 100
+                    },
+                    "unit": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Unit",
+                        "default": ""
+                    },
+                    "remark": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Remark",
+                        "default": ""
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "brand",
+                    "product_no",
+                    "sizes"
+                ],
+                "title": "SalesOrderDetailRow"
+            },
+            "SalesOrderListItem": {
+                "properties": {
+                    "state": {
+                        "type": "integer",
+                        "title": "State"
+                    },
+                    "print_count": {
+                        "type": "integer",
+                        "title": "Print Count",
+                        "default": 0
+                    },
+                    "order_no": {
+                        "type": "string",
+                        "title": "Order No"
+                    },
+                    "order_date": {
+                        "type": "string",
+                        "title": "Order Date"
+                    },
+                    "creator": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Creator",
+                        "default": ""
+                    },
+                    "customer_id": {
+                        "type": "string",
+                        "title": "Customer Id"
+                    },
+                    "customer_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Name",
+                        "default": ""
+                    },
+                    "customer_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Tel",
+                        "default": ""
+                    },
+                    "customer_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Addr",
+                        "default": ""
+                    },
+                    "product_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Product No",
+                        "default": ""
+                    },
+                    "total_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Amount",
+                        "default": 0
+                    },
+                    "total_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Qty",
+                        "default": 0
+                    },
+                    "salesperson": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Salesperson",
+                        "default": ""
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "state",
+                    "order_no",
+                    "order_date",
+                    "customer_id"
+                ],
+                "title": "SalesOrderListItem"
+            },
+            "SalesOrderListResponse": {
+                "properties": {
+                    "total": {
+                        "type": "integer",
+                        "title": "Total"
+                    },
+                    "rows": {
+                        "items": {
+                            "$ref": "#/components/schemas/SalesOrderListItem"
+                        },
+                        "type": "array",
+                        "title": "Rows"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "total",
+                    "rows"
+                ],
+                "title": "SalesOrderListResponse"
+            },
+            "SalesOrderMainInfo": {
+                "properties": {
+                    "order_no": {
+                        "type": "string",
+                        "title": "Order No"
+                    },
+                    "order_date": {
+                        "type": "string",
+                        "title": "Order Date"
+                    },
+                    "customer_id": {
+                        "type": "string",
+                        "title": "Customer Id"
+                    },
+                    "customer_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Name"
+                    },
+                    "state": {
+                        "type": "integer",
+                        "title": "State"
+                    },
+                    "total_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Qty",
+                        "default": 0
+                    },
+                    "total_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Amount",
+                        "default": 0
+                    },
+                    "creator": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Creator",
+                        "default": ""
+                    },
+                    "customer_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Tel",
+                        "default": ""
+                    },
+                    "customer_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Addr",
+                        "default": ""
+                    },
+                    "salesperson": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Salesperson",
+                        "default": ""
+                    },
+                    "shipping_method": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Method",
+                        "default": ""
+                    },
+                    "shipping_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Tel",
+                        "default": ""
+                    },
+                    "shipping_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Addr",
+                        "default": ""
+                    },
+                    "order_ref": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Order Ref",
+                        "default": ""
+                    },
+                    "delivery_date": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Delivery Date",
+                        "default": ""
+                    },
+                    "plan": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Plan",
+                        "default": ""
+                    },
+                    "currency": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Currency",
+                        "default": ""
+                    },
+                    "price_print": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Price Print"
+                    },
+                    "payment_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Payment Amount"
+                    },
+                    "brand": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Brand",
+                        "default": ""
+                    },
+                    "customer_type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Type",
+                        "default": ""
+                    },
+                    "contact_person": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Contact Person",
+                        "default": ""
+                    },
+                    "discount_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Discount Amount"
+                    },
+                    "remark": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Remark",
+                        "default": ""
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "order_no",
+                    "order_date",
+                    "customer_id",
+                    "state"
+                ],
+                "title": "SalesOrderMainInfo"
+            },
+            "ShipmentDetail": {
+                "properties": {
+                    "main": {
+                        "$ref": "#/components/schemas/ShipmentMainInfo"
+                    },
+                    "detail": {
+                        "items": {
+                            "$ref": "#/components/schemas/ShipmentDetailRow"
+                        },
+                        "type": "array",
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "main",
+                    "detail"
+                ],
+                "title": "ShipmentDetail"
+            },
+            "ShipmentDetailRow": {
+                "properties": {
+                    "product_no": {
+                        "type": "string",
+                        "title": "Product No"
+                    },
+                    "color": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Color"
+                    },
+                    "sizes": {
+                        "items": {
+                            "$ref": "#/components/schemas/SizeQty"
+                        },
+                        "type": "array",
+                        "title": "Sizes"
+                    },
+                    "order_ref": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Order Ref",
+                        "default": ""
+                    },
+                    "brand": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Brand",
+                        "default": ""
+                    },
+                    "customer_product_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Product No",
+                        "default": ""
+                    },
+                    "product_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Product Name",
+                        "default": ""
+                    },
+                    "packaging": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Packaging",
+                        "default": ""
+                    },
+                    "price": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Price",
+                        "default": 0
+                    },
+                    "discount": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Discount",
+                        "default": 100
+                    },
+                    "unit": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Unit",
+                        "default": ""
+                    },
+                    "remark": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Remark",
+                        "default": ""
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "product_no",
+                    "sizes"
+                ],
+                "title": "ShipmentDetailRow"
+            },
+            "ShipmentListItem": {
+                "properties": {
+                    "order_no": {
+                        "type": "string",
+                        "title": "Order No"
+                    },
+                    "order_date": {
+                        "type": "string",
+                        "title": "Order Date"
+                    },
+                    "customer_id": {
+                        "type": "string",
+                        "title": "Customer Id"
+                    },
+                    "customer_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Addr",
+                        "default": ""
+                    },
+                    "state": {
+                        "type": "integer",
+                        "title": "State"
+                    },
+                    "total_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Qty",
+                        "default": 0
+                    },
+                    "total_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Amount",
+                        "default": 0
+                    },
+                    "tracking_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Tracking No",
+                        "default": ""
+                    },
+                    "customer_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Name",
+                        "default": ""
+                    },
+                    "print_count": {
+                        "type": "integer",
+                        "title": "Print Count",
+                        "default": 0
+                    },
+                    "salesperson": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Salesperson",
+                        "default": ""
+                    },
+                    "shipping_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Addr",
+                        "default": ""
+                    },
+                    "shipping_method": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Method",
+                        "default": ""
+                    },
+                    "freight": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Freight"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "order_no",
+                    "order_date",
+                    "customer_id",
+                    "state"
+                ],
+                "title": "ShipmentListItem"
+            },
+            "ShipmentListResponse": {
+                "properties": {
+                    "total": {
+                        "type": "integer",
+                        "title": "Total"
+                    },
+                    "rows": {
+                        "items": {
+                            "$ref": "#/components/schemas/ShipmentListItem"
+                        },
+                        "type": "array",
+                        "title": "Rows"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "total",
+                    "rows"
+                ],
+                "title": "ShipmentListResponse"
+            },
+            "ShipmentMainInfo": {
+                "properties": {
+                    "order_no": {
+                        "type": "string",
+                        "title": "Order No"
+                    },
+                    "order_date": {
+                        "type": "string",
+                        "title": "Order Date"
+                    },
+                    "customer_id": {
+                        "type": "string",
+                        "title": "Customer Id"
+                    },
+                    "customer_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Addr",
+                        "default": ""
+                    },
+                    "state": {
+                        "type": "integer",
+                        "title": "State"
+                    },
+                    "warehouse": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Warehouse",
+                        "default": ""
+                    },
+                    "tracking_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Tracking No",
+                        "default": ""
+                    },
+                    "total_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Amount",
+                        "default": 0
+                    },
+                    "remark": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Remark",
+                        "default": ""
+                    },
+                    "customer_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Name",
+                        "default": ""
+                    },
+                    "creator": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Creator",
+                        "default": ""
+                    },
+                    "handler": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Handler",
+                        "default": ""
+                    },
+                    "customer_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Tel",
+                        "default": ""
+                    },
+                    "shipping_method": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Method",
+                        "default": ""
+                    },
+                    "shipping_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Tel",
+                        "default": ""
+                    },
+                    "shipping_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Addr",
+                        "default": ""
+                    },
+                    "freight": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Freight"
+                    },
+                    "payment_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Payment Amount"
+                    },
+                    "salesperson": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Salesperson",
+                        "default": ""
+                    },
+                    "delivery_person": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Delivery Person",
+                        "default": ""
+                    },
+                    "customer_type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Type",
+                        "default": ""
+                    },
+                    "currency": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Currency",
+                        "default": ""
+                    },
+                    "price_print": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Price Print"
+                    },
+                    "contact_person": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Contact Person",
+                        "default": ""
+                    },
+                    "contact_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Contact Tel",
+                        "default": ""
+                    },
+                    "total_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Total Qty",
+                        "default": 0
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "order_no",
+                    "order_date",
+                    "customer_id",
+                    "state"
+                ],
+                "title": "ShipmentMainInfo"
+            },
+            "SizeQty": {
+                "properties": {
+                    "size": {
+                        "type": "string",
+                        "title": "Size"
+                    },
+                    "qty": {
+                        "type": "integer",
+                        "title": "Qty"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "size",
+                    "qty"
+                ],
+                "title": "SizeQty"
+            },
+            "UnshippedReportItem": {
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "title": "Id"
+                    },
+                    "order_no": {
+                        "type": "string",
+                        "title": "Order No"
+                    },
+                    "order_date": {
+                        "type": "string",
+                        "title": "Order Date"
+                    },
+                    "customer_id": {
+                        "type": "string",
+                        "title": "Customer Id"
+                    },
+                    "customer_type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Type",
+                        "default": ""
+                    },
+                    "customer_order_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Order No",
+                        "default": ""
+                    },
+                    "brand": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Brand",
+                        "default": ""
+                    },
+                    "product_no": {
+                        "type": "string",
+                        "title": "Product No"
+                    },
+                    "product_name": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Product Name",
+                        "default": ""
+                    },
+                    "color": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Color",
+                        "default": ""
+                    },
+                    "unit": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Unit",
+                        "default": ""
+                    },
+                    "order_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Order Qty",
+                        "default": 0
+                    },
+                    "shipped_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipped Qty",
+                        "default": 0
+                    },
+                    "returned_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Returned Qty",
+                        "default": 0
+                    },
+                    "unshipped_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Unshipped Qty",
+                        "default": 0
+                    },
+                    "unshipped_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Unshipped Amount",
+                        "default": 0
+                    },
+                    "stock_qty": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Stock Qty",
+                        "default": 0
+                    },
+                    "price": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Price",
+                        "default": 0
+                    },
+                    "cost_price": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Cost Price",
+                        "default": 0
+                    },
+                    "tag_price": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Tag Price",
+                        "default": 0
+                    },
+                    "creator": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Creator",
+                        "default": ""
+                    },
+                    "remark": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Remark",
+                        "default": ""
+                    },
+                    "unshipped_sizes": {
+                        "items": {
+                            "$ref": "#/components/schemas/SizeQty"
+                        },
+                        "type": "array",
+                        "title": "Unshipped Sizes",
+                        "default": []
+                    },
+                    "order_sizes": {
+                        "items": {
+                            "$ref": "#/components/schemas/SizeQty"
+                        },
+                        "type": "array",
+                        "title": "Order Sizes",
+                        "default": []
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "id",
+                    "order_no",
+                    "order_date",
+                    "customer_id",
+                    "product_no"
+                ],
+                "title": "UnshippedReportItem"
+            },
+            "UnshippedReportResponse": {
+                "properties": {
+                    "total": {
+                        "type": "integer",
+                        "title": "Total"
+                    },
+                    "rows": {
+                        "items": {
+                            "$ref": "#/components/schemas/UnshippedReportItem"
+                        },
+                        "type": "array",
+                        "title": "Rows"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "total",
+                    "rows"
+                ],
+                "title": "UnshippedReportResponse"
+            },
+            "UpdateSalesOrderRequest": {
+                "properties": {
+                    "customer_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Id"
+                    },
+                    "order_date": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Order Date"
+                    },
+                    "customer_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Addr"
+                    },
+                    "customer_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Tel"
+                    },
+                    "shipping_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Addr"
+                    },
+                    "shipping_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Tel"
+                    },
+                    "shipping_method": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Method"
+                    },
+                    "salesperson": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Salesperson"
+                    },
+                    "order_ref": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Order Ref"
+                    },
+                    "currency": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Currency"
+                    },
+                    "brand": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Brand"
+                    },
+                    "customer_type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Type"
+                    },
+                    "delivery_date": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Delivery Date"
+                    },
+                    "contact_person": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Contact Person"
+                    },
+                    "plan": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Plan"
+                    },
+                    "price_print": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Price Print"
+                    },
+                    "payment_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Payment Amount"
+                    },
+                    "remark": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Remark"
+                    },
+                    "detail": {
+                        "anyOf": [
+                            {
+                                "items": {
+                                    "$ref": "#/components/schemas/CreateOrderDetailRow"
+                                },
+                                "type": "array"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "title": "UpdateSalesOrderRequest"
+            },
+            "UpdateShipmentRequest": {
+                "properties": {
+                    "customer_id": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Id"
+                    },
+                    "shipment_date": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipment Date"
+                    },
+                    "warehouse": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Warehouse"
+                    },
+                    "customer_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Addr"
+                    },
+                    "shipping_addr": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Addr"
+                    },
+                    "shipping_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Tel"
+                    },
+                    "shipping_method": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Shipping Method"
+                    },
+                    "delivery_person": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Delivery Person"
+                    },
+                    "tracking_no": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Tracking No"
+                    },
+                    "freight": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Freight"
+                    },
+                    "salesperson": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Salesperson"
+                    },
+                    "contact_person": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Contact Person"
+                    },
+                    "contact_tel": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Contact Tel"
+                    },
+                    "currency": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Currency"
+                    },
+                    "customer_type": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Customer Type"
+                    },
+                    "handler": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Handler"
+                    },
+                    "price_print": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Price Print"
+                    },
+                    "payment_amount": {
+                        "anyOf": [
+                            {
+                                "type": "number"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Payment Amount"
+                    },
+                    "remark": {
+                        "anyOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Remark"
+                    },
+                    "detail": {
+                        "anyOf": [
+                            {
+                                "items": {
+                                    "$ref": "#/components/schemas/CreateShipmentDetailRow"
+                                },
+                                "type": "array"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "Detail"
+                    }
+                },
+                "type": "object",
+                "title": "UpdateShipmentRequest"
+            },
+            "ValidationError": {
+                "properties": {
+                    "loc": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array",
+                        "title": "Location"
+                    },
+                    "msg": {
+                        "type": "string",
+                        "title": "Message"
+                    },
+                    "type": {
+                        "type": "string",
+                        "title": "Error Type"
+                    },
+                    "input": {
+                        "title": "Input"
+                    },
+                    "ctx": {
+                        "type": "object",
+                        "title": "Context"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "loc",
+                    "msg",
+                    "type"
+                ],
+                "title": "ValidationError"
+            },
+            "WriteOperationResponse": {
+                "properties": {
+                    "dh": {
+                        "type": "string",
+                        "title": "Dh"
+                    },
+                    "message": {
+                        "type": "string",
+                        "title": "Message"
+                    },
+                    "state": {
+                        "anyOf": [
+                            {
+                                "type": "integer"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ],
+                        "title": "State"
+                    }
+                },
+                "type": "object",
+                "required": [
+                    "dh",
+                    "message"
+                ],
+                "title": "WriteOperationResponse"
+            }
+        }
+    }
+}

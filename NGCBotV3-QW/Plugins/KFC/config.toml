@@ -1,0 +1,20 @@
+name = "KFC文案"
+version = "1.0.0"
+author = "云山"
+enabled = true
+
+[settings]
+# 触发词列表
+keywords = ["KFC", "kfc", "肯德基", "疯狂星期四", "v我50"]
+
+# API地址
+apiUrl = "https://tools.mgtv100.com/external/v1/pear/kfc"
+
+# 私聊是否启用
+enablePrivateChat = true
+
+# 允许使用的群聊列表（为空则所有群聊都不启用，填写群聊conversation_id）
+enabledGroups = [
+    'R:10927673577581870',
+    'R:10758341898878458'
+]

@@ -1,0 +1,29 @@
+name = "定时AI新闻推送"
+version = "1.0.0"
+author = "云山"
+enabled = true
+
+[settings]
+# RSS源地址
+rssUrl = "https://www.bestblogs.dev/feeds/rss"
+
+# 推送时间（24小时制）
+pushHour = 10
+pushMinute = 0
+
+# 推送目标群聊列表（conversation_id）
+targetGroups = [
+    'R:10927673577581870',
+    'R:10758341898878458'
+]
+
+# 推送目标个人列表（wxid）
+targetUsers = []
+
+# 机器人wxid（需要配置）
+robotWxid = "1688855801556699"
+
+# DeepSeek API配置（用于总结新闻）
+apiKey = "sk-78cc9cd94122487b81857921051c5c68"
+apiUrl = "https://api.deepseek.com/v1/chat/completions"
+model = "deepseek-chat"

@@ -1,0 +1,17 @@
+name = "入群欢迎"
+version = "1.0.0"
+author = "云山"
+enabled = true
+
+[settings]
+# 启用的群聊列表（conversation_id）
+enabledGroups = [
+    'R:10927673577581870',
+    'R:10758341898878458'
+]
+
+# 欢迎消息（支持 {name} 占位符代表新成员昵称）
+welcomeMessage = """欢迎 {name} 加入本群！🎉
+
+很高兴见到你～
+请遵守群规，文明交流！"""
