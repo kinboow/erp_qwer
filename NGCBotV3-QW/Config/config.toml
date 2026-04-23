@@ -1,9 +1,0 @@
-# NGCBot API配置
-[NGCBOTAPI]
-PORT = 8000
-X-API-KEY = 'FhlANBMwPuREd6Qf'
-
-# 回调服务器配置
-[CALLBACK]
-HOST = '127.0.0.1'
-PORT = 5005

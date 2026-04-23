@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+import logging
+
+from fastapi import FastAPI, Request
 from fastapi import Body, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -7,6 +9,8 @@ from app.database import SessionLocal
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
+
+logger = logging.getLogger(__name__)
 
 # 创建FastAPI应用实例
 app = FastAPI(
@@ -44,21 +48,27 @@ async def restore_wechat_message_receivers():
 
 
 @app.api_route("/sync", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调", tags=["企业微信运行时"])
-async def root_sync_callback(
-    request_body: dict | None = Body(default=None),
-    wxid: str = Query(default=""),
-    instanceId: str = Query(default=""),
-):
+async def root_sync_callback(request: Request):
+    wxid = request.query_params.get("wxid", "")
+    instance_id = request.query_params.get("instanceId", "")
+    request_body = {}
+    try:
+        request_body = await request.json()
+    except Exception:
+        pass
     db: Session = SessionLocal()
     try:
         result = await ingest_runtime_message(
             db,
             request_body or {},
             source="http_callback",
-            instance_id=instanceId or None,
+            instance_id=instance_id or None,
             wxid=wxid or None,
         )
         return {"code": 200, "message": "回调接收成功", "data": result}
+    except Exception as exc:
+        logger.exception("[/sync] 处理回调异常")
+        return {"code": 500, "message": str(exc)}
     finally:
         db.close()
 
