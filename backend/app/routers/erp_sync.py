@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -49,6 +49,41 @@ async def api_save_config(
     await reload_erp_client(request.app)
     restart_sync_scheduler(request.app)
     return {"code": 200, "message": "配置已保存", "data": cfg}
+
+
+# ---------- 账套二维码上传 ----------
+
+@router.post("/upload-qr", summary="上传账套二维码图片到 OSS")
+async def api_upload_qr(
+    file: UploadFile = File(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    import logging
+    import uuid
+
+    logger = logging.getLogger(__name__)
+    content = await file.read()
+    ext = file.filename.rsplit(".", 1)[-1] if "." in file.filename else "jpg"
+    object_name = f"erp/qr/{uuid.uuid4().hex}.{ext}"
+
+    try:
+        from app.utils.oss_client import oss_client
+        content_type = file.content_type or "image/jpeg"
+        url = oss_client.upload_file(object_name, content, content_type=content_type)
+    except Exception as exc:
+        logger.exception("[ERP Sync] OSS 上传失败")
+        return {"code": 500, "message": f"OSS 上传失败: {exc}"}
+
+    if not url:
+        return {"code": 500, "message": "OSS 上传返回空 URL，请检查 OSS 配置"}
+
+    # 存入配置
+    save_erp_sync_config(db, {"erp_qr_image_path": url})
+    # 热更新 ncloud config
+    from app.services.erp_sync import reload_erp_client
+    await reload_erp_client(request.app)
+    return {"code": 200, "message": "上传成功", "data": {"url": url}}
 
 
 # ---------- 同步 ----------

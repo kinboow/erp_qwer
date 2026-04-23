@@ -43,8 +43,8 @@ services:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: admin123456
     ports:
-      - "5672:5672"   # AMQP端口
-      - "15672:15672" # 管理界面端口
+      - "5673:5672"   # AMQP端口
+      - "15673:15672" # 管理界面端口
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
     networks:
@@ -59,8 +59,8 @@ services:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin123
     ports:
-      - "9000:9000"   # API端口
-      - "9001:9001"   # 控制台端口
+      - "9002:9000"   # API端口
+      - "9003:9001"   # 控制台端口
     volumes:
       - minio_data:/data
     command: server /data --console-address ":9001"

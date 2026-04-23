@@ -26,25 +26,45 @@ class ERPAuthManager:
         self._last_account_set: dict[str, Any] | None = None
 
     async def resolve_account_set(self) -> dict[str, Any]:
-        """Call CheckAccountSet with the QR image file to get qrcode + accountSetName."""
-        qr_path = Path(settings.NCLOUD_QR_IMAGE_PATH)
-        if not qr_path.is_absolute():
-            # Resolve relative to project root (parent of app/)
-            qr_path = Path(__file__).parent.parent.parent / qr_path
-        if not qr_path.is_file():
-            raise ERPAuthError(f"二维码图片不存在: {qr_path}")
+        """Call CheckAccountSet with the QR image file to get qrcode + accountSetName.
+        Supports both local file path and HTTP/HTTPS URL for the QR image.
+        """
+        qr_source = settings.NCLOUD_QR_IMAGE_PATH
+        if not qr_source:
+            raise ERPAuthError("未配置账套二维码图片路径")
 
-        with open(qr_path, "rb") as f:
-            files = {"imgData": (qr_path.name, f, "image/jpeg")}
+        if qr_source.startswith(("http://", "https://")):
+            # Download image from URL (e.g. OSS)
             try:
-                response = await self._client.post(
-                    f"{settings.NCLOUD_BASE_URL.rstrip('/')}/Login/CheckAccountSet",
-                    headers=AJAX_HEADERS,
-                    files=files,
-                    timeout=30,
-                )
+                img_resp = await self._client.get(qr_source, timeout=30)
+                img_resp.raise_for_status()
             except httpx.RequestError as exc:
-                raise ERPUpstreamError(f"CheckAccountSet request failed: {exc}") from exc
+                raise ERPUpstreamError(f"下载二维码图片失败: {exc}") from exc
+            except httpx.HTTPStatusError as exc:
+                raise ERPUpstreamError(f"下载二维码图片 HTTP {exc.response.status_code}") from exc
+            img_bytes = img_resp.content
+            # Guess filename from URL
+            filename = qr_source.rsplit("/", 1)[-1].split("?")[0] or "qr.jpg"
+        else:
+            # Local file path
+            qr_path = Path(qr_source)
+            if not qr_path.is_absolute():
+                qr_path = Path(__file__).parent.parent.parent / qr_path
+            if not qr_path.is_file():
+                raise ERPAuthError(f"二维码图片不存在: {qr_path}")
+            img_bytes = qr_path.read_bytes()
+            filename = qr_path.name
+
+        files = {"imgData": (filename, img_bytes, "image/jpeg")}
+        try:
+            response = await self._client.post(
+                f"{settings.NCLOUD_BASE_URL.rstrip('/')}/Login/CheckAccountSet",
+                headers=AJAX_HEADERS,
+                files=files,
+                timeout=30,
+            )
+        except httpx.RequestError as exc:
+            raise ERPUpstreamError(f"CheckAccountSet request failed: {exc}") from exc
 
         if response.status_code >= 400:
             raise ERPUpstreamError(f"CheckAccountSet HTTP {response.status_code}")

@@ -26,11 +26,12 @@ class Settings(BaseSettings):
     API_PORT: int = 8900
     DEBUG: bool = True
 
-    # OSS配置
-    OSS_ENDPOINT: str = ""
-    OSS_ACCESS_KEY_ID: str = ""
-    OSS_ACCESS_KEY_SECRET: str = ""
-    OSS_BUCKET_NAME: str = ""
+    # MinIO / OSS 配置
+    OSS_ENDPOINT: str = "localhost:9002"
+    OSS_ACCESS_KEY_ID: str = "minioadmin"
+    OSS_ACCESS_KEY_SECRET: str = "minioadmin123"
+    OSS_BUCKET_NAME: str = "erp"
+    OSS_USE_SSL: bool = False
 
     # 消息队列配置
     MQ_HOST: str = "localhost"

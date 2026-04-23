@@ -21,8 +21,31 @@
           </el-form-item>
         </div>
 
-        <el-form-item label="账套二维码图片路径" prop="erp_qr_image_path">
-          <el-input v-model="form.erp_qr_image_path" placeholder="服务器上的二维码图片绝对路径（可选）" />
+        <el-form-item label="账套二维码图片">
+          <div class="qr-upload-area">
+            <el-upload
+              :show-file-list="false"
+              :before-upload="handleBeforeUpload"
+              :http-request="handleUploadQr"
+              accept="image/*"
+            >
+              <div v-if="form.erp_qr_image_path" class="qr-preview">
+                <img :src="form.erp_qr_image_path" alt="账套二维码" class="qr-image" />
+                <div class="qr-overlay">
+                  <el-icon :size="24"><Upload /></el-icon>
+                  <span>重新上传</span>
+                </div>
+              </div>
+              <div v-else class="qr-placeholder">
+                <el-icon :size="32" color="#c0c4cc"><Plus /></el-icon>
+                <span>点击上传账套二维码</span>
+              </div>
+            </el-upload>
+            <div v-if="uploading" class="qr-uploading">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              <span>上传中…</span>
+            </div>
+          </div>
         </el-form-item>
       </el-form>
     </div>
@@ -132,12 +155,13 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Connection, Check, Refresh, Timer, DataAnalysis } from '@element-plus/icons-vue'
-import { getErpSyncConfig, saveErpSyncConfig, getErpSyncStatus, triggerErpSync } from '@/api/erpSync'
+import { Connection, Check, Refresh, Timer, DataAnalysis, Upload, Plus, Loading } from '@element-plus/icons-vue'
+import { getErpSyncConfig, saveErpSyncConfig, getErpSyncStatus, triggerErpSync, uploadErpQr } from '@/api/erpSync'
 
 const formRef = ref(null)
 const saving = ref(false)
 const syncing = ref(false)
+const uploading = ref(false)
 
 const form = reactive({
   erp_base_url: '',
@@ -183,6 +207,32 @@ async function loadStatus() {
     status.days_back = s.days_back || 90
     status.last_result = s.last_result || {}
   } catch { /* ignore */ }
+}
+
+function handleBeforeUpload(file) {
+  const isImage = file.type.startsWith('image/')
+  const isLt5M = file.size / 1024 / 1024 < 5
+  if (!isImage) { ElMessage.error('只能上传图片文件'); return false }
+  if (!isLt5M) { ElMessage.error('图片大小不能超过 5MB'); return false }
+  return true
+}
+
+async function handleUploadQr({ file }) {
+  uploading.value = true
+  try {
+    const res = await uploadErpQr(file)
+    const url = res.data?.url
+    if (url) {
+      form.erp_qr_image_path = url
+      ElMessage.success('账套二维码上传成功')
+    } else {
+      ElMessage.error('上传失败')
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.message || '上传失败')
+  } finally {
+    uploading.value = false
+  }
 }
 
 async function handleSave() {
@@ -345,5 +395,74 @@ onMounted(async () => {
 
 .result-value.error {
   color: #f53f3f;
+}
+
+.qr-upload-area {
+  position: relative;
+}
+
+.qr-preview {
+  position: relative;
+  width: 148px;
+  height: 148px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--lark-border-light, #e5e6eb);
+  cursor: pointer;
+}
+
+.qr-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #fafafa;
+}
+
+.qr-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 12px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.qr-preview:hover .qr-overlay {
+  opacity: 1;
+}
+
+.qr-placeholder {
+  width: 148px;
+  height: 148px;
+  border: 1px dashed #d9d9d9;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #8f959e;
+  font-size: 12px;
+  transition: border-color 0.2s;
+}
+
+.qr-placeholder:hover {
+  border-color: var(--el-color-primary);
+}
+
+.qr-uploading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #8f959e;
 }
 </style>
