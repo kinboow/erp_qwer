@@ -47,7 +47,7 @@ async def restore_wechat_message_receivers():
     await wechat_ws_service.auto_connect_from_saved_config()
 
 
-@app.api_route("/sync", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调", tags=["企业微信运行时"])
+@app.api_route("/qwmspush", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调", tags=["企业微信运行时"])
 async def root_sync_callback(request: Request):
     wxid = request.query_params.get("wxid", "")
     instance_id = request.query_params.get("instanceId", "")

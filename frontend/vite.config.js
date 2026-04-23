@@ -14,15 +14,15 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:8900',
         changeOrigin: true
       },
-      '/sync': {
-        target: 'http://localhost:8000',
+      '/qwmspush': {
+        target: 'http://localhost:8900',
         changeOrigin: true
       },
       '/ws': {
-        target: 'http://localhost:8000',
+        target: 'http://localhost:8900',
         changeOrigin: true,
         ws: true
       }

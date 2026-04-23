@@ -41,7 +41,7 @@ async def receive_http_callback(
     return json_response(message="回调接收成功", data=data)
 
 
-@router.api_route("/sync", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调")
+@router.api_route("/qwmspush", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调")
 async def receive_sync_callback(
     body: Optional[dict] = Body(default=None),
     wxid: Optional[str] = Query(None),

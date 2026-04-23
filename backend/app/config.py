@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # 服务器配置
     API_HOST: str = "0.0.0.0"
-    API_PORT: int = 8000
+    API_PORT: int = 8900
     DEBUG: bool = True
 
     # OSS配置
