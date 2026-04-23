@@ -151,37 +151,7 @@
         <span>当前绑定实例：<strong>{{ savedInstance.name || savedInstance.wxid }}</strong></span>
       </div>
 
-      <div class="auto-receive-tip">
-        <el-icon color="var(--lark-primary)"><Connection /></el-icon>
-        <div class="auto-receive-content">
-          <div class="auto-receive-title">消息接收已改为自动模式</div>
-          <div class="auto-receive-text">保存 API 连接信息并绑定实例后，系统会自动开始接收消息；后端重启后也会自动恢复，无需手动配置回调或点击启动。</div>
-          <div class="auto-receive-text">HTTP 接收入口固定为 <strong>/api/wechat/callback/http</strong>，WebSocket 会按已保存实例自动连接。</div>
-        </div>
-      </div>
 
-      <div class="compat-address-panel">
-        <div class="compat-address-title">兼容企微 API 配置地址</div>
-        <div class="compat-address-desc">如果对方平台要求填写 `http://.../sync?wxid={wxid}` 和 `ws://.../ws?wxid={wxid}`，可直接复制下面两项。</div>
-
-        <el-form label-position="top" class="compat-address-form">
-          <el-form-item label="HTTP 回调地址">
-            <el-input :model-value="compatHttpUrl" readonly>
-              <template #append>
-                <el-button @click="copyText(compatHttpUrl)" :disabled="!compatHttpUrl">复制</el-button>
-              </template>
-            </el-input>
-          </el-form-item>
-
-          <el-form-item label="WS 接入地址">
-            <el-input :model-value="compatWsUrl" readonly>
-              <template #append>
-                <el-button @click="copyText(compatWsUrl)" :disabled="!compatWsUrl">复制</el-button>
-              </template>
-            </el-input>
-          </el-form-item>
-        </el-form>
-      </div>
     </div>
 
     <!-- 登录二维码弹窗 -->

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders
+from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 
@@ -48,6 +48,7 @@ app.include_router(wechat.router, prefix="/api/wechat", tags=["企业微信管�
 app.include_router(wechat_runtime.router, prefix="/api/wechat")
 app.include_router(wechat_config.router, prefix="/api/wechat")
 app.include_router(downstream_orders.router, prefix="/api/downstream-orders")
+app.include_router(erp_sync.router, prefix="/api/erp/sync", tags=["ERP-同步"])
 
 # ncloud2 ERP API 路由（弘兆云 ERP 操作）
 app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])
@@ -79,6 +80,10 @@ async def startup_event():
 
     # 恢复企业微信 WebSocket 连接
     await wechat_ws_service.auto_connect_from_saved_config()
+
+    # 启动 ERP 销售订单定时同步
+    from app.services.erp_sync import start_sync_scheduler
+    start_sync_scheduler(erp_client)
 
 
 @app.api_route("/qwmspush", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调", tags=["企业微信运行时"])

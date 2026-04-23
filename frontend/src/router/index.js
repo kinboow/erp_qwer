@@ -55,6 +55,12 @@ const routes = [
         name: 'WechatRoomListeners',
         component: () => import('@/views/wechat/RoomListeners.vue'),
         meta: { title: '群聊监听配置' }
+      },
+      {
+        path: 'erp-sync',
+        name: 'ErpSyncConfig',
+        component: () => import('@/views/system/ErpSyncConfig.vue'),
+        meta: { title: 'ERP同步配置' }
       }
     ]
   }

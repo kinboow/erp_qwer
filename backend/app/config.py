@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     ERP_DEFAULT_BRAND: str = ""
     ERP_DEFAULT_SHIPPING_METHOD: str = ""
 
+    # ERP 同步配置
+    ERP_SYNC_INTERVAL_MINUTES: int = 15
+    ERP_SYNC_DAYS_BACK: int = 90
+
     @property
     def DATABASE_URL(self) -> str:
         return f"mysql+pymysql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}?charset=utf8mb4"

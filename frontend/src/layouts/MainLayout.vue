@@ -44,6 +44,10 @@
               <el-icon><Link /></el-icon>
               <template #title>企微配置</template>
             </el-menu-item>
+            <el-menu-item index="/erp-sync">
+              <el-icon><Refresh /></el-icon>
+              <template #title>ERP同步配置</template>
+            </el-menu-item>
             <el-menu-item index="/logs">
               <el-icon><Document /></el-icon>
               <template #title>系统日志</template>
@@ -160,7 +164,7 @@ import { ElMessageBox } from 'element-plus'
 import {
   DataLine, User, Setting, Fold, Expand, Box, UserFilled,
   Search, Bell, SwitchButton, Stamp, Management, Goods, List, QuestionFilled,
-  ChatDotRound, Monitor, Link, Document
+  ChatDotRound, Monitor, Link, Document, Refresh
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 
