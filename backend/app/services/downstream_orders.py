@@ -13,6 +13,7 @@ from app.models import User, WechatInstance
 from app.services.ai_order_parser import AIOrderParserError, ai_order_parser
 from app.services.downstream_support import ensure_downstream_support_tables
 from app.services.erp_bridge import ERPBridge, ERPBridgeError
+from app.services.wechat_event_types import EVENT_TYPE_TO_MESSAGE_TYPE, CONTENT_TYPE_TO_MESSAGE_TYPE
 
 try:
     from openpyxl import load_workbook
@@ -28,20 +29,6 @@ class AttachmentContentRequiredError(Exception):
 
 
 SUPPORTED_REVIEW_MESSAGE_TYPES = {"text", "image", "file"}
-
-V3_EVENT_TYPE_TO_MESSAGE_TYPE = {
-    11041: "text",
-    11042: "image",
-    11045: "file",
-    11068: "text",
-}
-
-V3_CONTENT_TYPE_TO_MESSAGE_TYPE = {
-    "2": "text",
-    "101": "image",
-    "102": "file",
-    "123": "text",
-}
 
 
 def _json_dumps(data: Any) -> str:
@@ -328,12 +315,12 @@ def _normalize_message_type(
     attachment_mime: str,
 ) -> str:
     event_key = _safe_text(event_type)
-    if event_key.isdigit() and int(event_key) in V3_EVENT_TYPE_TO_MESSAGE_TYPE:
-        return V3_EVENT_TYPE_TO_MESSAGE_TYPE[int(event_key)]
+    if event_key.isdigit() and int(event_key) in EVENT_TYPE_TO_MESSAGE_TYPE:
+        return EVENT_TYPE_TO_MESSAGE_TYPE[int(event_key)]
 
     content_key = _safe_text(content_type)
-    if content_key in V3_CONTENT_TYPE_TO_MESSAGE_TYPE:
-        return V3_CONTENT_TYPE_TO_MESSAGE_TYPE[content_key]
+    if content_key.isdigit() and int(content_key) in CONTENT_TYPE_TO_MESSAGE_TYPE:
+        return CONTENT_TYPE_TO_MESSAGE_TYPE[int(content_key)]
 
     if message_data.get("image") or attachment_mime.startswith("image/"):
         return "image"
@@ -353,8 +340,17 @@ def _normalize_message_type(
 
 def _extract_callback_message(payload: dict[str, Any], instance_id: Optional[str]) -> dict[str, Any]:
     payload = payload if isinstance(payload, dict) else {}
+
+    # 兼容三种回调格式:
+    # 1. NGCBotV3-QW 转发格式: { "message": { "type": ..., "data": {...} }, "wxid": "..." }
+    # 2. 原始 API 格式:        { "type": 11041, "data": { "content": "...", ... } }
+    # 3. NGCDemo legacy 格式:   { "message": { "type": ..., "data": { "msg": "...", "from_wxid": "..." } } }
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     message_data = message.get("data") if isinstance(message.get("data"), dict) else {}
+
+    # 原始 API 格式: type 和 data 在顶层，没有 message 包裹
+    if not message_data and isinstance(payload.get("data"), dict) and payload.get("type"):
+        message_data = payload["data"]
 
     source_format = "generic"
     if message_data and any(key in message_data for key in ["conversation_id", "sender", "sender_name", "content_type"]):

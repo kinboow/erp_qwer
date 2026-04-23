@@ -79,6 +79,8 @@ def _find_first(data: Any, keys: list[str]) -> Any:
 def _infer_message_type(payload: dict[str, Any]) -> str:
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     message_data = message.get("data") if isinstance(message.get("data"), dict) else {}
+    if not message_data and isinstance(payload.get("data"), dict) and payload.get("type"):
+        message_data = payload["data"]
     event_type = _safe_text(message.get("type") or payload.get("type") or payload.get("message_type"))
     content_type = _safe_text(message_data.get("content_type") or message_data.get("wx_type") or payload.get("content_type"))
     attachment_name = _safe_text(_find_first(payload, ["file_name", "filename", "name", "title"]))
@@ -104,6 +106,8 @@ def _extract_log_item(payload: Any, source: str, instance_id: Optional[str] = No
     normalized_payload = payload if isinstance(payload, dict) else {"raw": _safe_text(payload)}
     message = normalized_payload.get("message") if isinstance(normalized_payload.get("message"), dict) else {}
     message_data = message.get("data") if isinstance(message.get("data"), dict) else {}
+    if not message_data and isinstance(normalized_payload.get("data"), dict) and normalized_payload.get("type"):
+        message_data = normalized_payload["data"]
 
     sender_id = _safe_text(
         message_data.get("sender")

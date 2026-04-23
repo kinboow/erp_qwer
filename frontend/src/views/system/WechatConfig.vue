@@ -159,6 +159,29 @@
           <div class="auto-receive-text">HTTP 接收入口固定为 <strong>/api/wechat/callback/http</strong>，WebSocket 会按已保存实例自动连接。</div>
         </div>
       </div>
+
+      <div class="compat-address-panel">
+        <div class="compat-address-title">兼容企微 API 配置地址</div>
+        <div class="compat-address-desc">如果对方平台要求填写 `http://.../sync?wxid={wxid}` 和 `ws://.../ws?wxid={wxid}`，可直接复制下面两项。</div>
+
+        <el-form label-position="top" class="compat-address-form">
+          <el-form-item label="HTTP 回调地址">
+            <el-input :model-value="compatHttpUrl" readonly>
+              <template #append>
+                <el-button @click="copyText(compatHttpUrl)" :disabled="!compatHttpUrl">复制</el-button>
+              </template>
+            </el-input>
+          </el-form-item>
+
+          <el-form-item label="WS 接入地址">
+            <el-input :model-value="compatWsUrl" readonly>
+              <template #append>
+                <el-button @click="copyText(compatWsUrl)" :disabled="!compatWsUrl">复制</el-button>
+              </template>
+            </el-input>
+          </el-form-item>
+        </el-form>
+      </div>
     </div>
 
     <!-- 登录二维码弹窗 -->
@@ -245,6 +268,19 @@ const apiBaseUrl = computed(() => {
   if (!configForm.host || !configForm.port) return ''
   return `http://${configForm.host}:${configForm.port}`
 })
+const appOrigin = computed(() => {
+  if (typeof window === 'undefined' || !window.location?.origin) return ''
+  return window.location.origin
+})
+const compatHttpUrl = computed(() => {
+  if (!appOrigin.value) return ''
+  return `${appOrigin.value}/sync?wxid={wxid}`
+})
+const compatWsUrl = computed(() => {
+  if (!appOrigin.value) return ''
+  const wsOrigin = appOrigin.value.replace(/^http:/i, 'ws:').replace(/^https:/i, 'wss:')
+  return `${wsOrigin}/ws?wxid={wxid}`
+})
 
 const configLoaded = ref(false)
 const hasApiConfig = computed(() => configLoaded.value && !!(configForm.host && configForm.port))
@@ -295,6 +331,16 @@ async function saveConfigToDb(extraFields = {}) {
     ...extraFields
   })
   configLoaded.value = true
+}
+
+async function copyText(text) {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('已复制到剪贴板')
+  } catch (error) {
+    ElMessage.error('复制失败')
+  }
 }
 
 async function handleTestConnection() {
@@ -879,6 +925,32 @@ onMounted(async () => {
   font-size: 13px;
   color: var(--lark-text-secondary);
   line-height: 1.6;
+}
+
+.compat-address-panel {
+  margin-top: 16px;
+  padding: 16px;
+  border: 1px dashed var(--lark-border-light);
+  border-radius: var(--lark-radius-sm);
+  background: var(--lark-bg-hover);
+}
+
+.compat-address-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--lark-text-primary);
+}
+
+.compat-address-desc {
+  margin-top: 6px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--lark-text-secondary);
+}
+
+.compat-address-form {
+  max-width: 820px;
 }
 
 .empty-hint {
