@@ -1,5 +1,6 @@
 import logging
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi import Body, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +10,13 @@ from app.database import SessionLocal
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
+
+# ncloud2 ERP API 子模块
+from app.ncloud.client.erp_client import ERPClient
+from app.ncloud.exceptions import register_exception_handlers as register_ncloud_exception_handlers
+from app.ncloud.routers import auth as ncloud_auth, base as ncloud_base, sales_orders as ncloud_sales_orders
+from app.ncloud.routers import shipments as ncloud_shipments, reconciliation as ncloud_reconciliation
+from app.ncloud.routers import unshipped_report as ncloud_unshipped_report, inventory as ncloud_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +49,35 @@ app.include_router(wechat_runtime.router, prefix="/api/wechat")
 app.include_router(wechat_config.router, prefix="/api/wechat")
 app.include_router(downstream_orders.router, prefix="/api/downstream-orders")
 
+# ncloud2 ERP API 路由（弘兆云 ERP 操作）
+app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])
+app.include_router(ncloud_base.router, prefix="/api/erp", tags=["ERP-基础数据"])
+app.include_router(ncloud_sales_orders.router, prefix="/api/erp", tags=["ERP-销售订单"])
+app.include_router(ncloud_shipments.router, prefix="/api/erp", tags=["ERP-销售发货"])
+app.include_router(ncloud_reconciliation.router, prefix="/api/erp", tags=["ERP-销售对账"])
+app.include_router(ncloud_unshipped_report.router, prefix="/api/erp", tags=["ERP-未发货报表"])
+app.include_router(ncloud_inventory.router, prefix="/api/erp", tags=["ERP-库存"])
+
+# 注册 ncloud 异常处理器
+register_ncloud_exception_handlers(app)
+
 
 @app.on_event("startup")
-async def restore_wechat_message_receivers():
+async def startup_event():
+    # 初始化 ncloud2 ERP 客户端
+    http_client = httpx.AsyncClient(
+        headers={
+            "User-Agent": "ncloud2api/0.2",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        },
+        follow_redirects=False,
+        trust_env=False,
+    )
+    erp_client = ERPClient(http_client)
+    app.state.http_client = http_client
+    app.state.erp_client = erp_client
+
+    # 恢复企业微信 WebSocket 连接
     await wechat_ws_service.auto_connect_from_saved_config()
 
 
