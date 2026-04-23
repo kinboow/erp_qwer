@@ -231,21 +231,25 @@ onMounted(async () => {
 }
 
 .config-section {
-  background: #fff;
-  border-radius: 8px;
-  padding: 20px;
+  padding: 0 0 20px;
   margin-bottom: 16px;
-  border: 1px solid #e5e6eb;
+  border-bottom: 1px solid var(--lark-border-light, #f0f0f0);
+}
+
+.config-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
 .section-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 600;
-  color: #1f2329;
-  margin-bottom: 16px;
+  color: var(--lark-text-primary, #1f2329);
+  margin-bottom: 20px;
 }
 
 .config-form {

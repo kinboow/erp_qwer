@@ -643,9 +643,15 @@ onMounted(async () => {
 }
 
 .config-section {
-  background: var(--lark-bg-base);
-  border-radius: var(--lark-radius-lg);
-  padding: 24px;
+  padding: 0 0 20px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--lark-border-light, #f0f0f0);
+}
+
+.config-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
 }
 
 .section-title {
