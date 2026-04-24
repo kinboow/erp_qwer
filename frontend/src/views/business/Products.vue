@@ -15,10 +15,9 @@
             clearable
             :prefix-icon="Search"
             style="width: 220px"
-            @keyup.enter="handleSearch"
+            @input="debouncedSearch"
             @clear="handleSearch"
           />
-          <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
         </div>
         <div class="toolbar-right">
           <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步产品列表</el-button>
@@ -133,6 +132,12 @@ const filter = reactive({
 function handleSearch() {
   filter.page = 1
   fetchProducts()
+}
+
+let _searchTimer = null
+function debouncedSearch() {
+  clearTimeout(_searchTimer)
+  _searchTimer = setTimeout(() => handleSearch(), 350)
 }
 
 async function handleSync() {

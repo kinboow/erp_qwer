@@ -30,7 +30,7 @@
               v-model="filter.keyword"
               class="lark-input"
               placeholder="搜索订单号 / 客户名"
-              @keyup.enter="handleSearch"
+              @input="debouncedSearch"
             />
           </div>
         </div>
@@ -131,6 +131,12 @@ const summaryAmount = computed(() => {
 function handleSearch() {
   filter.page = 1
   fetchOrders()
+}
+
+let _searchTimer = null
+function debouncedSearch() {
+  clearTimeout(_searchTimer)
+  _searchTimer = setTimeout(() => handleSearch(), 350)
 }
 
 async function fetchOrders() {

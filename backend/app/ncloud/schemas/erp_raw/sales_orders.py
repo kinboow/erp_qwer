@@ -11,6 +11,7 @@ class ERPSizeDetail(BaseModel):
 
 class ERPOrderDetailRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
+    id: str | None = ""          # ERP GUID for this detail row
     spbh: str = ""        # brand/product code
     huohao: str = ""      # product number (货号)
     chimadetail: list[ERPSizeDetail] = []

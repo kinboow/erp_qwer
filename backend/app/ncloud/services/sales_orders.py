@@ -82,6 +82,7 @@ async def get_order_detail(erp: ERPClient, dh: str) -> SalesOrderDetail:
         sizes = [SizeQty(size=s.field, qty=s.value or 0) for s in row.chimadetail if s.value]
         detail_rows.append(
             SalesOrderDetailRow(
+                erp_item_id=row.id or "",
                 brand=row.spbh,
                 product_no=row.huohao,
                 sizes=sizes,

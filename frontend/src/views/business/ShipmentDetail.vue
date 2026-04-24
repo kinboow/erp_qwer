@@ -81,7 +81,17 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="关联订单" prop="order_ref" width="160" show-overflow-tooltip />
+          <el-table-column label="关联订单" width="200">
+            <template #default="{ row }">
+              <span v-if="row.order_ref" class="order-ref-cell">
+                <el-tooltip :content="row.order_ref" placement="top" :show-after="300">
+                  <span class="order-ref-link" @click="goToOrder(row.order_ref)">{{ row.order_ref }}</span>
+                </el-tooltip>
+                <el-button link type="primary" size="small" class="copy-btn" @click="copyText(row.order_ref)">复制</el-button>
+              </span>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
           <el-table-column label="小计" prop="total_qty" width="80" align="right" />
           <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
         </el-table>
@@ -94,6 +104,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { getShipmentDetail, getShipmentItems } from '@/api/salesShipments'
 
@@ -155,6 +166,39 @@ function summaryMethod({ columns }) {
     sums[index] = ''
   })
   return sums
+}
+
+function goToOrder(orderNo) {
+  if (orderNo) {
+    router.push({ path: `/sales/${encodeURIComponent(orderNo)}` })
+  }
+}
+
+function copyText(text) {
+  if (!text) return
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => {
+      ElMessage.success('已复制')
+    }).catch(() => fallbackCopy(text))
+  } else {
+    fallbackCopy(text)
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    ElMessage.success('已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+  document.body.removeChild(ta)
 }
 
 onMounted(fetchDetail)
@@ -243,6 +287,32 @@ onMounted(fetchDetail)
 
 .items-table {
   font-size: 14px;
+}
+
+.order-ref-cell {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.order-ref-link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+  color: var(--el-color-primary, #409eff);
+  cursor: pointer;
+}
+
+.order-ref-link:hover {
+  text-decoration: underline;
+}
+
+.copy-btn {
+  flex-shrink: 0;
+  padding: 0 2px;
 }
 
 :deep(.items-table .el-table__body td.el-table__cell) {

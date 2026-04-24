@@ -72,6 +72,7 @@ _DDL_ITEMS = """
 CREATE TABLE IF NOT EXISTS erp_sales_order_items (
     id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     order_no            VARCHAR(100) NOT NULL,
+    erp_item_id         VARCHAR(100) DEFAULT '',
     sort_index          INT          NOT NULL DEFAULT 0,
     brand               VARCHAR(100) DEFAULT '',
     product_no          VARCHAR(100) DEFAULT '',
@@ -89,7 +90,8 @@ CREATE TABLE IF NOT EXISTS erp_sales_order_items (
     created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_order_no  (order_no),
-    INDEX idx_product_no (product_no)
+    INDEX idx_product_no (product_no),
+    INDEX idx_erp_item_id (erp_item_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
@@ -213,14 +215,21 @@ def ensure_tables(db: Session) -> None:
     db.execute(text(_DDL_PRODUCTS))
     db.execute(text(_DDL_SYNC_CONFIG))
     # 补加字段（已有表结构升级）
-    for col, defn in [
-        ("print_count", "INT DEFAULT 0"),
-        ("product_no", "VARCHAR(255) DEFAULT ''"),
-    ]:
+    _alter_cmds = [
+        ("erp_sales_orders", "print_count", "INT DEFAULT 0"),
+        ("erp_sales_orders", "product_no", "VARCHAR(255) DEFAULT ''"),
+        ("erp_sales_order_items", "erp_item_id", "VARCHAR(100) DEFAULT '' AFTER order_no"),
+    ]
+    for tbl, col, defn in _alter_cmds:
         try:
-            db.execute(text(f"ALTER TABLE erp_sales_orders ADD COLUMN {col} {defn}"))
+            db.execute(text(f"ALTER TABLE {tbl} ADD COLUMN {col} {defn}"))
         except Exception:
             pass  # 已存在则跳过
+    # 补加索引
+    try:
+        db.execute(text("CREATE INDEX idx_erp_item_id ON erp_sales_order_items (erp_item_id)"))
+    except Exception:
+        pass
     db.commit()
 
 
@@ -506,6 +515,7 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
         total_qty = sum(s.qty for s in row.sizes)
         item_data = {
             "order_no": order_no,
+            "erp_item_id": row.erp_item_id or "",
             "sort_index": idx + 1,
             "brand": row.brand or "",
             "product_no": row.product_no or "",

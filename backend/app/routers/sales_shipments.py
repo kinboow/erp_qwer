@@ -176,12 +176,15 @@ def api_shipment_items(
     ensure_tables(db)
     rows = db.execute(
         text("""
-            SELECT sort_index, brand, product_no, product_name, color,
-                   customer_product_no, packaging, unit, price, discount,
-                   order_ref, sizes_json, total_qty, remark
-            FROM erp_sales_shipment_items
-            WHERE order_no = :order_no
-            ORDER BY sort_index
+            SELECT si.sort_index, si.brand, si.product_no, si.product_name, si.color,
+                   si.customer_product_no, si.packaging, si.unit, si.price, si.discount,
+                   si.order_ref, si.sizes_json, si.total_qty, si.remark,
+                   oi.order_no AS linked_order_no
+            FROM erp_sales_shipment_items si
+            LEFT JOIN erp_sales_order_items oi
+              ON si.order_ref != '' AND si.order_ref = oi.erp_item_id
+            WHERE si.order_no = :order_no
+            ORDER BY si.sort_index
         """),
         {"order_no": order_no},
     ).mappings().all()
@@ -204,7 +207,7 @@ def api_shipment_items(
             "unit": r["unit"] or "",
             "price": float(r["price"] or 0),
             "discount": r["discount"] or 100,
-            "order_ref": r["order_ref"] or "",
+            "order_ref": r["linked_order_no"] or r["order_ref"] or "",
             "sizes": sizes,
             "total_qty": float(r["total_qty"] or 0),
             "remark": r["remark"] or "",

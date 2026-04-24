@@ -33,6 +33,7 @@ class SalesOrderListResponse(BaseModel):
 
 
 class SalesOrderDetailRow(BaseModel):
+    erp_item_id: str | None = "" # ERP: id (GUID)
     brand: str                   # ERP: spbh
     product_no: str              # ERP: huohao
     sizes: list[SizeQty]         # from chimadetail

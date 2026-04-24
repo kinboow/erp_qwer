@@ -170,7 +170,13 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
-const activeMenu = computed(() => route.path === '/customers' ? '/users' : route.path)
+const activeMenu = computed(() => {
+  const p = route.path
+  if (p === '/customers') return '/users'
+  if (p.startsWith('/sales/')) return '/sales'
+  if (p.startsWith('/shipments/')) return '/shipments'
+  return p
+})
 
 const handleUndeveloped = () => {
   ElMessage.warning('该功能暂未开发，敬请期待！')
