@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products
+from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 
@@ -52,6 +52,7 @@ app.include_router(erp_sync.router, prefix="/api/erp/sync", tags=["ERP-同步"])
 app.include_router(sales_orders.router, prefix="/api/sales-orders", tags=["销售订单"])
 app.include_router(sales_shipments.router, prefix="/api/sales-shipments", tags=["销售发货单"])
 app.include_router(products.router, prefix="/api/products", tags=["产品列表"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["数据看板"])
 
 # ncloud2 ERP API 路由（弘兆云 ERP 操作）
 app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])

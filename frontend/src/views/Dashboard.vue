@@ -4,10 +4,13 @@
     <div class="lark-welcome-panel">
       <div class="welcome-left">
         <div class="welcome-title">
-          早安，{{ userStore.realName }}，祝你度过充实的一天
+          {{ greeting }}，{{ userStore.realName }}，{{ greetingSuffix }}
         </div>
         <div class="welcome-desc">
-          今天有 <strong>3</strong> 个待办任务，<strong>2</strong> 条未读消息
+          <template v-if="stats.pending_orders > 0">
+            当前有 <strong>{{ stats.pending_orders }}</strong> 个待审核订单
+          </template>
+          <template v-else>暂无待处理事项</template>
         </div>
       </div>
       <div class="welcome-right">
@@ -19,9 +22,8 @@
     </div>
 
     <!-- 核心指标 -->
-    <h3 class="section-title">核心指标</h3>
     <el-row :gutter="24" class="stat-cards-wrapper">
-      <el-col :span="6" v-for="(stat, index) in statData" :key="index">
+      <el-col :span="6" v-for="(stat, index) in statCards" :key="index">
         <div class="lark-stat-card">
           <div class="stat-header">
             <span class="stat-name">{{ stat.title }}</span>
@@ -31,12 +33,32 @@
             <span class="stat-number">{{ stat.value }}</span>
           </div>
           <div class="stat-footer">
-            <span class="trend-label">较昨日</span>
-            <span class="trend-value" :class="stat.trend > 0 ? 'is-up' : 'is-down'">
+            <span class="trend-label">{{ stat.trendLabel }}</span>
+            <span v-if="stat.trend !== null" class="trend-value" :class="stat.trend > 0 ? 'is-up' : stat.trend < 0 ? 'is-down' : ''">
               <el-icon v-if="stat.trend > 0"><Top /></el-icon>
-              <el-icon v-else><Bottom /></el-icon>
-              {{ Math.abs(stat.trend) }}%
+              <el-icon v-else-if="stat.trend < 0"><Bottom /></el-icon>
+              {{ stat.trend === 0 ? '持平' : Math.abs(stat.trend).toFixed(1) + '%' }}
             </span>
+            <span v-else class="trend-value">--</span>
+          </div>
+        </div>
+      </el-col>
+      <!-- 第四列：两个小状态卡片 -->
+      <el-col :span="6">
+        <div class="status-card-group">
+          <div class="mini-status-card" :class="stats.wechat_online ? 'online' : 'offline'">
+            <div class="mini-status-dot" :class="stats.wechat_online ? 'green' : 'red'"></div>
+            <div class="mini-status-info">
+              <div class="mini-status-label">企业微信</div>
+              <div class="mini-status-text">{{ stats.wechat_online ? '已连接' : '未连接' }}</div>
+            </div>
+          </div>
+          <div class="mini-status-card" :class="stats.erp_online ? 'online' : 'offline'">
+            <div class="mini-status-dot" :class="stats.erp_online ? 'green' : 'red'"></div>
+            <div class="mini-status-info">
+              <div class="mini-status-label">ERP 服务</div>
+              <div class="mini-status-text">{{ stats.erp_online ? '运行中' : '未启动' }}</div>
+            </div>
           </div>
         </div>
       </el-col>
@@ -47,32 +69,38 @@
       <el-col :span="16">
         <div class="lark-panel chart-panel">
           <div class="panel-header">
-            <h3 class="panel-title">生产趋势</h3>
-            <div class="panel-actions">
-              <el-radio-group v-model="chartRange" size="small" class="lark-radio-group">
-                <el-radio-button value="week">本周</el-radio-button>
-                <el-radio-button value="month">本月</el-radio-button>
-                <el-radio-button value="year">全年</el-radio-button>
-              </el-radio-group>
+            <h3 class="panel-title">订单与发货趋势</h3>
+            <div class="range-switcher">
+              <span
+                v-for="r in rangeOptions" :key="r.value"
+                class="range-btn" :class="{ active: chartRange === r.value }"
+                @click="switchRange(r.value)"
+              >{{ r.label }}</span>
             </div>
           </div>
           <div class="panel-body">
-            <div class="lark-mock-chart">
-              <div class="chart-y-axis">
-                <span>10k</span><span>8k</span><span>6k</span><span>4k</span><span>2k</span><span>0</span>
-              </div>
-              <div class="chart-content">
-                <div class="chart-bar" style="height: 30%"></div>
-                <div class="chart-bar" style="height: 50%"></div>
-                <div class="chart-bar" style="height: 45%"></div>
-                <div class="chart-bar active" style="height: 80%"></div>
-                <div class="chart-bar" style="height: 60%"></div>
-                <div class="chart-bar" style="height: 40%"></div>
-                <div class="chart-bar" style="height: 70%"></div>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="legend-dot order"></span>订单</span>
+              <span class="legend-item"><span class="legend-dot shipment"></span>发货单</span>
+            </div>
+            <div class="line-chart-wrapper">
+              <svg :key="chartAnimKey" :viewBox="`0 0 ${svgW} ${svgH}`" class="line-chart-svg" preserveAspectRatio="xMidYMid meet">
+                <!-- 网格线 -->
+                <line v-for="(y, i) in gridLines" :key="'g'+i" :x1="padL" :y1="y" :x2="svgW - padR" :y2="y" class="grid-line" />
+                <!-- 订单折线 -->
+                <polyline :points="orderPoints" class="chart-line order-line animated-line" fill="none" :style="{ strokeDasharray: orderLineLen, strokeDashoffset: orderLineLen }" />
+                <circle v-for="(p, i) in orderDots" :key="'o'+i" :cx="p.x" :cy="p.y" r="3.5" class="chart-dot order-dot animated-dot" :style="{ animationDelay: orderDotDelays[i] + 's' }" />
+                <!-- 发货折线 -->
+                <polyline :points="shipmentPoints" class="chart-line shipment-line animated-line" fill="none" :style="{ strokeDasharray: shipmentLineLen, strokeDashoffset: shipmentLineLen, animationDelay: '0.15s' }" />
+                <circle v-for="(p, i) in shipmentDots" :key="'s'+i" :cx="p.x" :cy="p.y" r="3.5" class="chart-dot shipment-dot animated-dot" :style="{ animationDelay: shipmentDotDelays[i] + 's' }" />
+              </svg>
+              <!-- Y轴标签 -->
+              <div class="y-labels">
+                <span v-for="(v, i) in yAxisLabels" :key="i" :style="{ top: gridLinePercents[i] }">{{ v }}</span>
               </div>
             </div>
-            <div class="chart-x-axis">
-              <span>周一</span><span>周二</span><span>周三</span><span>周四</span><span>周五</span><span>周六</span><span>周日</span>
+            <div class="x-labels">
+              <span v-for="(d, i) in xLabels" :key="i">{{ d }}</span>
             </div>
           </div>
         </div>
@@ -81,11 +109,30 @@
       <el-col :span="8">
         <div class="lark-panel activity-panel">
           <div class="panel-header">
-            <h3 class="panel-title">系统动态</h3>
-            <el-button link type="primary" class="lark-link-btn">查看全部</el-button>
+            <h3 class="panel-title">数据概览</h3>
           </div>
           <div class="panel-body">
-            <div class="lark-timeline">
+            <div class="overview-list">
+              <div class="overview-item" v-for="item in overviewItems" :key="item.label">
+                <span class="overview-label">{{ item.label }}</span>
+                <span class="overview-value">{{ item.value }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-col>
+    </el-row>
+
+    <!-- 系统动态 -->
+    <el-row :gutter="24" class="content-row">
+      <el-col :span="24">
+        <div class="lark-panel">
+          <div class="panel-header">
+            <h3 class="panel-title">系统动态</h3>
+          </div>
+          <div class="panel-body">
+            <div v-if="activities.length === 0" class="empty-activity">暂无动态</div>
+            <div v-else class="lark-timeline">
               <div class="timeline-item" v-for="(item, index) in activities" :key="index">
                 <div class="timeline-dot" :class="item.type"></div>
                 <div class="timeline-content">
@@ -102,50 +149,282 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useUserStore } from '@/stores/user'
 import {
-  User, Box, Document, TrendCharts,
+  User, Box, Document, TrendCharts, Van,
   Top, Bottom
 } from '@element-plus/icons-vue'
+import request from '@/utils/request'
 
 const userStore = useUserStore()
 const currentTime = ref('')
 const currentDate = ref('')
-const chartRange = ref('week')
+const greeting = ref('')
+const greetingSuffix = ref('')
 let timer = null
+
+const stats = ref({
+  user_count: 0,
+  product_count: 0,
+  total_orders: 0,
+  pending_orders: 0,
+  today_orders: 0,
+  yesterday_orders: 0,
+  total_shipments: 0,
+  today_shipments: 0,
+  yesterday_shipments: 0,
+  month_revenue: 0,
+  last_month_revenue: 0,
+  pending_downstream: 0,
+  daily_orders: [],
+  daily_shipments: [],
+  recent_activities: [],
+  wechat_online: false,
+  erp_online: false,
+})
+
+const activities = computed(() => stats.value.recent_activities || [])
+
+function updateGreeting() {
+  const h = new Date().getHours()
+  if (h >= 5 && h < 9) {
+    greeting.value = '早安'
+    greetingSuffix.value = '祝你度过充实的一天'
+  } else if (h >= 9 && h < 11) {
+    greeting.value = '上午好'
+    greetingSuffix.value = '工作顺利'
+  } else if (h >= 11 && h < 13) {
+    greeting.value = '中午好'
+    greetingSuffix.value = '记得午休哦'
+  } else if (h >= 13 && h < 18) {
+    greeting.value = '下午好'
+    greetingSuffix.value = '继续加油'
+  } else if (h >= 18 && h < 22) {
+    greeting.value = '晚上好'
+    greetingSuffix.value = '辛苦了今天'
+  } else {
+    greeting.value = '夜深了'
+    greetingSuffix.value = '注意休息'
+  }
+}
 
 const updateTime = () => {
   const now = new Date()
   currentTime.value = now.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
-
   const options = { month: 'long', day: 'numeric', weekday: 'long' }
   currentDate.value = now.toLocaleDateString('zh-CN', options)
+  updateGreeting()
+}
+
+function calcTrend(today, yesterday) {
+  if (yesterday === 0 && today === 0) return 0
+  if (yesterday === 0) return 100
+  return ((today - yesterday) / yesterday) * 100
+}
+
+function formatRevenue(val) {
+  if (val >= 10000) return `¥${(val / 10000).toFixed(1)}万`
+  if (val >= 1000) return `¥${(val / 1000).toFixed(1)}k`
+  return `¥${val.toFixed(0)}`
+}
+
+const statCards = computed(() => {
+  const s = stats.value
+  return [
+    {
+      title: '在库产品',
+      value: s.product_count.toLocaleString(),
+      trend: null,
+      trendLabel: '同步产品总数',
+      icon: 'Box',
+      color: '#00B365'
+    },
+    {
+      title: '今日订单',
+      value: s.today_orders.toLocaleString(),
+      trend: calcTrend(s.today_orders, s.yesterday_orders),
+      trendLabel: '较昨日',
+      icon: 'Document',
+      color: '#3370FF'
+    },
+    {
+      title: '发货订单',
+      value: s.today_shipments.toLocaleString(),
+      trend: calcTrend(s.today_shipments, s.yesterday_shipments),
+      trendLabel: '较昨日',
+      icon: 'Van',
+      color: '#FF8800'
+    }
+  ]
+})
+
+// ---- 趋势图相关 ----
+const chartRange = ref('7d')
+const chartAnimKey = ref(0)
+const lineDur = 0.8
+
+function polylineLength(dots) {
+  let len = 0
+  for (let i = 1; i < dots.length; i++) {
+    const dx = dots[i].x - dots[i - 1].x
+    const dy = dots[i].y - dots[i - 1].y
+    len += Math.sqrt(dx * dx + dy * dy)
+  }
+  return len || 1
+}
+
+function dotDelays(dots, offset = 0) {
+  const total = polylineLength(dots)
+  let cum = 0
+  return dots.map((_, i) => {
+    if (i > 0) {
+      const dx = dots[i].x - dots[i - 1].x
+      const dy = dots[i].y - dots[i - 1].y
+      cum += Math.sqrt(dx * dx + dy * dy)
+    }
+    return offset + (cum / total) * lineDur
+  })
+}
+
+const rangeOptions = [
+  { label: '近24小时', value: '1d' },
+  { label: '近1周', value: '7d' },
+  { label: '近1个月', value: '30d' },
+]
+
+async function switchRange(val) {
+  chartRange.value = val
+  await fetchStats(val)
+  chartAnimKey.value++
+}
+
+const chartData = computed(() => {
+  const orders = stats.value.daily_orders || []
+  const shipments = stats.value.daily_shipments || []
+  return orders.map((o, i) => ({
+    date: o.date,
+    orders: o.count,
+    shipments: shipments[i]?.count || 0,
+  }))
+})
+
+const chartMax = computed(() => {
+  let max = 0
+  for (const d of chartData.value) {
+    if (d.orders > max) max = d.orders
+    if (d.shipments > max) max = d.shipments
+  }
+  return Math.max(max, 1)
+})
+
+// SVG 尺寸
+const svgW = 800
+const svgH = 260
+const padL = 10
+const padR = 10
+const padT = 15
+const padB = 15
+const gridCount = 4
+
+const gridLines = computed(() => {
+  const lines = []
+  for (let i = 0; i <= gridCount; i++) {
+    lines.push(padT + (i / gridCount) * (svgH - padT - padB))
+  }
+  return lines
+})
+
+const gridLinePercents = computed(() =>
+  gridLines.value.map(y => `${(y / svgH) * 100}%`)
+)
+
+const yAxisLabels = computed(() => {
+  const m = chartMax.value
+  return [m, Math.round(m * 0.75), Math.round(m * 0.5), Math.round(m * 0.25), 0]
+})
+
+function toSvgPts(data, key) {
+  const len = data.length
+  if (len === 0) return []
+  const areaW = svgW - padL - padR
+  const areaH = svgH - padT - padB
+  return data.map((d, i) => {
+    const x = padL + (len === 1 ? areaW / 2 : (i / (len - 1)) * areaW)
+    const y = padT + areaH - (d[key] / chartMax.value) * areaH
+    return { x, y }
+  })
+}
+
+const orderDots = computed(() => toSvgPts(chartData.value, 'orders'))
+const shipmentDots = computed(() => toSvgPts(chartData.value, 'shipments'))
+const orderPoints = computed(() => orderDots.value.map(p => `${p.x},${p.y}`).join(' '))
+const shipmentPoints = computed(() => shipmentDots.value.map(p => `${p.x},${p.y}`).join(' '))
+
+const orderLineLen = computed(() => polylineLength(orderDots.value))
+const shipmentLineLen = computed(() => polylineLength(shipmentDots.value))
+const orderDotDelays = computed(() => dotDelays(orderDots.value, 0))
+const shipmentDotDelays = computed(() => dotDelays(shipmentDots.value, 0.15))
+
+const xLabels = computed(() => {
+  const data = chartData.value
+  if (data.length === 0) return []
+  const isHourly = chartRange.value === '1d'
+  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+  if (isHourly) {
+    // 24小时：每隔3小时显示标签
+    return data.map((d, i) => {
+      if (i % 3 !== 0 && i !== data.length - 1) return ''
+      // date 格式: "2026-04-24 14:00"
+      const parts = d.date.split(' ')
+      return parts[1] || ''
+    })
+  }
+
+  // 日级别
+  const step = data.length <= 10 ? 1 : Math.ceil(data.length / 8)
+  return data.map((d, i) => {
+    if (i % step !== 0 && i !== data.length - 1) return ''
+    const dt = new Date(d.date)
+    if (data.length <= 7) return `${dt.getMonth() + 1}/${dt.getDate()} ${weekdays[dt.getDay()]}`
+    return `${dt.getMonth() + 1}/${dt.getDate()}`
+  })
+})
+
+// ---- 数据概览 ----
+const overviewItems = computed(() => {
+  const s = stats.value
+  return [
+    { label: '订单总数', value: s.total_orders.toLocaleString() },
+    { label: '今日新增订单', value: s.today_orders.toLocaleString() },
+    { label: '发货单总数', value: s.total_shipments.toLocaleString() },
+    { label: '今日发货', value: s.today_shipments.toLocaleString() },
+    { label: '待审核订单', value: s.pending_orders.toLocaleString() },
+    { label: '产品总数', value: s.product_count.toLocaleString() },
+    { label: '系统用户数', value: s.user_count.toLocaleString() },
+  ]
+})
+
+async function fetchStats(range) {
+  try {
+    const params = range ? { range } : { range: chartRange.value }
+    const res = await request({ url: '/api/dashboard/stats', method: 'get', params })
+    if (res.data) {
+      stats.value = { ...stats.value, ...res.data }
+    }
+  } catch { /* silent */ }
 }
 
 onMounted(() => {
   updateTime()
   timer = setInterval(updateTime, 1000)
+  fetchStats()
 })
 
 onUnmounted(() => {
   if (timer) clearInterval(timer)
 })
-
-const statData = [
-  { title: '活跃用户', value: '1,284', trend: 12.5, icon: 'User', color: '#3370FF' },
-  { title: '在库产品', value: '3,452', trend: 5.2, icon: 'Box', color: '#00B365' },
-  { title: '待处理订单', value: '128', trend: -2.4, icon: 'Document', color: '#FF8800' },
-  { title: '本月营收', value: '¥124.5k', trend: 18.2, icon: 'TrendCharts', color: '#F54A45' }
-]
-
-const activities = [
-  { content: '新订单 #SO2026041501 待审批', time: '10 分钟前', type: 'primary' },
-  { content: '库存盘点异常警告：A区少件', time: '1 小时前', type: 'warning' },
-  { content: '发货单 #SH2026041503 已完成出库', time: '2 小时前', type: 'success' },
-  { content: '系统例行数据备份完成', time: '昨天 23:00', type: 'default' },
-  { content: '张三 修改了系统基础配置', time: '昨天 15:30', type: 'default' }
-]
 </script>
 
 <style scoped>
@@ -196,15 +475,6 @@ const activities = [
 .date-day {
   font-size: 14px;
   color: var(--lark-text-secondary);
-}
-
-/* 通用面板标题 */
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--lark-text-primary);
-  margin: 0;
-  padding: 0 4px;
 }
 
 /* 统计卡片 */
@@ -277,6 +547,75 @@ const activities = [
   color: #00B365;
 }
 
+/* 服务状态卡片组 */
+.status-card-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+.mini-status-card {
+  flex: 1;
+  background: var(--lark-bg-base);
+  border-radius: var(--lark-radius-lg);
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: transform 0.2s, box-shadow 0.2s;
+  cursor: default;
+}
+
+.mini-status-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--lark-shadow-hover);
+}
+
+.mini-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.mini-status-dot.green {
+  background-color: #00B365;
+  box-shadow: 0 0 0 3px rgba(0,179,101,0.15);
+}
+
+.mini-status-dot.red {
+  background-color: #F54A45;
+  box-shadow: 0 0 0 3px rgba(245,74,69,0.15);
+}
+
+.mini-status-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mini-status-label {
+  font-size: 12px;
+  color: var(--lark-text-secondary);
+  line-height: 1;
+}
+
+.mini-status-text {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--lark-text-primary);
+  line-height: 1.3;
+}
+
+.mini-status-card.online .mini-status-text {
+  color: #00B365;
+}
+
+.mini-status-card.offline .mini-status-text {
+  color: var(--lark-text-secondary);
+}
+
 /* 通用面板 */
 .lark-panel {
   background: var(--lark-bg-base);
@@ -337,55 +676,199 @@ const activities = [
   font-size: 14px;
 }
 
-/* 飞书极简风格占位图表 */
-.lark-mock-chart {
+/* 时间范围切换器 */
+.range-switcher {
   display: flex;
-  height: 250px;
-  margin-top: 20px;
+  gap: 4px;
+  background: var(--lark-bg-body, #f5f6f7);
+  border-radius: 6px;
+  padding: 3px;
 }
 
-.chart-y-axis {
+.range-btn {
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--lark-text-secondary);
+  transition: all 0.2s;
+  user-select: none;
+  font-weight: 500;
+}
+
+.range-btn:hover {
+  color: var(--lark-text-primary);
+}
+
+.range-btn.active {
+  background: var(--lark-bg-base, #fff);
+  color: var(--lark-primary, #3370ff);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+/* 图表图例 */
+.chart-legend {
+  display: flex;
+  gap: 20px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--lark-text-regular);
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.legend-dot.order {
+  background-color: var(--lark-primary, #3370FF);
+}
+
+.legend-dot.shipment {
+  background-color: #00B365;
+}
+
+/* SVG 折线图 */
+.line-chart-wrapper {
+  position: relative;
+  height: 260px;
+  margin-top: 8px;
+  margin-left: 48px;
+}
+
+.line-chart-svg {
+  width: 100%;
+  height: 100%;
+}
+
+.grid-line {
+  stroke: var(--lark-border-light, #eee);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+.chart-line {
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.animated-line {
+  animation: line-draw 0.8s ease forwards;
+}
+
+.animated-dot {
+  opacity: 0;
+  animation: dot-pop 0.3s ease forwards;
+}
+
+@keyframes line-draw {
+  to { stroke-dashoffset: 0; }
+}
+
+@keyframes dot-pop {
+  0% { opacity: 0; r: 0; }
+  60% { opacity: 1; r: 4.5; }
+  100% { opacity: 1; r: 3.5; }
+}
+
+.order-line {
+  stroke: var(--lark-primary, #3370FF);
+}
+
+.shipment-line {
+  stroke: #00B365;
+}
+
+.chart-dot {
+  transition: r 0.15s;
+}
+
+.chart-dot:hover {
+  r: 5.5;
+}
+
+.order-dot {
+  fill: var(--lark-primary, #3370FF);
+}
+
+.shipment-dot {
+  fill: #00B365;
+}
+
+.y-labels {
+  position: absolute;
+  left: -44px;
+  top: 0;
+  bottom: 0;
+  width: 40px;
+  pointer-events: none;
+}
+
+.y-labels span {
+  position: absolute;
+  right: 0;
+  font-size: 11px;
+  color: var(--lark-text-secondary);
+  transform: translateY(-50%);
+  text-align: right;
+}
+
+.x-labels {
+  display: flex;
+  justify-content: space-between;
+  padding-top: 10px;
+  margin-left: 48px;
+  color: var(--lark-text-secondary);
+  font-size: 11px;
+}
+
+/* 数据概览列表 */
+.overview-list {
   display: flex;
   flex-direction: column;
+  gap: 0;
+  margin-top: 4px;
+}
+
+.overview-item {
+  display: flex;
   justify-content: space-between;
-  padding-right: 16px;
+  align-items: center;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--lark-border-light, #f0f0f0);
+}
+
+.overview-item:last-child {
+  border-bottom: none;
+}
+
+.overview-label {
+  font-size: 14px;
+  color: var(--lark-text-regular);
+}
+
+.overview-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--lark-text-primary);
+}
+
+/* 系统动态时间轴 */
+.empty-activity {
+  text-align: center;
   color: var(--lark-text-secondary);
-  font-size: 12px;
-  text-align: right;
-  width: 40px;
-  border-right: 1px dashed var(--lark-border-light);
+  padding: 32px 0;
+  font-size: 14px;
 }
 
-.chart-content {
-  flex: 1;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-around;
-  padding: 0 10px;
-}
-
-.chart-bar {
-  width: 32px;
-  background-color: var(--lark-primary-light);
-  border-radius: 4px 4px 0 0;
-  transition: all 0.3s ease;
-  position: relative;
-}
-
-.chart-bar:hover, .chart-bar.active {
-  background-color: var(--lark-primary);
-}
-
-.chart-x-axis {
-  display: flex;
-  justify-content: space-around;
-  margin-left: 40px;
-  padding-top: 12px;
-  color: var(--lark-text-secondary);
-  font-size: 12px;
-}
-
-/* 飞书极简时间轴 */
 .lark-timeline {
   display: flex;
   flex-direction: column;
@@ -417,6 +900,7 @@ const activities = [
   margin-top: 6px;
   position: relative;
   z-index: 1;
+  flex-shrink: 0;
 }
 
 .timeline-dot.primary { background-color: var(--lark-primary); box-shadow: 0 0 0 3px var(--lark-primary-light); }

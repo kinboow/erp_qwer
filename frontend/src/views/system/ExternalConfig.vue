@@ -6,11 +6,17 @@
     </div>
 
     <div class="lark-table-panel">
-      <el-tabs v-model="activeTab">
-        <el-tab-pane label="企微配置" name="wechat">
+      <el-tabs v-model="activeTab" class="config-tabs">
+        <el-tab-pane name="wechat">
+          <template #label>
+            <span class="tab-label"><el-icon><ChatDotRound /></el-icon>企微配置</span>
+          </template>
           <WechatConfig />
         </el-tab-pane>
-        <el-tab-pane label="ERP 同步配置" name="erp">
+        <el-tab-pane name="erp">
+          <template #label>
+            <span class="tab-label"><el-icon><DataLine /></el-icon>ERP 同步配置</span>
+          </template>
           <ErpSyncConfig />
         </el-tab-pane>
       </el-tabs>
@@ -20,6 +26,7 @@
 
 <script setup>
 import { ref } from 'vue'
+import { ChatDotRound, DataLine } from '@element-plus/icons-vue'
 import WechatConfig from './WechatConfig.vue'
 import ErpSyncConfig from './ErpSyncConfig.vue'
 
@@ -50,6 +57,22 @@ const activeTab = ref('wechat')
 .lark-table-panel {
   background: var(--lark-bg-base);
   border-radius: var(--lark-radius-lg);
-  padding: 20px 24px;
+  padding: 24px 28px;
+}
+
+.tab-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+}
+
+:deep(.config-tabs > .el-tabs__header) {
+  margin-bottom: 24px;
+}
+
+:deep(.config-tabs .el-tabs__item) {
+  font-size: 14px;
+  font-weight: 500;
 }
 </style>

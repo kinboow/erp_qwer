@@ -76,9 +76,13 @@
         未检测到任何实例，请确认企业微信服务已启动
       </div>
 
+      <div v-else-if="runningInstances.length === 0" class="empty-hint">
+        未检测到运行中的实例，请确认企业微信服务已启动
+      </div>
+
       <div v-else class="instance-list">
         <div
-          v-for="inst in instances"
+          v-for="inst in runningInstances"
           :key="inst.wxid || `client-${inst.client_id || inst.pid}`"
           class="instance-item"
           :class="{ selected: selectedWxid === inst.wxid, disabled: !inst.wxid }"
@@ -249,8 +253,9 @@ const compatWsUrl = computed(() => {
 
 const configLoaded = ref(false)
 const hasApiConfig = computed(() => configLoaded.value && !!(configForm.host && configForm.port))
+const runningInstances = computed(() => instances.value.filter(item => item.status))
 const loggedInCount = computed(() => instances.value.filter(item => item.login_status).length)
-const runningCount = computed(() => instances.value.filter(item => item.status).length)
+const runningCount = computed(() => runningInstances.value.length)
 
 const getInstanceStatusClass = (inst) => {
   if (inst.login_status) return 'online'
@@ -625,47 +630,35 @@ onMounted(async () => {
 .lark-wechat-config {
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 24px;
 }
 
-.lark-page-header { margin-bottom: 4px; }
-
-.header-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--lark-text-primary);
-  margin-bottom: 6px;
-}
-
-.header-desc {
-  font-size: 13px;
-  color: var(--lark-text-secondary);
-}
-
+/* 每个配置区域为独立卡片 */
 .config-section {
-  padding: 0 0 20px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--lark-border-light, #f0f0f0);
-}
-
-.config-section:last-child {
-  border-bottom: none;
-  margin-bottom: 0;
-  padding-bottom: 0;
+  background: var(--lark-bg-body, #f7f8fa);
+  border-radius: 10px;
+  padding: 24px;
 }
 
 .section-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--lark-text-primary);
   margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--lark-border-light, #eee);
+}
+
+.section-title .el-icon {
+  font-size: 18px;
+  color: var(--lark-primary, #3370ff);
 }
 
 .config-form {
-  max-width: 600px;
+  max-width: 560px;
 }
 
 .form-row {
@@ -679,7 +672,7 @@ onMounted(async () => {
 .form-actions {
   display: flex;
   gap: 12px;
-  margin-top: 8px;
+  margin-top: 4px;
 }
 
 /* 测试结果 */
@@ -687,10 +680,10 @@ onMounted(async () => {
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  padding: 14px 16px;
-  border-radius: var(--lark-radius-sm);
+  padding: 12px 16px;
+  border-radius: 8px;
   margin-top: 16px;
-  max-width: 600px;
+  max-width: 560px;
 }
 
 .test-result.success {
@@ -720,32 +713,34 @@ onMounted(async () => {
 .instance-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .instance-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 16px;
-  border: 1px solid var(--lark-border-light);
-  border-radius: var(--lark-radius);
+  padding: 14px 18px;
+  background: var(--lark-bg-base, #fff);
+  border: 1.5px solid transparent;
+  border-radius: 10px;
   cursor: pointer;
   transition: all 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
 
 .instance-item:hover {
   border-color: var(--lark-primary);
-  background-color: var(--lark-bg-hover);
+  box-shadow: 0 2px 8px rgba(51,112,255,0.08);
 }
 
 .instance-item.selected {
   border-color: var(--lark-primary);
-  background-color: var(--lark-primary-light);
+  background: linear-gradient(135deg, rgba(51,112,255,0.04), rgba(51,112,255,0.08));
 }
 
 .instance-item.disabled {
-  opacity: 0.75;
+  opacity: 0.7;
 }
 
 .inst-left {
@@ -755,16 +750,17 @@ onMounted(async () => {
 }
 
 .inst-avatar {
-  width: 40px;
-  height: 40px;
-  border-radius: 8px;
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
 }
 
 .inst-avatar.online {
-  background-color: #e8f8ef;
+  background: linear-gradient(135deg, #d4f5e2, #e8f8ef);
   color: #00B365;
 }
 
@@ -774,7 +770,7 @@ onMounted(async () => {
 }
 
 .inst-avatar.pending {
-  background-color: #fff7e8;
+  background: linear-gradient(135deg, #fff0d6, #fff7e8);
   color: #ff8800;
 }
 
@@ -782,7 +778,7 @@ onMounted(async () => {
   width: 100%;
   height: 100%;
   object-fit: cover;
-  border-radius: 8px;
+  border-radius: 10px;
 }
 
 .inst-name {
@@ -795,7 +791,7 @@ onMounted(async () => {
 .inst-wxid {
   font-size: 12px;
   color: var(--lark-text-secondary);
-  font-family: monospace;
+  font-family: 'SF Mono', 'Menlo', monospace;
 }
 
 .inst-meta {
@@ -807,7 +803,7 @@ onMounted(async () => {
 .inst-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
 .inst-status-group {
@@ -818,9 +814,9 @@ onMounted(async () => {
 }
 
 .inst-status {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
-  padding: 2px 10px;
+  padding: 3px 10px;
   border-radius: 12px;
 }
 
@@ -841,28 +837,29 @@ onMounted(async () => {
 
 .instance-summary {
   display: flex;
-  gap: 16px;
-  margin-top: 16px;
+  gap: 12px;
+  margin-top: 18px;
   flex-wrap: wrap;
 }
 
 .summary-item {
   min-width: 100px;
-  padding: 10px 14px;
-  border-radius: var(--lark-radius-sm);
-  background: var(--lark-bg-hover);
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--lark-bg-base, #fff);
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
 
 .summary-label {
   display: block;
   font-size: 12px;
   color: var(--lark-text-secondary);
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .summary-value {
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 20px;
+  font-weight: 700;
   color: var(--lark-text-primary);
 }
 
@@ -876,8 +873,8 @@ onMounted(async () => {
   gap: 10px;
   margin-top: 16px;
   padding: 14px 16px;
-  border-radius: var(--lark-radius-sm);
-  background: var(--lark-bg-hover);
+  border-radius: 8px;
+  background: var(--lark-bg-base, #fff);
 }
 
 .auto-receive-content {
@@ -902,8 +899,8 @@ onMounted(async () => {
   margin-top: 16px;
   padding: 16px;
   border: 1px dashed var(--lark-border-light);
-  border-radius: var(--lark-radius-sm);
-  background: var(--lark-bg-hover);
+  border-radius: 8px;
+  background: var(--lark-bg-base, #fff);
 }
 
 .compat-address-title {
@@ -925,7 +922,7 @@ onMounted(async () => {
 }
 
 .empty-hint {
-  padding: 32px;
+  padding: 40px;
   text-align: center;
   color: var(--lark-text-secondary);
   font-size: 14px;
@@ -934,11 +931,11 @@ onMounted(async () => {
 .bound-info {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin-top: 16px;
-  padding: 10px 14px;
-  background-color: var(--lark-primary-light);
-  border-radius: var(--lark-radius-sm);
+  padding: 12px 16px;
+  background: linear-gradient(135deg, rgba(51,112,255,0.06), rgba(51,112,255,0.1));
+  border-radius: 8px;
   font-size: 13px;
   color: var(--lark-primary);
 }
@@ -946,6 +943,7 @@ onMounted(async () => {
 :deep(.el-form-item__label) {
   padding-bottom: 4px;
   font-weight: 500;
+  font-size: 13px;
   color: var(--lark-text-primary);
 }
 

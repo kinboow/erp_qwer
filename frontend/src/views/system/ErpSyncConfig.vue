@@ -1,8 +1,8 @@
 <template>
   <div class="lark-erp-sync-config">
     <!-- 连接配置 -->
-    <div class="config-section">
-      <div class="section-title">
+    <div class="config-card">
+      <div class="card-title">
         <el-icon><Connection /></el-icon>
         <span>ERP 连接配置</span>
       </div>
@@ -20,40 +20,37 @@
             <el-input v-model="form.erp_password" placeholder="ERP 登录密码" show-password />
           </el-form-item>
         </div>
-
       </el-form>
     </div>
 
     <!-- 同步策略 -->
-    <div class="config-section">
-      <div class="section-title">
+    <div class="config-card">
+      <div class="card-title">
         <el-icon><Timer /></el-icon>
         <span>同步策略</span>
       </div>
 
-      <el-form :model="form" label-position="top" class="config-form">
-        <div class="form-row">
-          <el-form-item label="同步间隔（分钟）" class="form-col-sm">
-            <el-input-number v-model="form.sync_interval_minutes" :min="1" :max="1440" />
-          </el-form-item>
-          <el-form-item label="同步天数范围" class="form-col-sm">
-            <el-input-number v-model="form.sync_days_back" :min="1" :max="365" />
-          </el-form-item>
-          <el-form-item label="启用自动同步" class="form-col-sm">
-            <el-switch v-model="form.sync_enabled" />
-          </el-form-item>
+      <div class="sync-strategy-grid">
+        <div class="strategy-item">
+          <div class="strategy-label">同步间隔（分钟）</div>
+          <el-input-number v-model="form.sync_interval_minutes" :min="1" :max="1440" controls-position="right" />
         </div>
-      </el-form>
-    </div>
+        <div class="strategy-item">
+          <div class="strategy-label">同步天数范围</div>
+          <el-input-number v-model="form.sync_days_back" :min="1" :max="365" controls-position="right" />
+        </div>
+        <div class="strategy-item">
+          <div class="strategy-label">启用自动同步</div>
+          <el-switch v-model="form.sync_enabled" active-text="开启" inactive-text="关闭" />
+        </div>
+      </div>
 
-    <!-- 操作按钮 -->
-    <div class="config-section">
       <div class="form-actions">
         <el-button type="primary" @click="handleSave" :loading="saving">
           <el-icon><Check /></el-icon>
           保存配置
         </el-button>
-        <el-button type="warning" @click="handleTriggerSync" :loading="syncing" :disabled="!form.erp_base_url">
+        <el-button @click="handleTriggerSync" :loading="syncing" :disabled="!form.erp_base_url">
           <el-icon><Refresh /></el-icon>
           立即同步
         </el-button>
@@ -61,65 +58,68 @@
     </div>
 
     <!-- 同步状态 -->
-    <div class="config-section">
-      <div class="section-title">
+    <div class="config-card">
+      <div class="card-title">
         <el-icon><DataAnalysis /></el-icon>
         <span>同步状态</span>
-        <el-button size="small" :icon="Refresh" @click="loadStatus" style="margin-left: auto;">刷新</el-button>
+        <el-button size="small" :icon="Refresh" @click="loadStatus" class="refresh-btn">刷新</el-button>
       </div>
 
-      <div class="status-grid">
-        <div class="status-item">
-          <span class="status-label">调度器</span>
-          <el-tag :type="status.scheduler_running ? 'success' : 'info'" size="small">
+      <div class="status-cards">
+        <div class="status-card">
+          <div class="sc-label">调度器</div>
+          <div class="sc-value">
+            <span class="sc-dot" :class="status.scheduler_running ? 'green' : 'gray'"></span>
             {{ status.scheduler_running ? '运行中' : '未启动' }}
-          </el-tag>
+          </div>
         </div>
-        <div class="status-item">
-          <span class="status-label">当前状态</span>
-          <el-tag :type="status.is_syncing ? 'warning' : 'info'" size="small">
+        <div class="status-card">
+          <div class="sc-label">当前状态</div>
+          <div class="sc-value">
+            <span class="sc-dot" :class="status.is_syncing ? 'orange' : 'gray'"></span>
             {{ status.is_syncing ? '同步中…' : '空闲' }}
-          </el-tag>
+          </div>
         </div>
-        <div class="status-item">
-          <span class="status-label">自动同步</span>
-          <el-tag :type="status.sync_enabled ? 'success' : 'danger'" size="small">
+        <div class="status-card">
+          <div class="sc-label">自动同步</div>
+          <div class="sc-value">
+            <span class="sc-dot" :class="status.sync_enabled ? 'green' : 'red'"></span>
             {{ status.sync_enabled ? '已启用' : '已禁用' }}
-          </el-tag>
+          </div>
         </div>
-        <div class="status-item">
-          <span class="status-label">同步间隔</span>
-          <span class="status-value">{{ status.interval_minutes || '-' }} 分钟</span>
+        <div class="status-card">
+          <div class="sc-label">同步间隔</div>
+          <div class="sc-value num">{{ status.interval_minutes || '-' }} <small>分钟</small></div>
         </div>
-        <div class="status-item">
-          <span class="status-label">同步范围</span>
-          <span class="status-value">最近 {{ status.days_back || '-' }} 天</span>
+        <div class="status-card">
+          <div class="sc-label">同步范围</div>
+          <div class="sc-value num">{{ status.days_back || '-' }} <small>天</small></div>
         </div>
       </div>
 
       <div v-if="status.last_result && Object.keys(status.last_result).length" class="last-sync-result">
-        <div class="result-title">上次同步结果</div>
-        <div class="result-grid">
-          <div v-if="status.last_result.synced_at" class="result-item">
-            <span class="result-label">时间</span>
-            <span class="result-value">{{ status.last_result.synced_at }}</span>
+        <div class="result-header">上次同步结果</div>
+        <div class="result-cards">
+          <div v-if="status.last_result.synced_at" class="result-card">
+            <div class="rc-label">同步时间</div>
+            <div class="rc-value">{{ status.last_result.synced_at }}</div>
           </div>
-          <div v-if="status.last_result.total_found !== undefined" class="result-item">
-            <span class="result-label">发现订单</span>
-            <span class="result-value">{{ status.last_result.total_found }}</span>
+          <div v-if="status.last_result.total_found !== undefined" class="result-card">
+            <div class="rc-label">发现订单</div>
+            <div class="rc-value">{{ status.last_result.total_found }}</div>
           </div>
-          <div v-if="status.last_result.synced !== undefined" class="result-item">
-            <span class="result-label">成功同步</span>
-            <span class="result-value success">{{ status.last_result.synced }}</span>
+          <div v-if="status.last_result.synced !== undefined" class="result-card">
+            <div class="rc-label">成功同步</div>
+            <div class="rc-value success">{{ status.last_result.synced }}</div>
           </div>
-          <div v-if="status.last_result.failed !== undefined" class="result-item">
-            <span class="result-label">失败</span>
-            <span class="result-value" :class="{ error: status.last_result.failed > 0 }">{{ status.last_result.failed }}</span>
+          <div v-if="status.last_result.failed !== undefined" class="result-card">
+            <div class="rc-label">失败</div>
+            <div class="rc-value" :class="{ error: status.last_result.failed > 0 }">{{ status.last_result.failed }}</div>
           </div>
-          <div v-if="status.last_result.error" class="result-item full">
-            <span class="result-label">错误</span>
-            <span class="result-value error">{{ status.last_result.error }}</span>
-          </div>
+        </div>
+        <div v-if="status.last_result.error" class="result-error">
+          <el-icon><WarningFilled /></el-icon>
+          <span>{{ status.last_result.error }}</span>
         </div>
       </div>
     </div>
@@ -129,7 +129,7 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Connection, Check, Refresh, Timer, DataAnalysis, Upload, Plus, Loading } from '@element-plus/icons-vue'
+import { Connection, Check, Refresh, Timer, DataAnalysis, Upload, Plus, Loading, WarningFilled } from '@element-plus/icons-vue'
 import { getErpSyncConfig, saveErpSyncConfig, getErpSyncStatus, triggerErpSync, uploadErpQr, fetchQrImageUrl } from '@/api/erpSync'
 
 const formRef = ref(null)
@@ -265,32 +265,41 @@ onMounted(async () => {
 
 <style scoped>
 .lark-erp-sync-config {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
-.config-section {
-  padding: 0 0 20px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--lark-border-light, #f0f0f0);
+/* 卡片区域 */
+.config-card {
+  background: var(--lark-bg-body, #f7f8fa);
+  border-radius: 10px;
+  padding: 24px;
 }
 
-.config-section:last-child {
-  border-bottom: none;
-  margin-bottom: 0;
-  padding-bottom: 0;
-}
-
-.section-title {
+.card-title {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--lark-text-primary, #1f2329);
   margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--lark-border-light, #eee);
+}
+
+.card-title .el-icon {
+  font-size: 18px;
+  color: var(--lark-primary, #3370ff);
+}
+
+.refresh-btn {
+  margin-left: auto;
 }
 
 .config-form {
-  max-width: 600px;
+  max-width: 560px;
 }
 
 .form-row {
@@ -302,8 +311,34 @@ onMounted(async () => {
   flex: 1;
 }
 
-.form-col-sm {
-  flex: 0 0 auto;
+:deep(.el-form-item__label) {
+  padding-bottom: 4px;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--lark-text-primary);
+}
+
+/* 同步策略网格 */
+.sync-strategy-grid {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.strategy-item {
+  background: var(--lark-bg-base, #fff);
+  border-radius: 10px;
+  padding: 16px 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  min-width: 160px;
+}
+
+.strategy-label {
+  font-size: 12px;
+  color: var(--lark-text-secondary, #8f959e);
+  margin-bottom: 10px;
+  font-weight: 500;
 }
 
 .form-actions {
@@ -311,79 +346,127 @@ onMounted(async () => {
   gap: 12px;
 }
 
-.status-grid {
+/* 状态卡片组 */
+.status-cards {
   display: flex;
+  gap: 12px;
   flex-wrap: wrap;
-  gap: 16px;
 }
 
-.status-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 140px;
+.status-card {
+  background: var(--lark-bg-base, #fff);
+  border-radius: 10px;
+  padding: 14px 18px;
+  min-width: 130px;
+  flex: 1;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
 }
 
-.status-label {
-  font-size: 13px;
-  color: #8f959e;
-}
-
-.status-value {
-  font-size: 13px;
-  font-weight: 500;
-  color: #1f2329;
-}
-
-.last-sync-result {
-  margin-top: 16px;
-  padding: 12px;
-  background: #f7f8fa;
-  border-radius: 6px;
-}
-
-.result-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #646a73;
+.sc-label {
+  font-size: 12px;
+  color: var(--lark-text-secondary, #8f959e);
   margin-bottom: 8px;
 }
 
-.result-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 24px;
-}
-
-.result-item {
+.sc-value {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--lark-text-primary, #1f2329);
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
-.result-item.full {
-  flex-basis: 100%;
+.sc-value.num {
+  font-size: 22px;
+  font-weight: 700;
 }
 
-.result-label {
+.sc-value.num small {
   font-size: 12px;
-  color: #8f959e;
+  font-weight: 400;
+  color: var(--lark-text-secondary, #8f959e);
 }
 
-.result-value {
+.sc-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.sc-dot.green { background-color: #00B365; box-shadow: 0 0 0 3px rgba(0,179,101,0.15); }
+.sc-dot.orange { background-color: #FF8800; box-shadow: 0 0 0 3px rgba(255,136,0,0.15); }
+.sc-dot.red { background-color: #F54A45; box-shadow: 0 0 0 3px rgba(245,74,69,0.15); }
+.sc-dot.gray { background-color: #c0c4cc; }
+
+/* 上次同步结果 */
+.last-sync-result {
+  margin-top: 20px;
+  background: var(--lark-bg-base, #fff);
+  border-radius: 10px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+
+.result-header {
   font-size: 13px;
-  font-weight: 500;
-  color: #1f2329;
+  font-weight: 600;
+  color: var(--lark-text-secondary, #646a73);
+  margin-bottom: 14px;
 }
 
-.result-value.success {
-  color: #00b42a;
+.result-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
-.result-value.error {
-  color: #f53f3f;
+.result-card {
+  min-width: 110px;
+  flex: 1;
 }
 
+.rc-label {
+  font-size: 12px;
+  color: var(--lark-text-secondary, #8f959e);
+  margin-bottom: 4px;
+}
+
+.rc-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--lark-text-primary, #1f2329);
+}
+
+.rc-value.success {
+  color: #00B365;
+}
+
+.rc-value.error {
+  color: #F54A45;
+}
+
+.result-error {
+  margin-top: 12px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  background: #fef0f0;
+  border-radius: 8px;
+  color: #F54A45;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.result-error .el-icon {
+  font-size: 16px;
+  margin-top: 1px;
+  flex-shrink: 0;
+}
+
+/* QR 相关（保留） */
 .qr-upload-area {
   position: relative;
 }
