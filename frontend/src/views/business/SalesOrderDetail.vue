@@ -44,7 +44,7 @@
       <!-- 明细行 -->
       <div class="items-section">
         <h3 class="section-title">订单明细 <span class="item-count" v-if="items.length">（{{ items.length }} 项）</span></h3>
-        <el-table :data="items" stripe size="small" class="items-table" v-if="items.length">
+        <el-table :data="items" stripe size="default" class="items-table" show-summary :summary-method="summaryMethod" v-if="items.length">
           <el-table-column type="index" label="#" width="50" align="center" />
           <el-table-column label="品牌" prop="brand" width="100" />
           <el-table-column label="货号" prop="product_no" width="130" />
@@ -87,7 +87,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { getOrderDetail } from '@/api/salesOrders'
@@ -129,6 +129,22 @@ async function fetchDetail() {
   } finally {
     loading.value = false
   }
+}
+
+function summaryMethod({ columns }) {
+  const sums = []
+  columns.forEach((col, index) => {
+    if (index === 0) {
+      sums[index] = '合计'
+      return
+    }
+    if (col.property === 'total_qty') {
+      sums[index] = items.value.reduce((s, item) => s + (item.total_qty || 0), 0)
+      return
+    }
+    sums[index] = ''
+  })
+  return sums
 }
 
 onMounted(fetchDetail)
@@ -212,6 +228,15 @@ onMounted(fetchDetail)
 }
 
 .items-table {
-  font-size: 12px;
+  font-size: 14px;
+}
+
+:deep(.items-table td.el-table__cell) {
+  padding: 8px 0;
+}
+
+:deep(.items-table .el-table__footer td.el-table__cell) {
+  font-weight: 600;
+  font-size: 14px;
 }
 </style>

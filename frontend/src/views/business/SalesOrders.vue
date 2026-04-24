@@ -65,10 +65,10 @@
         <el-table-column label="印次" prop="print_count" width="70" align="center" />
         <el-table-column label="单号" prop="order_no" width="160">
           <template #default="{ row }">
-            <span class="order-no">{{ row.order_no }}</span>
+            <span class="order-no copyable" @click.stop="copyOrderNo(row.order_no)" title="点击复制">{{ row.order_no }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="订单日期" prop="order_date" width="110" />
+        <el-table-column label="订单日期" prop="order_date" width="120" />
         <el-table-column label="客户名称" prop="customer_name" min-width="140" show-overflow-tooltip />
         <el-table-column label="客户电话" prop="customer_tel" width="130" show-overflow-tooltip />
         <el-table-column label="客户地址" prop="customer_addr" min-width="160" show-overflow-tooltip />
@@ -101,6 +101,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getSalesOrders } from '@/api/salesOrders'
 
@@ -158,6 +159,34 @@ async function fetchOrders() {
 
 function viewDetail(row) {
   router.push({ path: `/sales/${encodeURIComponent(row.order_no)}` })
+}
+
+function copyOrderNo(orderNo) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(orderNo).then(() => {
+      ElMessage.success('单号已复制')
+    }).catch(() => {
+      fallbackCopy(orderNo)
+    })
+  } else {
+    fallbackCopy(orderNo)
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    ElMessage.success('单号已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+  document.body.removeChild(ta)
 }
 
 onMounted(() => {
@@ -286,7 +315,12 @@ onMounted(() => {
 :deep(.el-table) {
   --el-table-border-color: var(--lark-border-light);
   --el-table-header-bg-color: var(--lark-bg-subtle);
-  font-size: 13px;
+  font-size: 14px;
+}
+
+.order-no.copyable {
+  cursor: pointer;
+  color: var(--el-color-primary, #409eff);
 }
 
 :deep(.el-table td.el-table__cell) {
