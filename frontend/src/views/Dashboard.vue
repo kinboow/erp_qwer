@@ -27,7 +27,7 @@
         <div class="lark-stat-card">
           <div class="stat-header">
             <span class="stat-name">{{ stat.title }}</span>
-            <el-icon class="stat-icon" :style="{ color: stat.color }"><component :is="stat.icon" /></el-icon>
+            <el-icon class="stat-icon" :style="{ background: stat.color, color: '#fff' }"><component :is="stat.icon" /></el-icon>
           </div>
           <div class="stat-body">
             <span class="stat-number">{{ stat.value }}</span>
@@ -83,17 +83,39 @@
               <span class="legend-item"><span class="legend-dot order"></span>订单</span>
               <span class="legend-item"><span class="legend-dot shipment"></span>发货单</span>
             </div>
-            <div class="line-chart-wrapper">
-              <svg :key="chartAnimKey" :viewBox="`0 0 ${svgW} ${svgH}`" class="line-chart-svg" preserveAspectRatio="xMidYMid meet">
+            <div class="line-chart-wrapper" ref="chartWrapperRef">
+              <svg :key="chartAnimKey" :viewBox="`0 0 ${svgW} ${svgH}`" class="line-chart-svg" preserveAspectRatio="xMidYMid meet"
+                @mousemove="onChartMouseMove" @mouseleave="onChartMouseLeave">
                 <!-- 网格线 -->
                 <line v-for="(y, i) in gridLines" :key="'g'+i" :x1="padL" :y1="y" :x2="svgW - padR" :y2="y" class="grid-line" />
                 <!-- 订单折线 -->
                 <polyline :points="orderPoints" class="chart-line order-line animated-line" fill="none" :style="{ strokeDasharray: orderLineLen, strokeDashoffset: orderLineLen }" />
-                <circle v-for="(p, i) in orderDots" :key="'o'+i" :cx="p.x" :cy="p.y" r="3.5" class="chart-dot order-dot animated-dot" :style="{ animationDelay: orderDotDelays[i] + 's' }" />
                 <!-- 发货折线 -->
                 <polyline :points="shipmentPoints" class="chart-line shipment-line animated-line" fill="none" :style="{ strokeDasharray: shipmentLineLen, strokeDashoffset: shipmentLineLen, animationDelay: '0.15s' }" />
-                <circle v-for="(p, i) in shipmentDots" :key="'s'+i" :cx="p.x" :cy="p.y" r="3.5" class="chart-dot shipment-dot animated-dot" :style="{ animationDelay: shipmentDotDelays[i] + 's' }" />
+                <!-- 数据点 -->
+                <circle v-for="(p, i) in orderDots" :key="'o'+i" :cx="p.x" :cy="p.y" r="3" class="chart-dot order-dot" />
+                <circle v-for="(p, i) in shipmentDots" :key="'s'+i" :cx="p.x" :cy="p.y" r="3" class="chart-dot shipment-dot" />
+                <!-- hover 辅助线 -->
+                <template v-if="hoverIdx >= 0">
+                  <line :x1="orderDots[hoverIdx]?.x" :y1="padT" :x2="orderDots[hoverIdx]?.x" :y2="svgH - padB" class="hover-guide-line" />
+                  <circle :cx="orderDots[hoverIdx]?.x" :cy="orderDots[hoverIdx]?.y" r="4" class="hover-dot order-dot" />
+                  <circle :cx="shipmentDots[hoverIdx]?.x" :cy="shipmentDots[hoverIdx]?.y" r="4" class="hover-dot shipment-dot" />
+                </template>
               </svg>
+              <!-- Tooltip -->
+              <div v-if="hoverIdx >= 0" class="chart-tooltip" :style="tooltipStyle">
+                <div class="tooltip-date">{{ tooltipData.date }}</div>
+                <div class="tooltip-row">
+                  <span class="tooltip-dot order"></span>
+                  <span class="tooltip-label">订单</span>
+                  <span class="tooltip-val">{{ tooltipData.orders }}</span>
+                </div>
+                <div class="tooltip-row">
+                  <span class="tooltip-dot shipment"></span>
+                  <span class="tooltip-label">发货单</span>
+                  <span class="tooltip-val">{{ tooltipData.shipments }}</span>
+                </div>
+              </div>
               <!-- Y轴标签 -->
               <div class="y-labels">
                 <span v-for="(v, i) in yAxisLabels" :key="i" :style="{ top: gridLinePercents[i] }">{{ v }}</span>
@@ -233,10 +255,11 @@ const statCards = computed(() => {
   const s = stats.value
   return [
     {
-      title: '在库产品',
+      title: '在线产品',
       value: s.product_count.toLocaleString(),
       trend: null,
-      trendLabel: '同步产品总数',
+      trendLabel: '',
+
       icon: 'Box',
       color: '#00B365'
     },
@@ -249,7 +272,7 @@ const statCards = computed(() => {
       color: '#3370FF'
     },
     {
-      title: '发货订单',
+      title: '包货订单',
       value: s.today_shipments.toLocaleString(),
       trend: calcTrend(s.today_shipments, s.yesterday_shipments),
       trendLabel: '较昨日',
@@ -262,7 +285,6 @@ const statCards = computed(() => {
 // ---- 趋势图相关 ----
 const chartRange = ref('7d')
 const chartAnimKey = ref(0)
-const lineDur = 0.8
 
 function polylineLength(dots) {
   let len = 0
@@ -272,19 +294,6 @@ function polylineLength(dots) {
     len += Math.sqrt(dx * dx + dy * dy)
   }
   return len || 1
-}
-
-function dotDelays(dots, offset = 0) {
-  const total = polylineLength(dots)
-  let cum = 0
-  return dots.map((_, i) => {
-    if (i > 0) {
-      const dx = dots[i].x - dots[i - 1].x
-      const dy = dots[i].y - dots[i - 1].y
-      cum += Math.sqrt(dx * dx + dy * dy)
-    }
-    return offset + (cum / total) * lineDur
-  })
 }
 
 const rangeOptions = [
@@ -363,8 +372,60 @@ const shipmentPoints = computed(() => shipmentDots.value.map(p => `${p.x},${p.y}
 
 const orderLineLen = computed(() => polylineLength(orderDots.value))
 const shipmentLineLen = computed(() => polylineLength(shipmentDots.value))
-const orderDotDelays = computed(() => dotDelays(orderDots.value, 0))
-const shipmentDotDelays = computed(() => dotDelays(shipmentDots.value, 0.15))
+
+// ---- Hover tooltip ----
+const chartWrapperRef = ref(null)
+const hoverIdx = ref(-1)
+
+const tooltipData = computed(() => {
+  const idx = hoverIdx.value
+  if (idx < 0 || idx >= chartData.value.length) return { date: '', orders: 0, shipments: 0 }
+  const d = chartData.value[idx]
+  const isHourly = chartRange.value === '1d'
+  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+  let dateStr = d.date
+  if (isHourly) {
+    dateStr = d.date
+  } else {
+    const dt = new Date(d.date)
+    dateStr = `${d.date}（${weekdays[dt.getDay()]}）`
+  }
+  return { date: dateStr, orders: d.orders, shipments: d.shipments }
+})
+
+const tooltipStyle = computed(() => {
+  const idx = hoverIdx.value
+  if (idx < 0 || !orderDots.value[idx] || !chartWrapperRef.value) return { display: 'none' }
+  const wrap = chartWrapperRef.value
+  const svgEl = wrap.querySelector('svg')
+  if (!svgEl) return { display: 'none' }
+  const svgRect = svgEl.getBoundingClientRect()
+  const scaleX = svgRect.width / svgW
+  const px = orderDots.value[idx].x * scaleX
+  const tooltipW = 160
+  let left = px + 12
+  if (left + tooltipW > svgRect.width) left = px - tooltipW - 12
+  return { left: `${left}px`, top: '10px' }
+})
+
+function onChartMouseMove(e) {
+  const svg = e.currentTarget
+  const rect = svg.getBoundingClientRect()
+  const mouseX = ((e.clientX - rect.left) / rect.width) * svgW
+  const dots = orderDots.value
+  if (dots.length === 0) { hoverIdx.value = -1; return }
+  let closest = 0
+  let minDist = Math.abs(dots[0].x - mouseX)
+  for (let i = 1; i < dots.length; i++) {
+    const dist = Math.abs(dots[i].x - mouseX)
+    if (dist < minDist) { minDist = dist; closest = i }
+  }
+  hoverIdx.value = closest
+}
+
+function onChartMouseLeave() {
+  hoverIdx.value = -1
+}
 
 const xLabels = computed(() => {
   const data = chartData.value
@@ -505,10 +566,18 @@ onUnmounted(() => {
 }
 
 .stat-icon {
-  font-size: 20px;
-  padding: 6px;
-  background-color: var(--lark-bg-body);
-  border-radius: var(--lark-radius-sm);
+  font-size: 28px;
+  padding: 10px;
+  border-radius: 10px;
+}
+
+.stat-icon .el-icon {
+  font-size: inherit;
+}
+
+.stat-icon svg {
+  width: 28px;
+  height: 28px;
 }
 
 .stat-body {
@@ -764,19 +833,8 @@ onUnmounted(() => {
   animation: line-draw 0.8s ease forwards;
 }
 
-.animated-dot {
-  opacity: 0;
-  animation: dot-pop 0.3s ease forwards;
-}
-
 @keyframes line-draw {
   to { stroke-dashoffset: 0; }
-}
-
-@keyframes dot-pop {
-  0% { opacity: 0; r: 0; }
-  60% { opacity: 1; r: 4.5; }
-  100% { opacity: 1; r: 3.5; }
 }
 
 .order-line {
@@ -788,19 +846,88 @@ onUnmounted(() => {
 }
 
 .chart-dot {
-  transition: r 0.15s;
+  stroke: #fff;
+  stroke-width: 1.5;
 }
 
-.chart-dot:hover {
-  r: 5.5;
-}
-
-.order-dot {
+.chart-dot.order-dot {
   fill: var(--lark-primary, #3370FF);
 }
 
-.shipment-dot {
+.chart-dot.shipment-dot {
   fill: #00B365;
+}
+
+.hover-guide-line {
+  stroke: var(--lark-text-secondary, #999);
+  stroke-width: 1;
+  stroke-dasharray: 3 2;
+  pointer-events: none;
+}
+
+.hover-dot {
+  pointer-events: none;
+  stroke: #fff;
+  stroke-width: 2;
+}
+
+.hover-dot.order-dot {
+  fill: var(--lark-primary, #3370FF);
+}
+
+.hover-dot.shipment-dot {
+  fill: #00B365;
+}
+
+.chart-tooltip {
+  position: absolute;
+  z-index: 10;
+  background: var(--lark-bg-base, #fff);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  padding: 12px 16px;
+  min-width: 140px;
+  pointer-events: none;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.tooltip-date {
+  font-weight: 600;
+  color: var(--lark-text-primary);
+  margin-bottom: 6px;
+  white-space: nowrap;
+}
+
+.tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tooltip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tooltip-dot.order {
+  background: var(--lark-primary, #3370FF);
+}
+
+.tooltip-dot.shipment {
+  background: #00B365;
+}
+
+.tooltip-label {
+  color: var(--lark-text-secondary);
+  flex: 1;
+}
+
+.tooltip-val {
+  font-weight: 600;
+  color: var(--lark-text-primary);
 }
 
 .y-labels {
