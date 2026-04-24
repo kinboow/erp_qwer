@@ -4,6 +4,10 @@ export const getSalesShipments = (params) => {
   return request({ url: '/api/sales-shipments/', method: 'get', params })
 }
 
+export const getShipmentDetail = (orderNo) => {
+  return request({ url: `/api/sales-shipments/${encodeURIComponent(orderNo)}`, method: 'get' })
+}
+
 export const getShipmentItems = (orderNo) => {
   return request({ url: `/api/sales-shipments/${encodeURIComponent(orderNo)}/items`, method: 'get' })
 }

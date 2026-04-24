@@ -44,10 +44,7 @@
           </template>
         </el-table-column>
         <el-table-column label="品名" prop="product_name" min-width="160" show-overflow-tooltip />
-        <el-table-column label="品牌" prop="brand" width="120" show-overflow-tooltip />
-        <el-table-column label="类别" prop="category" width="100" show-overflow-tooltip />
         <el-table-column label="颜色" prop="color" min-width="140" show-overflow-tooltip />
-        <el-table-column label="材质" prop="material" width="100" show-overflow-tooltip />
         <el-table-column label="单位" prop="unit" width="70" align="center" />
         <el-table-column label="单价" width="90" align="right">
           <template #default="{ row }">
@@ -56,6 +53,12 @@
         </el-table-column>
         <el-table-column label="尺码" prop="spec" min-width="120" show-overflow-tooltip />
         <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
+        <el-table-column label="操作" width="180" fixed="right" align="center">
+          <template #default="{ row }">
+            <el-button type="primary" link size="small" @click="viewDetail(row)">查看详情</el-button>
+            <el-button type="primary" link size="small" @click="viewInventory(row)">查看库存</el-button>
+          </template>
+        </el-table-column>
       </el-table>
 
       <!-- 分页 -->
@@ -71,6 +74,39 @@
         />
       </div>
     </div>
+
+    <!-- 产品详情弹窗 -->
+    <el-dialog v-model="detailVisible" title="产品详情" width="640px" destroy-on-close>
+      <el-descriptions :column="2" border size="default" class="product-detail-desc">
+        <el-descriptions-item label="货号">{{ detailData.product_no || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="品名">{{ detailData.product_name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="品牌">{{ detailData.brand || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="类别">{{ detailData.category || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="材质">{{ detailData.material || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="单位">{{ detailData.unit || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="单价">
+          <span class="price-text">{{ detailData.price > 0 ? `¥${Number(detailData.price).toFixed(2)}` : '-' }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="产品编号">{{ detailData.product_id || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="颜色" :span="2">{{ detailData.color || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="尺码" :span="2">{{ detailData.spec || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="图片" :span="2">
+          <el-image
+            v-if="detailData.image_url"
+            :src="detailData.image_url"
+            :preview-src-list="[detailData.image_url]"
+            fit="contain"
+            style="width: 120px; height: 120px;"
+          />
+          <span v-else>-</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="备注" :span="2">{{ detailData.remark || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="同步时间" :span="2">{{ detailData.synced_at || '-' }}</el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button @click="detailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -84,6 +120,8 @@ const loading = ref(false)
 const syncing = ref(false)
 const allProducts = ref([])
 const total = ref(0)
+const detailVisible = ref(false)
+const detailData = ref({})
 
 const filter = reactive({
   keyword: '',
@@ -130,6 +168,15 @@ async function fetchProducts() {
   } finally {
     loading.value = false
   }
+}
+
+function viewDetail(row) {
+  detailData.value = { ...row }
+  detailVisible.value = true
+}
+
+function viewInventory(row) {
+  ElMessage.warning('库存查询功能正在开发中')
 }
 
 function copyText(text) {
@@ -245,5 +292,15 @@ onMounted(fetchProducts)
 :deep(.el-table th.el-table__cell) {
   font-weight: 600;
   color: var(--lark-text-primary);
+}
+
+:deep(.product-detail-desc .el-descriptions__label) {
+  width: 80px;
+  font-weight: 500;
+}
+
+.price-text {
+  color: #f56c6c;
+  font-weight: 600;
 }
 </style>

@@ -53,55 +53,11 @@
         stripe
         class="lark-table"
         row-key="order_no"
-        @expand-change="handleExpand"
       >
-        <el-table-column type="expand">
-          <template #default="{ row }">
-            <div class="expand-detail" v-loading="row._loadingItems">
-              <el-table
-                v-if="row._items && row._items.length"
-                :data="row._items"
-                size="small"
-                class="detail-table"
-                :show-header="true"
-              >
-                <el-table-column label="#" prop="sort_index" width="50" align="center" />
-                <el-table-column label="货号" prop="product_no" width="120" />
-                <el-table-column label="品名" prop="product_name" min-width="120" show-overflow-tooltip />
-                <el-table-column label="颜色" prop="color" width="100" />
-                <el-table-column label="单位" prop="unit" width="60" align="center" />
-                <el-table-column label="单价" width="90" align="right">
-                  <template #default="{ row: item }">
-                    {{ item.price > 0 ? item.price.toFixed(2) : '-' }}
-                  </template>
-                </el-table-column>
-                <el-table-column label="尺码明细" min-width="260">
-                  <template #default="{ row: item }">
-                    <div class="size-tags">
-                      <el-tag
-                        v-for="s in item.sizes"
-                        :key="s.size"
-                        size="small"
-                        type="info"
-                        class="size-tag"
-                      >
-                        {{ s.size }}: {{ s.qty }}
-                      </el-tag>
-                    </div>
-                  </template>
-                </el-table-column>
-                <el-table-column label="关联订单" prop="order_ref" width="160" show-overflow-tooltip />
-                <el-table-column label="小计" prop="total_qty" width="80" align="right" />
-                <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
-              </el-table>
-              <el-empty v-else-if="!row._loadingItems" description="无明细数据" :image-size="48" />
-            </div>
-          </template>
-        </el-table-column>
-
+        <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column label="发货单号" prop="order_no" width="160">
           <template #default="{ row }">
-            <span class="order-no">{{ row.order_no }}</span>
+            <span class="order-no copyable" @click.stop="copyOrderNo(row.order_no)" title="点击复制">{{ row.order_no }}</span>
           </template>
         </el-table-column>
         <el-table-column label="日期" prop="order_date" width="110" />
@@ -124,9 +80,10 @@
         </el-table-column>
         <el-table-column label="快递单号" prop="tracking_no" width="140" show-overflow-tooltip />
         <el-table-column label="配送方式" prop="shipping_method" width="100" />
-        <el-table-column label="运费" width="90" align="right">
+        <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
+        <el-table-column label="操作" width="90" fixed="right" align="center">
           <template #default="{ row }">
-            {{ row.freight != null ? '¥' + Number(row.freight).toFixed(2) : '-' }}
+            <el-button link type="primary" size="small" @click="viewDetail(row)">查看详情</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -149,9 +106,12 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
-import { getSalesShipments, getShipmentItems, syncShipments } from '@/api/salesShipments'
+import { getSalesShipments, syncShipments } from '@/api/salesShipments'
+
+const router = useRouter()
 
 const loading = ref(false)
 const syncing = ref(false)
@@ -194,7 +154,7 @@ async function fetchShipments() {
     }
     const res = await getSalesShipments(params)
     const d = res.data || {}
-    shipments.value = (d.list || []).map(o => ({ ...o, _items: null, _loadingItems: false }))
+    shipments.value = d.list || []
     total.value = d.total || 0
   } catch {
     shipments.value = []
@@ -204,18 +164,34 @@ async function fetchShipments() {
   }
 }
 
-async function handleExpand(row, expandedRows) {
-  if (!expandedRows.includes(row)) return
-  if (row._items !== null) return
-  row._loadingItems = true
-  try {
-    const res = await getShipmentItems(row.order_no)
-    row._items = res.data || []
-  } catch {
-    row._items = []
-  } finally {
-    row._loadingItems = false
+function viewDetail(row) {
+  router.push({ path: `/shipments/${encodeURIComponent(row.order_no)}` })
+}
+
+function copyOrderNo(orderNo) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(orderNo).then(() => {
+      ElMessage.success('单号已复制')
+    }).catch(() => fallbackCopy(orderNo))
+  } else {
+    fallbackCopy(orderNo)
   }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+    ElMessage.success('单号已复制')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+  document.body.removeChild(ta)
 }
 
 async function handleSync() {
@@ -341,32 +317,14 @@ onMounted(() => {
   font-weight: 500;
 }
 
+.order-no.copyable {
+  cursor: pointer;
+  color: var(--el-color-primary, #409eff);
+}
+
 .amount {
   font-weight: 600;
   color: var(--lark-text-primary);
-}
-
-.expand-detail {
-  padding: 12px 16px 12px 48px;
-}
-
-.shipment-main-desc {
-  margin-bottom: 4px;
-}
-
-.detail-table {
-  font-size: 12px;
-}
-
-.size-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.size-tag {
-  font-size: 11px;
-  border-radius: 4px;
 }
 
 .lark-pagination {
@@ -378,16 +336,15 @@ onMounted(() => {
 :deep(.el-table) {
   --el-table-border-color: var(--lark-border-light);
   --el-table-header-bg-color: var(--lark-bg-subtle);
-  font-size: 13px;
+  font-size: 14px;
+}
+
+:deep(.el-table td.el-table__cell) {
+  padding: 4px 0;
 }
 
 :deep(.el-table th.el-table__cell) {
   font-weight: 600;
   color: var(--lark-text-primary);
-}
-
-:deep(.el-table__expanded-cell) {
-  padding: 0 !important;
-  background: var(--lark-bg-subtle, #fafbfc);
 }
 </style>

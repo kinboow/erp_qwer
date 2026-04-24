@@ -72,13 +72,19 @@ const routes = [
         path: 'sales/:orderNo',
         name: 'SalesOrderDetail',
         component: () => import('@/views/business/SalesOrderDetail.vue'),
-        meta: { title: '订单详情' }
+        meta: { title: '订单详情', parent: { title: '销售订单', path: '/sales' } }
       },
       {
         path: 'shipments',
         name: 'SalesShipments',
         component: () => import('@/views/business/SalesShipments.vue'),
         meta: { title: '销售发货单' }
+      },
+      {
+        path: 'shipments/:orderNo',
+        name: 'ShipmentDetail',
+        component: () => import('@/views/business/ShipmentDetail.vue'),
+        meta: { title: '发货单详情', parent: { title: '销售发货单', path: '/shipments' } }
       },
       {
         path: 'wechat-listeners/:instanceId',

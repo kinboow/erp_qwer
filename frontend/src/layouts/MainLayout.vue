@@ -87,6 +87,9 @@
           <!-- 面包屑更轻量 -->
           <el-breadcrumb separator="/">
             <el-breadcrumb-item :to="{ path: '/' }">工作台</el-breadcrumb-item>
+            <el-breadcrumb-item v-if="route.meta.parent" :to="{ path: route.meta.parent.path }">
+              {{ route.meta.parent.title }}
+            </el-breadcrumb-item>
             <el-breadcrumb-item v-if="route.meta.title && route.path !== '/dashboard'">
               <span style="color: var(--lark-text-primary); font-weight: 600;">{{ route.meta.title }}</span>
             </el-breadcrumb-item>

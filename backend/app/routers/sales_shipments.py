@@ -112,6 +112,62 @@ def api_list_shipments(
     }
 
 
+@router.get("/{order_no}", summary="销售发货单详情")
+def api_shipment_detail(
+    order_no: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_tables(db)
+    row = db.execute(
+        text("""
+            SELECT id, order_no, order_date, state, customer_id, customer_name,
+                   customer_tel, customer_addr, salesperson, creator, handler, warehouse,
+                   shipping_method, shipping_tel, shipping_addr,
+                   tracking_no, delivery_person, contact_person, contact_tel,
+                   currency, customer_type, price_print, freight, payment_amount,
+                   total_qty, total_amount, remark, synced_at
+            FROM erp_sales_shipments
+            WHERE order_no = :order_no
+        """),
+        {"order_no": order_no},
+    ).mappings().first()
+
+    if not row:
+        return {"code": 404, "message": "发货单不存在", "data": None}
+
+    shipment = {
+        "id": row["id"],
+        "order_no": row["order_no"],
+        "order_date": row["order_date"] or "",
+        "state": row["state"],
+        "customer_id": row["customer_id"] or "",
+        "customer_name": row["customer_name"] or "",
+        "customer_tel": row["customer_tel"] or "",
+        "customer_addr": row["customer_addr"] or "",
+        "salesperson": row["salesperson"] or "",
+        "creator": row["creator"] or "",
+        "handler": row["handler"] or "",
+        "warehouse": row["warehouse"] or "",
+        "shipping_method": row["shipping_method"] or "",
+        "shipping_tel": row["shipping_tel"] or "",
+        "shipping_addr": row["shipping_addr"] or "",
+        "tracking_no": row["tracking_no"] or "",
+        "delivery_person": row["delivery_person"] or "",
+        "contact_person": row["contact_person"] or "",
+        "contact_tel": row["contact_tel"] or "",
+        "currency": row["currency"] or "",
+        "customer_type": row["customer_type"] or "",
+        "price_print": row["price_print"],
+        "freight": float(row["freight"]) if row["freight"] is not None else None,
+        "payment_amount": float(row["payment_amount"]) if row["payment_amount"] is not None else None,
+        "total_qty": float(row["total_qty"] or 0),
+        "total_amount": float(row["total_amount"] or 0),
+        "remark": row["remark"] or "",
+        "synced_at": str(row["synced_at"] or ""),
+    }
+    return {"code": 200, "data": shipment}
+
+
 @router.get("/{order_no}/items", summary="销售发货单明细行")
 def api_shipment_items(
     order_no: str,

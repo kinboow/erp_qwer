@@ -351,53 +351,47 @@
       title="绑定企微群聊"
       width="520px"
       destroy-on-close
-      class="lark-dialog"
-      :show-close="true"
     >
       <div class="bind-dialog-info">
         <span class="bind-label">客户：</span>
         <span class="bind-value">{{ bindTarget.customer_name }}</span>
         <el-tag v-if="bindTarget.erp_customer_id" size="small" style="margin-left:8px;">{{ bindTarget.erp_customer_id }}</el-tag>
       </div>
-      <div class="lark-form-container" style="margin-top:12px;">
-        <el-form label-position="top">
-          <el-form-item label="关联企微群">
-            <el-select
-              v-model="bindRoomIds"
-              multiple
-              filterable
-              clearable
-              collapse-tags
-              collapse-tags-tooltip
-              placeholder="请选择要关联的企微群"
-              style="width: 100%"
-              :loading="wechatRoomLoading"
-              :disabled="!hasBoundWechatInstance || wechatRoomLoading"
-            >
-              <el-option
-                v-for="room in wechatRoomOptions"
-                :key="room.room_id"
-                :label="room.room_name"
-                :value="room.room_id"
-              />
-            </el-select>
-            <div class="wechat-room-hint">
-              <template v-if="hasBoundWechatInstance">
-                <span>当前实例：{{ wechatBoundInstance.name || wechatBoundInstance.wxid }}</span>
-                <span v-if="!wechatRoomLoading && wechatRoomOptions.length === 0">，暂未获取到群聊</span>
-              </template>
-              <template v-else>
-                请先在"企微配置"中绑定当前企业微信实例
-              </template>
-            </div>
-          </el-form-item>
-        </el-form>
-      </div>
+      <el-form label-position="top" style="margin-top:12px;">
+        <el-form-item label="关联企微群">
+          <el-select
+            v-model="bindRoomIds"
+            multiple
+            filterable
+            clearable
+            collapse-tags
+            collapse-tags-tooltip
+            placeholder="请选择要关联的企微群"
+            style="width: 100%"
+            :loading="wechatRoomLoading"
+            :disabled="!hasBoundWechatInstance || wechatRoomLoading"
+          >
+            <el-option
+              v-for="room in wechatRoomOptions"
+              :key="room.room_id"
+              :label="room.room_name"
+              :value="room.room_id"
+            />
+          </el-select>
+          <div class="wechat-room-hint">
+            <template v-if="hasBoundWechatInstance">
+              <span>当前实例：{{ wechatBoundInstance.name || wechatBoundInstance.wxid }}</span>
+              <span v-if="!wechatRoomLoading && wechatRoomOptions.length === 0">，暂未获取到群聊</span>
+            </template>
+            <template v-else>
+              请先在"企微配置"中绑定当前企业微信实例
+            </template>
+          </div>
+        </el-form-item>
+      </el-form>
       <template #footer>
-        <div class="lark-dialog-footer">
-          <el-button class="lark-btn-secondary" @click="bindDialogVisible = false">取消</el-button>
-          <el-button type="primary" @click="handleBindSubmit" :loading="bindLoading">保存</el-button>
-        </div>
+        <el-button @click="bindDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleBindSubmit" :loading="bindLoading">保存</el-button>
       </template>
     </el-dialog>
 
@@ -407,10 +401,8 @@
       title="客户详情"
       width="640px"
       destroy-on-close
-      class="lark-dialog"
-      :show-close="true"
     >
-      <el-descriptions :column="2" border size="small" class="customer-detail-desc">
+      <el-descriptions :column="2" border size="default" class="customer-detail-desc">
         <el-descriptions-item label="ERP编号">{{ detailData.erp_customer_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="客户名称">{{ detailData.customer_name || '-' }}</el-descriptions-item>
         <el-descriptions-item label="简码">{{ detailData.short_code || '-' }}</el-descriptions-item>
@@ -444,10 +436,8 @@
         <el-descriptions-item label="创建时间">{{ formatDateTime(detailData.created_at) }}</el-descriptions-item>
       </el-descriptions>
       <template #footer>
-        <div class="lark-dialog-footer">
-          <el-button @click="detailDialogVisible = false">关闭</el-button>
-          <el-button type="primary" @click="handleViewOrders(detailData)">查看关联订单</el-button>
-        </div>
+        <el-button @click="detailDialogVisible = false">关闭</el-button>
+        <el-button type="primary" @click="handleViewOrders(detailData)">查看关联订单</el-button>
       </template>
     </el-dialog>
   </div>
