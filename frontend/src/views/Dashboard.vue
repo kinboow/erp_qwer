@@ -27,19 +27,20 @@
         <div class="lark-stat-card">
           <div class="stat-header">
             <span class="stat-name">{{ stat.title }}</span>
-            <el-icon class="stat-icon" :style="{ background: stat.color, color: '#fff' }"><component :is="stat.icon" /></el-icon>
+            <span class="stat-icon-wrap" :style="{ background: stat.color }">
+              <img class="stat-icon" :src="stat.icon" />
+            </span>
           </div>
           <div class="stat-body">
             <span class="stat-number">{{ stat.value }}</span>
           </div>
-          <div class="stat-footer">
+          <div class="stat-footer" v-if="stat.trendLabel || stat.trend !== null">
             <span class="trend-label">{{ stat.trendLabel }}</span>
             <span v-if="stat.trend !== null" class="trend-value" :class="stat.trend > 0 ? 'is-up' : stat.trend < 0 ? 'is-down' : ''">
               <el-icon v-if="stat.trend > 0"><Top /></el-icon>
               <el-icon v-else-if="stat.trend < 0"><Bottom /></el-icon>
               {{ stat.trend === 0 ? '持平' : Math.abs(stat.trend).toFixed(1) + '%' }}
             </span>
-            <span v-else class="trend-value">--</span>
           </div>
         </div>
       </el-col>
@@ -52,6 +53,7 @@
               <div class="mini-status-label">企业微信</div>
               <div class="mini-status-text">{{ stats.wechat_online ? '已连接' : '未连接' }}</div>
             </div>
+            <img class="mini-status-icon" :src="iconWechatStatus" alt="企业微信状态" />
           </div>
           <div class="mini-status-card" :class="stats.erp_online ? 'online' : 'offline'">
             <div class="mini-status-dot" :class="stats.erp_online ? 'green' : 'red'"></div>
@@ -59,6 +61,7 @@
               <div class="mini-status-label">ERP 服务</div>
               <div class="mini-status-text">{{ stats.erp_online ? '运行中' : '未启动' }}</div>
             </div>
+            <img class="mini-status-icon" :src="iconErpStatus" alt="ERP 服务状态" />
           </div>
         </div>
       </el-col>
@@ -84,7 +87,7 @@
               <span class="legend-item"><span class="legend-dot shipment"></span>发货单</span>
             </div>
             <div class="line-chart-wrapper" ref="chartWrapperRef">
-              <svg :key="chartAnimKey" :viewBox="`0 0 ${svgW} ${svgH}`" class="line-chart-svg" preserveAspectRatio="xMidYMid meet"
+              <svg :key="chartAnimKey" :viewBox="`0 0 ${svgW} ${svgH}`" class="line-chart-svg" preserveAspectRatio="none"
                 @mousemove="onChartMouseMove" @mouseleave="onChartMouseLeave">
                 <!-- 网格线 -->
                 <line v-for="(y, i) in gridLines" :key="'g'+i" :x1="padL" :y1="y" :x2="svgW - padR" :y2="y" class="grid-line" />
@@ -164,534 +167,87 @@
               </div>
             </div>
           </div>
-        </div>
-      </el-col>
-    </el-row>
-  </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
-import { useUserStore } from '@/stores/user'
-import {
-  User, Box, Document, TrendCharts, Van,
-  Top, Bottom
-} from '@element-plus/icons-vue'
-import request from '@/utils/request'
+  import { ref, computed, onMounted, onUnmounted } from 'vue'
+  import { useUserStore } from '@/stores/user'
+  import { Top, Bottom } from '@element-plus/icons-vue'
+  import iconProduct from '@/assets/icons/product.svg'
+  import iconOrder from '@/assets/icons/order.svg'
+  import iconShipment from '@/assets/icons/shipment.svg'
+  import iconWechatStatus from '@/assets/icons/企业微信.svg'
+  import iconErpStatus from '@/assets/icons/数据连接_(1).svg'
+  import request from '@/utils/request'
 
-const userStore = useUserStore()
-const currentTime = ref('')
-const currentDate = ref('')
-const greeting = ref('')
-const greetingSuffix = ref('')
-let timer = null
+  const userStore = useUserStore()
+  const currentTime = ref('')
+  const currentDate = ref('')
+  const greeting = ref('')
+  const greetingSuffix = ref('')
+  let timer = null
 
-const stats = ref({
-  user_count: 0,
-  product_count: 0,
-  total_orders: 0,
-  pending_orders: 0,
-  today_orders: 0,
-  yesterday_orders: 0,
-  total_shipments: 0,
-  today_shipments: 0,
-  yesterday_shipments: 0,
-  month_revenue: 0,
-  last_month_revenue: 0,
-  pending_downstream: 0,
-  daily_orders: [],
-  daily_shipments: [],
-  recent_activities: [],
-  wechat_online: false,
-  erp_online: false,
-})
-
-const activities = computed(() => stats.value.recent_activities || [])
-
-function updateGreeting() {
-  const h = new Date().getHours()
-  if (h >= 5 && h < 9) {
-    greeting.value = '早安'
-    greetingSuffix.value = '祝你度过充实的一天'
-  } else if (h >= 9 && h < 11) {
-    greeting.value = '上午好'
-    greetingSuffix.value = '工作顺利'
-  } else if (h >= 11 && h < 13) {
-    greeting.value = '中午好'
-    greetingSuffix.value = '记得午休哦'
-  } else if (h >= 13 && h < 18) {
-    greeting.value = '下午好'
-    greetingSuffix.value = '继续加油'
-  } else if (h >= 18 && h < 22) {
-    greeting.value = '晚上好'
-    greetingSuffix.value = '辛苦了今天'
-  } else {
-    greeting.value = '夜深了'
-    greetingSuffix.value = '注意休息'
-  }
-}
-
-const updateTime = () => {
-  const now = new Date()
-  currentTime.value = now.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
-  const options = { month: 'long', day: 'numeric', weekday: 'long' }
-  currentDate.value = now.toLocaleDateString('zh-CN', options)
-  updateGreeting()
-}
-
-function calcTrend(today, yesterday) {
-  if (yesterday === 0 && today === 0) return 0
-  if (yesterday === 0) return 100
-  return ((today - yesterday) / yesterday) * 100
-}
-
-function formatRevenue(val) {
-  if (val >= 10000) return `¥${(val / 10000).toFixed(1)}万`
-  if (val >= 1000) return `¥${(val / 1000).toFixed(1)}k`
-  return `¥${val.toFixed(0)}`
-}
-
-const statCards = computed(() => {
-  const s = stats.value
-  return [
-    {
-      title: '在线产品',
-      value: s.product_count.toLocaleString(),
-      trend: null,
-      trendLabel: '',
-
-      icon: 'Box',
-      color: '#00B365'
-    },
-    {
-      title: '今日订单',
-      value: s.today_orders.toLocaleString(),
-      trend: calcTrend(s.today_orders, s.yesterday_orders),
-      trendLabel: '较昨日',
-      icon: 'Document',
-      color: '#3370FF'
-    },
-    {
-      title: '包货订单',
-      value: s.today_shipments.toLocaleString(),
-      trend: calcTrend(s.today_shipments, s.yesterday_shipments),
-      trendLabel: '较昨日',
-      icon: 'Van',
-      color: '#FF8800'
-    }
-  ]
-})
-
-// ---- 趋势图相关 ----
-const chartRange = ref('7d')
-const chartAnimKey = ref(0)
-
-function polylineLength(dots) {
-  let len = 0
-  for (let i = 1; i < dots.length; i++) {
-    const dx = dots[i].x - dots[i - 1].x
-    const dy = dots[i].y - dots[i - 1].y
-    len += Math.sqrt(dx * dx + dy * dy)
-  }
-  return len || 1
-}
-
-const rangeOptions = [
-  { label: '近24小时', value: '1d' },
-  { label: '近1周', value: '7d' },
-  { label: '近1个月', value: '30d' },
-]
-
-async function switchRange(val) {
-  chartRange.value = val
-  await fetchStats(val)
-  chartAnimKey.value++
-}
-
-const chartData = computed(() => {
-  const orders = stats.value.daily_orders || []
-  const shipments = stats.value.daily_shipments || []
-  return orders.map((o, i) => ({
-    date: o.date,
-    orders: o.count,
-    shipments: shipments[i]?.count || 0,
-  }))
-})
-
-const chartMax = computed(() => {
-  let max = 0
-  for (const d of chartData.value) {
-    if (d.orders > max) max = d.orders
-    if (d.shipments > max) max = d.shipments
-  }
-  return Math.max(max, 1)
-})
-
-// SVG 尺寸
-const svgW = 800
-const svgH = 260
-const padL = 10
-const padR = 10
-const padT = 15
-const padB = 15
-const gridCount = 4
-
-const gridLines = computed(() => {
-  const lines = []
-  for (let i = 0; i <= gridCount; i++) {
-    lines.push(padT + (i / gridCount) * (svgH - padT - padB))
-  }
-  return lines
-})
-
-const gridLinePercents = computed(() =>
-  gridLines.value.map(y => `${(y / svgH) * 100}%`)
-)
-
-const yAxisLabels = computed(() => {
-  const m = chartMax.value
-  return [m, Math.round(m * 0.75), Math.round(m * 0.5), Math.round(m * 0.25), 0]
-})
-
-function toSvgPts(data, key) {
-  const len = data.length
-  if (len === 0) return []
-  const areaW = svgW - padL - padR
-  const areaH = svgH - padT - padB
-  return data.map((d, i) => {
-    const x = padL + (len === 1 ? areaW / 2 : (i / (len - 1)) * areaW)
-    const y = padT + areaH - (d[key] / chartMax.value) * areaH
-    return { x, y }
+  const stats = ref({
+    user_count: 0,
+    product_count: 0,
+    total_orders: 0,
+    pending_orders: 0,
+    today_orders: 0,
+    yesterday_orders: 0,
+    total_shipments: 0,
+    today_shipments: 0,
+    yesterday_shipments: 0,
+    month_revenue: 0,
+    last_month_revenue: 0,
+    pending_downstream: 0,
+    daily_orders: [],
+    daily_shipments: [],
+    recent_activities: [],
+    wechat_online: false,
+    erp_online: false,
   })
-}
 
-const orderDots = computed(() => toSvgPts(chartData.value, 'orders'))
-const shipmentDots = computed(() => toSvgPts(chartData.value, 'shipments'))
-const orderPoints = computed(() => orderDots.value.map(p => `${p.x},${p.y}`).join(' '))
-const shipmentPoints = computed(() => shipmentDots.value.map(p => `${p.x},${p.y}`).join(' '))
+  // ...
 
-const orderLineLen = computed(() => polylineLength(orderDots.value))
-const shipmentLineLen = computed(() => polylineLength(shipmentDots.value))
-
-// ---- Hover tooltip ----
-const chartWrapperRef = ref(null)
-const hoverIdx = ref(-1)
-
-const tooltipData = computed(() => {
-  const idx = hoverIdx.value
-  if (idx < 0 || idx >= chartData.value.length) return { date: '', orders: 0, shipments: 0 }
-  const d = chartData.value[idx]
-  const isHourly = chartRange.value === '1d'
-  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-  let dateStr = d.date
-  if (isHourly) {
-    dateStr = d.date
-  } else {
-    const dt = new Date(d.date)
-    dateStr = `${d.date}（${weekdays[dt.getDay()]}）`
-  }
-  return { date: dateStr, orders: d.orders, shipments: d.shipments }
-})
-
-const tooltipStyle = computed(() => {
-  const idx = hoverIdx.value
-  if (idx < 0 || !orderDots.value[idx] || !chartWrapperRef.value) return { display: 'none' }
-  const wrap = chartWrapperRef.value
-  const svgEl = wrap.querySelector('svg')
-  if (!svgEl) return { display: 'none' }
-  const svgRect = svgEl.getBoundingClientRect()
-  const scaleX = svgRect.width / svgW
-  const px = orderDots.value[idx].x * scaleX
-  const tooltipW = 160
-  let left = px + 12
-  if (left + tooltipW > svgRect.width) left = px - tooltipW - 12
-  return { left: `${left}px`, top: '10px' }
-})
-
-function onChartMouseMove(e) {
-  const svg = e.currentTarget
-  const rect = svg.getBoundingClientRect()
-  const mouseX = ((e.clientX - rect.left) / rect.width) * svgW
-  const dots = orderDots.value
-  if (dots.length === 0) { hoverIdx.value = -1; return }
-  let closest = 0
-  let minDist = Math.abs(dots[0].x - mouseX)
-  for (let i = 1; i < dots.length; i++) {
-    const dist = Math.abs(dots[i].x - mouseX)
-    if (dist < minDist) { minDist = dist; closest = i }
-  }
-  hoverIdx.value = closest
-}
-
-function onChartMouseLeave() {
-  hoverIdx.value = -1
-}
-
-const xLabels = computed(() => {
-  const data = chartData.value
-  if (data.length === 0) return []
-  const isHourly = chartRange.value === '1d'
-  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-
-  if (isHourly) {
-    // 24小时：每隔3小时显示标签
-    return data.map((d, i) => {
-      if (i % 3 !== 0 && i !== data.length - 1) return ''
-      // date 格式: "2026-04-24 14:00"
-      const parts = d.date.split(' ')
-      return parts[1] || ''
-    })
+  .mini-status-dot.red {
+    background-color: #F54A45;
+    box-shadow: 0 0 0 3px rgba(245,74,69,0.15);
   }
 
-  // 日级别
-  const step = data.length <= 10 ? 1 : Math.ceil(data.length / 8)
-  return data.map((d, i) => {
-    if (i % step !== 0 && i !== data.length - 1) return ''
-    const dt = new Date(d.date)
-    if (data.length <= 7) return `${dt.getMonth() + 1}/${dt.getDate()} ${weekdays[dt.getDay()]}`
-    return `${dt.getMonth() + 1}/${dt.getDate()}`
-  })
-})
+  .mini-status-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1;
+  }
 
-// ---- 数据概览 ----
-const overviewItems = computed(() => {
-  const s = stats.value
-  return [
-    { label: '订单总数', value: s.total_orders.toLocaleString() },
-    { label: '今日新增订单', value: s.today_orders.toLocaleString() },
-    { label: '发货单总数', value: s.total_shipments.toLocaleString() },
-    { label: '今日发货', value: s.today_shipments.toLocaleString() },
-    { label: '待审核订单', value: s.pending_orders.toLocaleString() },
-    { label: '产品总数', value: s.product_count.toLocaleString() },
-    { label: '系统用户数', value: s.user_count.toLocaleString() },
-  ]
-})
+  .mini-status-label {
+    font-size: 12px;
+    color: var(--lark-text-secondary);
+    line-height: 1;
+  }
 
-async function fetchStats(range) {
-  try {
-    const params = range ? { range } : { range: chartRange.value }
-    const res = await request({ url: '/api/dashboard/stats', method: 'get', params })
-    if (res.data) {
-      stats.value = { ...stats.value, ...res.data }
-    }
-  } catch { /* silent */ }
-}
+  .mini-status-card.online .mini-status-text {
+    color: #00B365;
+  }
 
-onMounted(() => {
-  updateTime()
-  timer = setInterval(updateTime, 1000)
-  fetchStats()
-})
+  .mini-status-card.offline .mini-status-text {
+    color: var(--lark-text-secondary);
+  }
 
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
-})
+  .mini-status-icon {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    object-fit: contain;
+  }
+
+  /* ... */
 </script>
 
 <style scoped>
-.lark-dashboard {
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-}
-
-/* 欢迎面板 */
-.lark-welcome-panel {
-  background: var(--lark-bg-base);
-  border-radius: var(--lark-radius-lg);
-  padding: 24px 32px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.welcome-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--lark-text-primary);
-  margin-bottom: 8px;
-}
-
-.welcome-desc {
-  font-size: 14px;
-  color: var(--lark-text-regular);
-}
-
-.welcome-desc strong {
-  color: var(--lark-primary);
-  font-weight: 600;
-}
-
-.date-widget {
-  text-align: right;
-}
-
-.date-time {
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--lark-text-primary);
-  line-height: 1.2;
-}
-
-.date-day {
-  font-size: 14px;
-  color: var(--lark-text-secondary);
-}
-
-/* 统计卡片 */
-.lark-stat-card {
-  background: var(--lark-bg-base);
-  border-radius: var(--lark-radius-lg);
-  padding: 20px 24px;
-  transition: transform 0.2s, box-shadow 0.2s;
-  cursor: pointer;
-  height: 100%;
-}
-
-.lark-stat-card:hover {
-  transform: translateY(-2px);
-  box-shadow: var(--lark-shadow-hover);
-}
-
-.stat-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.stat-name {
-  font-size: 14px;
-  color: var(--lark-text-regular);
-}
-
-.stat-icon {
-  font-size: 28px;
-  padding: 10px;
-  border-radius: 10px;
-}
-
-.stat-icon .el-icon {
-  font-size: inherit;
-}
-
-.stat-icon svg {
-  width: 28px;
-  height: 28px;
-}
-
-.stat-body {
-  margin-bottom: 16px;
-}
-
-.stat-number {
-  font-size: 32px;
-  font-weight: 700;
-  color: var(--lark-text-primary);
-  line-height: 1.2;
-}
-
-.stat-footer {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-
-.trend-label {
-  color: var(--lark-text-secondary);
-}
-
-.trend-value {
-  display: flex;
-  align-items: center;
-  font-weight: 500;
-}
-
-.trend-value.is-up {
-  color: #F54A45;
-}
-
-.trend-value.is-down {
-  color: #00B365;
-}
-
-/* 服务状态卡片组 */
-.status-card-group {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  height: 100%;
-}
-
-.mini-status-card {
-  flex: 1;
-  background: var(--lark-bg-base);
-  border-radius: var(--lark-radius-lg);
-  padding: 16px 20px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  transition: transform 0.2s, box-shadow 0.2s;
-  cursor: default;
-}
-
-.mini-status-card:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--lark-shadow-hover);
-}
-
-.mini-status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.mini-status-dot.green {
-  background-color: #00B365;
-  box-shadow: 0 0 0 3px rgba(0,179,101,0.15);
-}
-
-.mini-status-dot.red {
-  background-color: #F54A45;
-  box-shadow: 0 0 0 3px rgba(245,74,69,0.15);
-}
-
-.mini-status-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.mini-status-label {
-  font-size: 12px;
-  color: var(--lark-text-secondary);
-  line-height: 1;
-}
-
-.mini-status-text {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--lark-text-primary);
-  line-height: 1.3;
-}
-
-.mini-status-card.online .mini-status-text {
-  color: #00B365;
-}
-
-.mini-status-card.offline .mini-status-text {
-  color: var(--lark-text-secondary);
-}
-
-/* 通用面板 */
-.lark-panel {
-  background: var(--lark-bg-base);
-  border-radius: var(--lark-radius-lg);
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+  /* ... */
+</style>
 }
 
 .panel-header {
@@ -953,6 +509,8 @@ onUnmounted(() => {
   justify-content: space-between;
   padding-top: 10px;
   margin-left: 48px;
+  padding-left: 1.25%;
+  padding-right: 1.25%;
   color: var(--lark-text-secondary);
   font-size: 11px;
 }
