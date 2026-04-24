@@ -1,5 +1,22 @@
+import logging
+
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+def _add_column_if_not_exists(db: Session, table: str, column: str, definition: str):
+    """Safely add a column if it doesn't already exist."""
+    try:
+        row = db.execute(text(
+            "SELECT COUNT(*) AS cnt FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() AND table_name = :table AND column_name = :col"
+        ), {"table": table, "col": column}).scalar()
+        if not row:
+            db.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}"))
+    except Exception as e:
+        logger.debug("add column %s.%s skipped: %s", table, column, e)
 
 
 def ensure_downstream_support_tables(db: Session):
@@ -77,4 +94,14 @@ def ensure_downstream_support_tables(db: Session):
         "INDEX idx_created_at (created_at)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     ))
+    # 追加 ERP 同步相关字段（兼容已有表）
+    _add_column_if_not_exists(db, "downstream_customers", "salesperson", "VARCHAR(100) DEFAULT ''")
+    _add_column_if_not_exists(db, "downstream_customers", "customer_type", "VARCHAR(100) DEFAULT ''")
+    _add_column_if_not_exists(db, "downstream_customers", "shipping_address", "VARCHAR(500) DEFAULT ''")
+    _add_column_if_not_exists(db, "downstream_customers", "shipping_phone", "VARCHAR(100) DEFAULT ''")
+    _add_column_if_not_exists(db, "downstream_customers", "short_code", "VARCHAR(100) DEFAULT ''")
+    _add_column_if_not_exists(db, "downstream_customers", "telephone", "VARCHAR(100) DEFAULT ''")
+    _add_column_if_not_exists(db, "downstream_customers", "nature", "VARCHAR(500) DEFAULT ''")
+    _add_column_if_not_exists(db, "downstream_customers", "credit_limit", "DECIMAL(12,2) DEFAULT NULL")
+    _add_column_if_not_exists(db, "downstream_customers", "synced_at", "DATETIME NULL")
     db.commit()

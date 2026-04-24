@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync
+from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 
@@ -49,6 +49,7 @@ app.include_router(wechat_runtime.router, prefix="/api/wechat")
 app.include_router(wechat_config.router, prefix="/api/wechat")
 app.include_router(downstream_orders.router, prefix="/api/downstream-orders")
 app.include_router(erp_sync.router, prefix="/api/erp/sync", tags=["ERP-同步"])
+app.include_router(sales_orders.router, prefix="/api/sales-orders", tags=["销售订单"])
 
 # ncloud2 ERP API 路由（弘兆云 ERP 操作）
 app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])
@@ -65,6 +66,21 @@ register_ncloud_exception_handlers(app)
 
 @app.on_event("startup")
 async def startup_event():
+    # 从数据库加载 ERP 配置到 ncloud settings（这样无需每次手动点保存）
+    try:
+        from app.services.erp_sync import _get_db_config
+        from app.ncloud.config import settings as ncloud_settings
+        cfg = _get_db_config()
+        ncloud_settings._override = {
+            "NCLOUD_BASE_URL": cfg.get("erp_base_url") or "",
+            "NCLOUD_USERNAME": cfg.get("erp_username") or "",
+            "NCLOUD_PASSWORD": cfg.get("erp_password") or "",
+            "NCLOUD_QR_IMAGE_PATH": cfg.get("erp_qr_image_path") or "",
+        }
+        logger.info("[Startup] 已从数据库加载 ERP 配置, base_url=%s", cfg.get("erp_base_url"))
+    except Exception as e:
+        logger.warning("[Startup] 加载数据库 ERP 配置失败（可能表不存在）: %s", e)
+
     # 初始化 ncloud2 ERP 客户端
     http_client = httpx.AsyncClient(
         headers={

@@ -27,6 +27,25 @@
             <template #title><span>数据看板</span></template>
           </el-menu-item>
 
+          <el-sub-menu index="business">
+            <template #title>
+              <el-icon><Management /></el-icon>
+              <span>业务管理</span>
+            </template>
+            <el-menu-item index="/sales">
+              <el-icon><List /></el-icon>
+              <template #title>销售订单</template>
+            </el-menu-item>
+            <el-menu-item index="/downstream-order-reviews">
+              <el-icon><ChatDotRound /></el-icon>
+              <template #title>订单待审核</template>
+            </el-menu-item>
+            <el-menu-item index="/inventory">
+              <el-icon><Goods /></el-icon>
+              <template #title>库存查询</template>
+            </el-menu-item>
+          </el-sub-menu>
+
           <el-sub-menu index="system">
             <template #title>
               <el-icon><Setting /></el-icon>
@@ -47,25 +66,6 @@
             <el-menu-item index="/logs">
               <el-icon><Document /></el-icon>
               <template #title>系统日志</template>
-            </el-menu-item>
-          </el-sub-menu>
-
-          <el-sub-menu index="business">
-            <template #title>
-              <el-icon><Management /></el-icon>
-              <span>业务管理</span>
-            </template>
-            <el-menu-item index="/downstream-order-reviews">
-              <el-icon><ChatDotRound /></el-icon>
-              <template #title>订单待审核</template>
-            </el-menu-item>
-            <el-menu-item index="/inventory">
-              <el-icon><Goods /></el-icon>
-              <template #title>库存查询</template>
-            </el-menu-item>
-             <el-menu-item index="/sales">
-              <el-icon><List /></el-icon>
-              <template #title>销售订单</template>
             </el-menu-item>
           </el-sub-menu>
 

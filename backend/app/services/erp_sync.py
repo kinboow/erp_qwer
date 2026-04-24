@@ -247,8 +247,8 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
     try:
         ensure_tables(db)
 
-        # 1. 获取销售订单列表（分页拉取全部）
-        all_order_nos: list[str] = []
+        # 1. 获取销售订单列表（分页拉取全部，保留列表层的客户/业务员等信息）
+        list_data: dict[str, Any] = {}  # order_no -> list item data
         page = 1
         rows_per_page = 200
         while True:
@@ -261,22 +261,31 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
                 rows=rows_per_page,
             )
             for item in order_list.rows:
-                all_order_nos.append(item.order_no)
+                list_data[item.order_no] = {
+                    "customer_name": item.customer_name or "",
+                    "customer_tel": item.customer_tel or "",
+                    "customer_id": item.customer_id or "",
+                    "salesperson": item.salesperson or "",
+                    "creator": item.creator or "",
+                    "total_qty": item.total_qty or 0,
+                    "total_amount": item.total_amount or 0,
+                }
             if page * rows_per_page >= order_list.total:
                 break
             page += 1
 
+        all_order_nos = list(list_data.keys())
         logger.info("[ERP Sync] 获取到 %d 张销售订单（%s ~ %s）", len(all_order_nos), dates, datee)
 
         synced = 0
         failed = 0
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 2. 逐单获取详情并写入数据库
+        # 2. 逐单获取详情并写入数据库（用列表数据补充详情中缺失的字段）
         for order_no in all_order_nos:
             try:
                 detail = await get_order_detail(erp_client, order_no)
-                _upsert_order(db, detail, now_str)
+                _upsert_order(db, detail, now_str, list_extra=list_data.get(order_no))
                 synced += 1
             except Exception as exc:
                 logger.warning("[ERP Sync] 同步订单 %s 失败: %s", order_no, exc)
@@ -304,10 +313,11 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
         db.close()
 
 
-def _upsert_order(db: Session, detail: Any, synced_at: str) -> None:
-    """插入或更新一张订单（主表 + 明细行）"""
+def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | None = None) -> None:
+    """插入或更新一张订单（主表 + 明细行）。list_extra 提供列表接口的补充数据。"""
     main = detail.main
     order_no = main.order_no
+    extra = list_extra or {}
 
     # upsert 主表
     existing = db.execute(
@@ -319,12 +329,12 @@ def _upsert_order(db: Session, detail: Any, synced_at: str) -> None:
         "order_no": order_no,
         "order_date": main.order_date or "",
         "state": main.state,
-        "customer_id": main.customer_id or "",
-        "customer_name": main.customer_name or "",
-        "customer_tel": main.customer_tel or "",
+        "customer_id": main.customer_id or extra.get("customer_id", ""),
+        "customer_name": main.customer_name or extra.get("customer_name", ""),
+        "customer_tel": main.customer_tel or extra.get("customer_tel", ""),
         "customer_addr": main.customer_addr or "",
-        "salesperson": main.salesperson or "",
-        "creator": main.creator or "",
+        "salesperson": main.salesperson or extra.get("salesperson", ""),
+        "creator": main.creator or extra.get("creator", ""),
         "order_ref": main.order_ref or "",
         "delivery_date": main.delivery_date or "",
         "shipping_method": main.shipping_method or "",

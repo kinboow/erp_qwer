@@ -37,3 +37,11 @@ export const deleteCustomer = (id) => {
     method: 'delete'
   })
 }
+
+export const syncCustomersFromErp = () => {
+  return request({
+    url: '/api/customers/sync',
+    method: 'post',
+    timeout: 120000,
+  })
+}

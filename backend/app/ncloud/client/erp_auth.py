@@ -34,16 +34,17 @@ class ERPAuthManager:
             raise ERPAuthError("未配置账套二维码图片路径")
 
         if qr_source.startswith(("http://", "https://")):
-            # Download image from URL (e.g. OSS)
+            # Download image from MinIO via SDK (private bucket)
             try:
-                img_resp = await self._client.get(qr_source, timeout=30)
-                img_resp.raise_for_status()
-            except httpx.RequestError as exc:
-                raise ERPUpstreamError(f"下载二维码图片失败: {exc}") from exc
-            except httpx.HTTPStatusError as exc:
-                raise ERPUpstreamError(f"下载二维码图片 HTTP {exc.response.status_code}") from exc
-            img_bytes = img_resp.content
-            # Guess filename from URL
+                from app.utils.oss_client import oss_client
+                object_name = oss_client.parse_object_name(qr_source)
+                if not object_name:
+                    raise ERPAuthError(f"无法解析 MinIO 路径: {qr_source}")
+                img_bytes = oss_client.download_file(object_name)
+            except ERPAuthError:
+                raise
+            except Exception as exc:
+                raise ERPUpstreamError(f"从 MinIO 下载二维码图片失败: {exc}") from exc
             filename = qr_source.rsplit("/", 1)[-1].split("?")[0] or "qr.jpg"
         else:
             # Local file path

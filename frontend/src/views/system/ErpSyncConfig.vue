@@ -29,8 +29,8 @@
               :http-request="handleUploadQr"
               accept="image/*"
             >
-              <div v-if="form.erp_qr_image_path" class="qr-preview">
-                <img :src="form.erp_qr_image_path" alt="账套二维码" class="qr-image" />
+              <div v-if="qrPreviewUrl" class="qr-preview">
+                <img :src="qrPreviewUrl" alt="账套二维码" class="qr-image" />
                 <div class="qr-overlay">
                   <el-icon :size="24"><Upload /></el-icon>
                   <span>重新上传</span>
@@ -156,12 +156,13 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Connection, Check, Refresh, Timer, DataAnalysis, Upload, Plus, Loading } from '@element-plus/icons-vue'
-import { getErpSyncConfig, saveErpSyncConfig, getErpSyncStatus, triggerErpSync, uploadErpQr } from '@/api/erpSync'
+import { getErpSyncConfig, saveErpSyncConfig, getErpSyncStatus, triggerErpSync, uploadErpQr, fetchQrImageUrl } from '@/api/erpSync'
 
 const formRef = ref(null)
 const saving = ref(false)
 const syncing = ref(false)
 const uploading = ref(false)
+const qrPreviewUrl = ref('')
 
 const form = reactive({
   erp_base_url: '',
@@ -224,6 +225,7 @@ async function handleUploadQr({ file }) {
     const url = res.data?.url
     if (url) {
       form.erp_qr_image_path = url
+      await loadQrPreview()
       ElMessage.success('账套二维码上传成功')
     } else {
       ElMessage.error('上传失败')
@@ -270,9 +272,20 @@ async function handleTriggerSync() {
   }
 }
 
+async function loadQrPreview() {
+  try {
+    // 释放旧的 blob URL
+    if (qrPreviewUrl.value) URL.revokeObjectURL(qrPreviewUrl.value)
+    qrPreviewUrl.value = await fetchQrImageUrl()
+  } catch {
+    qrPreviewUrl.value = ''
+  }
+}
+
 onMounted(async () => {
   await loadConfig()
   await loadStatus()
+  if (form.erp_qr_image_path) await loadQrPreview()
 })
 </script>
 

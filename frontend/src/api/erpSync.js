@@ -13,7 +13,7 @@ export const getErpSyncStatus = () => {
 }
 
 export const triggerErpSync = (daysBack = 90) => {
-  return request({ url: `/api/erp/sync/trigger?days_back=${daysBack}`, method: 'post' })
+  return request({ url: `/api/erp/sync/trigger?days_back=${daysBack}`, method: 'post', timeout: 300000 })
 }
 
 export const uploadErpQr = (file) => {
@@ -25,4 +25,13 @@ export const uploadErpQr = (file) => {
     data: formData,
     headers: { 'Content-Type': 'multipart/form-data' },
   })
+}
+
+export const fetchQrImageUrl = async () => {
+  const resp = await request({
+    url: '/api/erp/sync/qr-image',
+    method: 'get',
+    responseType: 'blob',
+  })
+  return URL.createObjectURL(resp)
 }

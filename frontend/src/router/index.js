@@ -51,6 +51,12 @@ const routes = [
         meta: { title: '订单待审核' }
       },
       {
+        path: 'sales',
+        name: 'SalesOrders',
+        component: () => import('@/views/business/SalesOrders.vue'),
+        meta: { title: '销售订单' }
+      },
+      {
         path: 'wechat-listeners/:instanceId',
         name: 'WechatRoomListeners',
         component: () => import('@/views/wechat/RoomListeners.vue'),

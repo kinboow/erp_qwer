@@ -145,7 +145,7 @@
                 <input
                   v-model="customerSearchKeyword"
                   class="lark-input"
-                  placeholder="搜索客户名称、联系人、手机号或公司"
+                  placeholder="搜索客户名称、编号、联系人、地址等"
                   @keyup.enter="handleCustomerSearch"
                 />
                 <el-icon v-if="customerSearchKeyword" class="clear-icon" @click="clearCustomerSearch"><CircleClose /></el-icon>
@@ -154,7 +154,26 @@
             </div>
 
             <div class="toolbar-right">
-              <el-button type="primary" :icon="Plus" @click="handleCustomerAdd">新增客户</el-button>
+              <el-popover placement="bottom-end" :width="220" trigger="click">
+                <template #reference>
+                  <el-button :icon="Setting">列设置</el-button>
+                </template>
+                <div class="col-setting-panel">
+                  <div class="col-setting-header">
+                    <span>显示列</span>
+                    <el-button link type="primary" size="small" @click="resetCustomerColumns">重置</el-button>
+                  </div>
+                  <el-checkbox-group v-model="visibleCustomerCols" class="col-setting-list">
+                    <el-checkbox
+                      v-for="col in allCustomerColumns"
+                      :key="col.prop"
+                      :label="col.prop"
+                      :value="col.prop"
+                    >{{ col.label }}</el-checkbox>
+                  </el-checkbox-group>
+                </div>
+              </el-popover>
+              <el-button :icon="Refresh" @click="handleSyncCustomers" :loading="customerSyncing">刷新</el-button>
             </div>
           </div>
 
@@ -163,54 +182,80 @@
             style="width: 100%"
             v-loading="customerLoading"
             class="lark-table"
+            :default-sort="{ prop: 'erp_customer_id', order: 'ascending' }"
             :cell-style="{'border-bottom': '1px solid var(--lark-border-light)'}"
             :header-cell-style="{'border-bottom': '1px solid var(--lark-border-light)', 'background-color': 'var(--lark-bg-sidebar)', 'color': 'var(--lark-text-regular)', 'font-weight': '600'}"
           >
-            <el-table-column label="客户名称" min-width="180" prop="customer_name" />
-            <el-table-column label="联系人" min-width="120" prop="contact_person" />
-            <el-table-column label="联系方式" min-width="220">
-              <template #default="{ row }">
-                <div class="contact-cell">
-                  <div class="contact-item">
-                    <el-icon><Phone /></el-icon>
-                    <span>{{ row.phone || '-' }}</span>
+            <template v-for="col in activeCustomerColumns" :key="col.prop">
+              <el-table-column
+                v-if="col.prop === 'status'"
+                :label="col.label"
+                :prop="col.prop"
+                :width="col.width"
+                :min-width="col.minWidth"
+                :sortable="col.sortable ? 'custom' : false"
+                align="center"
+              >
+                <template #default="{ row }">
+                  <el-tag :type="row.status === 1 ? 'success' : 'info'" size="small">
+                    {{ row.status === 1 ? '启用' : '停用' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column
+                v-else-if="col.prop === 'nature'"
+                :label="col.label"
+                :prop="col.prop"
+                :width="col.width"
+                :min-width="col.minWidth"
+                :sortable="col.sortable ? 'custom' : false"
+                show-overflow-tooltip
+              >
+                <template #default="{ row }">
+                  {{ parseNature(row.nature) }}
+                </template>
+              </el-table-column>
+              <el-table-column
+                v-else-if="col.prop === 'credit_limit'"
+                :label="col.label"
+                :prop="col.prop"
+                :width="col.width"
+                :min-width="col.minWidth"
+                :sortable="col.sortable ? 'custom' : false"
+                align="right"
+              >
+                <template #default="{ row }">
+                  {{ row.credit_limit != null ? Number(row.credit_limit).toLocaleString() : '-' }}
+                </template>
+              </el-table-column>
+              <el-table-column
+                v-else-if="col.prop === 'wechat_rooms'"
+                :label="col.label"
+                :min-width="col.minWidth || 200"
+              >
+                <template #default="{ row }">
+                  <div class="tags-wrapper">
+                    <span
+                      v-for="room in (row.wechat_rooms || []).slice(0, 3)"
+                      :key="`${row.id}-${room.room_id}`"
+                      class="lark-tag tag-blue"
+                    >{{ room.room_name || room.room_id }}</span>
+                    <span v-if="(row.wechat_rooms || []).length > 3" class="empty-text">+{{ row.wechat_rooms.length - 3 }}</span>
+                    <span v-if="!row.wechat_rooms || row.wechat_rooms.length === 0" class="empty-text">-</span>
                   </div>
-                  <div class="contact-item">
-                    <el-icon><Message /></el-icon>
-                    <span>{{ row.email || '-' }}</span>
-                  </div>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="所属公司" min-width="180" prop="company_name" show-overflow-tooltip />
-            <el-table-column label="ERP客户编号" min-width="160" prop="erp_customer_id" show-overflow-tooltip />
-            <el-table-column label="状态" width="120">
-              <template #default="{ row }">
-                <div class="status-cell">
-                  <span class="status-dot" :class="row.status === 1 ? 'active' : 'inactive'"></span>
-                  <span class="status-text">{{ row.status === 1 ? '启用' : '停用' }}</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="关联群聊" min-width="220">
-              <template #default="{ row }">
-                <div class="tags-wrapper">
-                  <span
-                    v-for="room in (row.wechat_rooms || []).slice(0, 3)"
-                    :key="`${row.id}-${room.room_id}`"
-                    class="lark-tag tag-blue"
-                  >
-                    {{ room.room_name || room.room_id }}
-                  </span>
-                  <span v-if="(row.wechat_rooms || []).length > 3" class="empty-text">
-                    +{{ row.wechat_rooms.length - 3 }}
-                  </span>
-                  <span v-if="!row.wechat_rooms || row.wechat_rooms.length === 0" class="empty-text">-</span>
-                </div>
-              </template>
-            </el-table-column>
-            <el-table-column label="备注" min-width="180" prop="remark" show-overflow-tooltip />
-            <el-table-column label="操作" width="140" fixed="right">
+                </template>
+              </el-table-column>
+              <el-table-column
+                v-else
+                :label="col.label"
+                :prop="col.prop"
+                :width="col.width"
+                :min-width="col.minWidth"
+                :sortable="col.sortable ? 'custom' : false"
+                show-overflow-tooltip
+              />
+            </template>
+            <el-table-column label="操作" width="120" fixed="right">
               <template #default="{ row }">
                 <div class="action-cell">
                   <el-button link type="primary" class="lark-link" @click="handleCustomerEdit(row)">编辑</el-button>
@@ -396,14 +441,14 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Search, Plus, Delete, Key, CircleClose,
-  Message, Phone, Download, ArrowDown, Switch
+  Message, Phone, Download, ArrowDown, Switch, Refresh, Setting
 } from '@element-plus/icons-vue'
 import { getUserList, createUser, updateUser, deleteUser } from '@/api/user'
-import { getCustomerList, createCustomer, updateCustomer, deleteCustomer } from '@/api/customer'
+import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp } from '@/api/customer'
 import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig } from '@/api/wechat'
 
 const activeTab = ref('employees')
@@ -433,6 +478,7 @@ const formData = reactive({
 })
 
 const customerLoading = ref(false)
+const customerSyncing = ref(false)
 const customerTableData = ref([])
 const customerSearchKeyword = ref('')
 const customerPagination = reactive({
@@ -440,6 +486,69 @@ const customerPagination = reactive({
   pageSize: 10,
   total: 0
 })
+
+// 客户表全部列定义
+const allCustomerColumns = [
+  { prop: 'erp_customer_id', label: 'ERP编号', width: 100, sortable: true },
+  { prop: 'customer_name', label: '客户名称', minWidth: 150, sortable: true },
+  { prop: 'short_code', label: '简码', width: 90, sortable: true },
+  { prop: 'contact_person', label: '联系人', width: 100 },
+  { prop: 'phone', label: '手机', width: 130 },
+  { prop: 'telephone', label: '固定电话', width: 130 },
+  { prop: 'address', label: '地址', minWidth: 180 },
+  { prop: 'shipping_address', label: '收货地址', minWidth: 180 },
+  { prop: 'shipping_phone', label: '收货电话', width: 130 },
+  { prop: 'salesperson', label: '业务员', width: 90, sortable: true },
+  { prop: 'customer_type', label: '客户类型', width: 100, sortable: true },
+  { prop: 'nature', label: '客户性质', width: 120 },
+  { prop: 'credit_limit', label: '信用额度', width: 110, sortable: true },
+  { prop: 'status', label: '状态', width: 80, sortable: true },
+  { prop: 'email', label: '邮箱', width: 160 },
+  { prop: 'company_name', label: '所属公司', minWidth: 150 },
+  { prop: 'wechat_rooms', label: '关联群聊', minWidth: 200 },
+  { prop: 'remark', label: '备注', minWidth: 140 },
+  { prop: 'synced_at', label: '同步时间', width: 160, sortable: true },
+]
+
+// 默认显示的列
+const defaultVisibleCols = [
+  'erp_customer_id', 'customer_name', 'short_code', 'contact_person', 'phone',
+  'address', 'salesperson', 'customer_type', 'status', 'remark'
+]
+
+// 从 localStorage 读取用户列设置
+const STORAGE_KEY = 'customer_visible_cols'
+const savedCols = (() => {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) return JSON.parse(raw)
+  } catch {}
+  return null
+})()
+const visibleCustomerCols = ref(savedCols || [...defaultVisibleCols])
+
+// 监听变化，保存到 localStorage
+watch(visibleCustomerCols, (val) => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(val))
+}, { deep: true })
+
+const activeCustomerColumns = computed(() =>
+  allCustomerColumns.filter(col => visibleCustomerCols.value.includes(col.prop))
+)
+
+const resetCustomerColumns = () => {
+  visibleCustomerCols.value = [...defaultVisibleCols]
+}
+
+const parseNature = (val) => {
+  if (!val) return '-'
+  try {
+    const arr = JSON.parse(val)
+    return Array.isArray(arr) ? arr.join(', ') : val
+  } catch {
+    return val
+  }
+}
 const customerDialogVisible = ref(false)
 const customerDialogTitle = ref('新增客户')
 const customerSubmitLoading = ref(false)
@@ -615,6 +724,20 @@ const handleCustomerSearch = () => {
 const clearCustomerSearch = () => {
   customerSearchKeyword.value = ''
   handleCustomerSearch()
+}
+
+const handleSyncCustomers = async () => {
+  customerSyncing.value = true
+  try {
+    const res = await syncCustomersFromErp()
+    const d = res.data || {}
+    ElMessage.success(`客户同步完成：共 ${d.synced || 0} 个客户`)
+    await fetchCustomerData()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || '同步失败')
+  } finally {
+    customerSyncing.value = false
+  }
 }
 
 const getRoleName = (role) => {
@@ -1148,5 +1271,32 @@ onMounted(() => {
 
 .danger-text {
   color: #F54A45 !important;
+}
+
+/* 列设置面板 */
+.col-setting-panel {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.col-setting-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lark-text-primary);
+}
+
+.col-setting-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.col-setting-list .el-checkbox {
+  margin-right: 0;
+  height: 28px;
 }
 </style>

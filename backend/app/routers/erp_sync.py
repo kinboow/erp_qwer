@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -84,6 +85,36 @@ async def api_upload_qr(
     from app.services.erp_sync import reload_erp_client
     await reload_erp_client(request.app)
     return {"code": 200, "message": "上传成功", "data": {"url": url}}
+
+
+# ---------- 账套二维码代理（需登录） ----------
+
+@router.get("/qr-image", summary="获取账套二维码图片（从 MinIO 代理）")
+def api_get_qr_image(db: Session = Depends(get_db)):
+    """前端通过此接口获取二维码预览，无需 MinIO 公开访问权限"""
+    import logging
+    logger = logging.getLogger(__name__)
+    cfg = get_erp_sync_config(db)
+    url = cfg.get("erp_qr_image_path") or ""
+    if not url:
+        return Response(status_code=404, content=b"No QR image configured")
+
+    from app.utils.oss_client import oss_client
+    object_name = oss_client.parse_object_name(url)
+    if not object_name:
+        return Response(status_code=404, content=b"Invalid QR image URL")
+
+    try:
+        img_bytes = oss_client.download_file(object_name)
+    except Exception as exc:
+        logger.warning("[ERP Sync] 下载二维码图片失败: %s", exc)
+        return Response(status_code=500, content=b"Failed to fetch QR image")
+
+    # 根据扩展名推断 content-type
+    ext = object_name.rsplit(".", 1)[-1].lower() if "." in object_name else "jpg"
+    ct_map = {"png": "image/png", "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"}
+    content_type = ct_map.get(ext, "image/jpeg")
+    return Response(content=img_bytes, media_type=content_type)
 
 
 # ---------- 同步 ----------

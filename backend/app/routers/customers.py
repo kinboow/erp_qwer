@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import Optional, List
@@ -8,6 +8,7 @@ from app.database import get_db
 from app.models import User
 from app.dependencies import get_current_user
 from app.services.downstream_support import ensure_downstream_support_tables
+from app.services.customer_sync import sync_customers
 
 router = APIRouter(tags=["客户管理"])
 
@@ -98,6 +99,21 @@ def replace_customer_rooms(db: Session, customer_id: int, rooms: Optional[List[C
         )
 
 
+@router.post("/sync", summary="从ERP同步客户列表")
+async def api_sync_customers(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    erp_client = getattr(request.app.state, "erp_client", None)
+    if not erp_client:
+        raise HTTPException(status_code=503, detail="ERP 客户端未初始化，请先配置 ERP 连接")
+    try:
+        result = await sync_customers(erp_client)
+        return json_response(message="客户同步完成", data=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"同步失败: {str(e)}")
+
+
 @router.get("", summary="获取客户列表")
 async def get_customer_list(
     page: int = Query(1, ge=1),
@@ -110,10 +126,10 @@ async def get_customer_list(
     params = {}
     where_sql = "WHERE deleted_at IS NULL"
     if keyword:
-        where_sql += " AND (customer_name LIKE :keyword OR contact_person LIKE :keyword OR phone LIKE :keyword OR company_name LIKE :keyword)"
+        where_sql += " AND (customer_name LIKE :keyword OR contact_person LIKE :keyword OR phone LIKE :keyword OR company_name LIKE :keyword OR erp_customer_id LIKE :keyword OR salesperson LIKE :keyword OR short_code LIKE :keyword OR address LIKE :keyword)"
         params["keyword"] = f"%{keyword}%"
 
-    list_sql = text(f"SELECT id, customer_name, contact_person, phone, email, company_name, address, remark, erp_customer_id, status, created_at, updated_at FROM downstream_customers {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset")
+    list_sql = text(f"SELECT id, customer_name, contact_person, phone, telephone, email, company_name, address, remark, erp_customer_id, status, salesperson, customer_type, shipping_address, shipping_phone, short_code, nature, credit_limit, synced_at, created_at, updated_at FROM downstream_customers {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset")
     params.update({"limit": pageSize, "offset": (page - 1) * pageSize})
     rows = db.execute(list_sql, params).mappings().all()
 
