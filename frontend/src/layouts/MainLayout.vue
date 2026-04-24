@@ -65,7 +65,7 @@
             </el-menu-item>
             <el-menu-item index="/external-config">
               <el-icon><Link /></el-icon>
-              <template #title>外部服务配置</template>
+              <template #title>外部配置</template>
             </el-menu-item>
             <el-menu-item index="/logs">
               <el-icon><Document /></el-icon>

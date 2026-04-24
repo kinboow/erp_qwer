@@ -57,9 +57,9 @@ def api_list_orders(
     offset = (page - 1) * page_size
     data_sql = f"""
         SELECT id, order_no, order_date, state, customer_name, customer_tel,
-               salesperson, creator, delivery_date, shipping_method,
+               customer_addr, salesperson, creator, delivery_date, shipping_method,
                currency, brand, customer_type, total_qty, total_amount,
-               remark, synced_at
+               print_count, product_no, remark, synced_at
         FROM erp_sales_orders
         WHERE {where}
         ORDER BY order_date DESC, id DESC
@@ -78,6 +78,7 @@ def api_list_orders(
             "state": r["state"],
             "customer_name": r["customer_name"] or "",
             "customer_tel": r["customer_tel"] or "",
+            "customer_addr": r["customer_addr"] or "",
             "salesperson": r["salesperson"] or "",
             "creator": r["creator"] or "",
             "delivery_date": r["delivery_date"] or "",
@@ -87,6 +88,8 @@ def api_list_orders(
             "customer_type": r["customer_type"] or "",
             "total_qty": float(r["total_qty"] or 0),
             "total_amount": float(r["total_amount"] or 0),
+            "print_count": r["print_count"] or 0,
+            "product_no": r["product_no"] or "",
             "remark": r["remark"] or "",
             "synced_at": str(r["synced_at"] or ""),
         })

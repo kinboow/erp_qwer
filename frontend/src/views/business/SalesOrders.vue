@@ -97,12 +97,6 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="订单号" prop="order_no" width="160">
-          <template #default="{ row }">
-            <span class="order-no">{{ row.order_no }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="下单日期" prop="order_date" width="110" />
         <el-table-column label="状态" width="80" align="center">
           <template #default="{ row }">
             <el-tag :type="row.state === 1 ? 'success' : 'warning'" size="small">
@@ -110,18 +104,25 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="客户" prop="customer_name" min-width="140" show-overflow-tooltip />
-        <el-table-column label="业务员" prop="salesperson" width="90" />
-        <el-table-column label="总数量" width="90" align="right">
-          <template #default="{ row }">{{ row.total_qty }}</template>
-        </el-table-column>
-        <el-table-column label="总金额" width="110" align="right">
+        <el-table-column label="印次" prop="print_count" width="70" align="center" />
+        <el-table-column label="单号" prop="order_no" width="160">
           <template #default="{ row }">
-            <span class="amount">¥{{ row.total_amount.toFixed(2) }}</span>
+            <span class="order-no">{{ row.order_no }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="交货日期" prop="delivery_date" width="110" />
-        <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
+        <el-table-column label="订单日期" prop="order_date" width="110" />
+        <el-table-column label="客户名称" prop="customer_name" min-width="140" show-overflow-tooltip />
+        <el-table-column label="客户电话" prop="customer_tel" width="130" show-overflow-tooltip />
+        <el-table-column label="客户地址" prop="customer_addr" min-width="160" show-overflow-tooltip />
+        <el-table-column label="货号" prop="product_no" width="130" show-overflow-tooltip />
+        <el-table-column label="总数量" prop="total_qty" width="80" align="right" />
+        <el-table-column label="业务员" prop="salesperson" width="90" />
+        <el-table-column label="托运方式" prop="shipping_method" width="100" />
+        <el-table-column label="运费" width="90" align="right">
+          <template #default="{ row }">
+            {{ row.total_amount > 0 ? '-' : '-' }}
+          </template>
+        </el-table-column>
       </el-table>
 
       <!-- 分页 -->

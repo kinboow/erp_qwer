@@ -254,7 +254,7 @@
                 show-overflow-tooltip
               />
             </template>
-            <el-table-column label="操作" width="200" fixed="right">
+            <el-table-column label="操作" width="260" fixed="right">
               <template #default="{ row }">
                 <div class="action-cell">
                   <el-tooltip v-if="row.status !== 1" content="ERP未启用，不可绑定" placement="top">

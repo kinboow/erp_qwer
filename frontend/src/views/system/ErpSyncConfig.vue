@@ -21,32 +21,6 @@
           </el-form-item>
         </div>
 
-        <el-form-item label="账套二维码图片">
-          <div class="qr-upload-area">
-            <el-upload
-              :show-file-list="false"
-              :before-upload="handleBeforeUpload"
-              :http-request="handleUploadQr"
-              accept="image/*"
-            >
-              <div v-if="qrPreviewUrl" class="qr-preview">
-                <img :src="qrPreviewUrl" alt="账套二维码" class="qr-image" />
-                <div class="qr-overlay">
-                  <el-icon :size="24"><Upload /></el-icon>
-                  <span>重新上传</span>
-                </div>
-              </div>
-              <div v-else class="qr-placeholder">
-                <el-icon :size="32" color="#c0c4cc"><Plus /></el-icon>
-                <span>点击上传账套二维码</span>
-              </div>
-            </el-upload>
-            <div v-if="uploading" class="qr-uploading">
-              <el-icon class="is-loading"><Loading /></el-icon>
-              <span>上传中…</span>
-            </div>
-          </div>
-        </el-form-item>
       </el-form>
     </div>
 

@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS erp_sales_orders (
     total_amount    DECIMAL(12,2) DEFAULT 0,
     payment_amount  DECIMAL(12,2) DEFAULT NULL,
     discount_amount DECIMAL(12,2) DEFAULT NULL,
+    print_count     INT          DEFAULT 0,
+    product_no      VARCHAR(255) DEFAULT '',
     remark          TEXT NULL,
     synced_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -184,6 +186,15 @@ def ensure_tables(db: Session) -> None:
     db.execute(text(_DDL_SHIPMENTS))
     db.execute(text(_DDL_SHIPMENT_ITEMS))
     db.execute(text(_DDL_SYNC_CONFIG))
+    # 补加字段（已有表结构升级）
+    for col, defn in [
+        ("print_count", "INT DEFAULT 0"),
+        ("product_no", "VARCHAR(255) DEFAULT ''"),
+    ]:
+        try:
+            db.execute(text(f"ALTER TABLE erp_sales_orders ADD COLUMN {col} {defn}"))
+        except Exception:
+            pass  # 已存在则跳过
     db.commit()
 
 
@@ -338,6 +349,8 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
                     "creator": item.creator or "",
                     "total_qty": item.total_qty or 0,
                     "total_amount": item.total_amount or 0,
+                    "print_count": item.print_count or 0,
+                    "product_no": item.product_no or "",
                 }
             if page * rows_per_page >= order_list.total:
                 break
@@ -419,6 +432,8 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
         "total_amount": main.total_amount or 0,
         "payment_amount": main.payment_amount,
         "discount_amount": main.discount_amount,
+        "print_count": extra.get("print_count", 0),
+        "product_no": extra.get("product_no", ""),
         "remark": main.remark or "",
         "synced_at": synced_at,
     }
