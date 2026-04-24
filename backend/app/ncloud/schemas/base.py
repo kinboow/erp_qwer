@@ -12,9 +12,24 @@ class LoginResult(BaseModel):
     login_rs: str
 
 
+class ProductListItem(BaseModel):
+    product_id: str = ""
+    product_no: str = ""          # 货号
+    product_name: str | None = ""  # 品名
+    brand: str | None = ""         # 品牌/编号
+    category: str | None = ""      # 货号类别
+    color: str | None = ""         # 颜色
+    unit: str | None = ""          # 单位
+    price: float | None = 0        # 单价
+    spec: str | None = ""          # 规格
+    material: str | None = ""      # 材质
+    image_url: str | None = ""     # 图片
+    remark: str | None = ""        # 备注
+
+
 class ProductListResponse(BaseModel):
     total: int
-    rows: list[dict[str, Any]]
+    rows: list[ProductListItem]
 
 
 class CustomerListItem(BaseModel):

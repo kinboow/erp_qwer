@@ -8,18 +8,9 @@ from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.dependencies import get_erp_client
 from app.ncloud.exceptions import AppException
 from app.ncloud.schemas.base import CustomerListResponse, ProductListResponse
-from app.ncloud.services.base import list_customers
+from app.ncloud.services.base import list_customers, list_products
 
 router = APIRouter(tags=["base"])
-
-
-def _guard_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    if "rows" not in payload or "total" not in payload:
-        raise HTTPException(
-            status_code=502,
-            detail={"message": "上游返回结构异常", "payload": payload},
-        )
-    return payload
 
 
 @router.get("/products", response_model=ProductListResponse)
@@ -27,16 +18,10 @@ async def api_products(
     page: int = Query(default=1, ge=1),
     rows: int = Query(default=20, ge=1, le=500),
     erp: ERPClient = Depends(get_erp_client),
-) -> dict[str, Any]:
+) -> ProductListResponse:
     try:
-        payload = await erp.post_form(
-            "/BaseInfo/SysHuohao/GridPageListJson",
-            {"page": page, "rows": rows},
-        )
-        return _guard_payload(payload)
+        return await list_products(erp, page=page, rows=rows)
     except AppException:
-        raise
-    except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc

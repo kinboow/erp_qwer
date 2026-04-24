@@ -206,6 +206,10 @@ onMounted(fetchDetail)
   color: #f56c6c;
 }
 
+:deep(.info-desc table) {
+  table-layout: fixed;
+}
+
 :deep(.info-desc .el-descriptions__label) {
   width: 80px;
   font-weight: 500;

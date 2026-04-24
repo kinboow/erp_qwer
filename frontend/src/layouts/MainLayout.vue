@@ -1,13 +1,13 @@
 <template>
   <el-container class="lark-layout">
     <!-- 侧边栏：极简、浅灰色背景、无边框 -->
-    <el-aside :width="isCollapse ? '68px' : '240px'" class="lark-sidebar" :class="{ 'is-collapse': isCollapse }">
+    <el-aside width="192px" class="lark-sidebar">
       <div class="lark-logo">
         <div class="logo-box">
           <el-icon color="#fff" :size="20"><Box /></el-icon>
         </div>
         <transition name="fade">
-          <h1 v-show="!isCollapse" class="logo-text">Factory ERP</h1>
+          <h1 class="logo-text">Factory ERP</h1>
         </transition>
       </div>
 
@@ -15,8 +15,6 @@
         <el-menu
           :default-active="activeMenu"
           class="lark-menu"
-          :collapse="isCollapse"
-          :collapse-transition="false"
           router
           background-color="var(--lark-bg-sidebar)"
           text-color="var(--lark-text-regular)"
@@ -32,6 +30,10 @@
               <el-icon><Management /></el-icon>
               <span>业务管理</span>
             </template>
+            <el-menu-item index="/products">
+              <el-icon><Goods /></el-icon>
+              <template #title>产品列表</template>
+            </el-menu-item>
             <el-menu-item index="/sales">
               <el-icon><List /></el-icon>
               <template #title>销售订单</template>
@@ -45,7 +47,7 @@
               <template #title>订单待审核</template>
             </el-menu-item>
             <el-menu-item index="/inventory" @click="handleUndeveloped">
-              <el-icon><Goods /></el-icon>
+              <el-icon><Search /></el-icon>
               <template #title>库存查询</template>
             </el-menu-item>
           </el-sub-menu>
@@ -76,13 +78,6 @@
         </el-menu>
       </el-scrollbar>
 
-      <!-- 底部折叠按钮，飞书风格 -->
-      <div class="lark-collapse-wrap">
-        <div class="lark-collapse-btn" @click="toggleCollapse">
-          <el-icon :size="16"><Fold v-if="!isCollapse"/><Expand v-else/></el-icon>
-          <span v-show="!isCollapse">收起菜单</span>
-        </div>
-      </div>
     </el-aside>
 
     <el-container class="lark-main-container">
@@ -171,7 +166,6 @@ import { useUserStore } from '@/stores/user'
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
-const isCollapse = ref(false)
 
 const activeMenu = computed(() => route.path === '/customers' ? '/users' : route.path)
 
@@ -181,9 +175,6 @@ const handleUndeveloped = () => {
   router.replace(route.fullPath)
 }
 
-const toggleCollapse = () => {
-  isCollapse.value = !isCollapse.value
-}
 
 const handleCommand = (command) => {
   if (command === 'logout') {
@@ -293,54 +284,6 @@ const handleCommand = (command) => {
   margin-right: 12px;
   width: 24px;
   text-align: center;
-}
-
-/* 折叠态菜单项 */
-:deep(.el-menu--collapse > .el-menu-item),
-:deep(.el-menu--collapse > .el-sub-menu > .el-sub-menu__title) {
-  width: 44px;
-  height: 44px;
-  line-height: 44px;
-  padding: 0 !important;
-  margin: 0 auto 4px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  border-radius: var(--lark-radius);
-}
-
-:deep(.el-menu--collapse > .el-menu-item .el-icon),
-:deep(.el-menu--collapse > .el-sub-menu > .el-sub-menu__title .el-icon) {
-  margin-right: 0;
-}
-
-/* 侧边栏底部折叠 */
-.lark-collapse-wrap {
-  padding: 12px;
-  border-top: 1px solid var(--lark-border-light);
-  flex-shrink: 0;
-}
-
-.lark-collapse-btn {
-  height: 36px;
-  border-radius: var(--lark-radius);
-  display: flex;
-  align-items: center;
-  padding: 0 12px;
-  cursor: pointer;
-  color: var(--lark-text-regular);
-  font-size: 14px;
-  transition: background-color 0.2s;
-}
-
-.lark-collapse-btn:hover {
-  background-color: var(--lark-bg-hover);
-  color: var(--lark-text-primary);
-}
-
-.lark-collapse-btn span {
-  margin-left: 10px;
-  white-space: nowrap;
 }
 
 /* 右侧主容器 */

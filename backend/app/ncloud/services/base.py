@@ -5,7 +5,7 @@ from typing import Any
 
 from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.exceptions import ERPUpstreamError
-from app.ncloud.schemas.base import CustomerListItem, CustomerListResponse
+from app.ncloud.schemas.base import CustomerListItem, CustomerListResponse, ProductListItem, ProductListResponse
 
 
 def _parse_nature(value: Any) -> list[str]:
@@ -43,6 +43,41 @@ def _map_customer(row: dict[str, Any]) -> CustomerListItem:
         salesperson=row.get("ywy"),
         customer_type=row.get("khtype"),
         remark=row.get("remark"),
+    )
+
+
+def _map_product(row: dict[str, Any]) -> ProductListItem:
+    return ProductListItem(
+        product_id=str(row.get("bh") or ""),
+        product_no=row.get("bbreed") or row.get("name_pk") or "",
+        product_name=row.get("description") or "",
+        brand=row.get("lpinpai") or "",
+        category=row.get("typename") or "",
+        color=row.get("zxsrequire1") or row.get("color") or "",
+        unit=row.get("dw") or "",
+        price=row.get("xsprice") or 0,
+        spec=row.get("zxsrequire2") or "",
+        material=row.get("caizhi") or "",
+        image_url=row.get("FileUrl") or "",
+        remark=row.get("remark") or "",
+    )
+
+
+async def list_products(
+    erp: ERPClient,
+    page: int,
+    rows: int,
+) -> ProductListResponse:
+    payload = await erp.post_form(
+        "/BaseInfo/SysHuohao/GridPageListJson",
+        {"page": page, "rows": rows},
+    )
+    if "total" not in payload or "rows" not in payload or not isinstance(payload["rows"], list):
+        raise ERPUpstreamError("ERP product list returned an unexpected shape")
+
+    return ProductListResponse(
+        total=payload["total"],
+        rows=[_map_product(row) for row in payload["rows"]],
     )
 
 
