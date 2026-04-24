@@ -231,12 +231,14 @@ onMounted(fetchDetail)
   font-size: 14px;
 }
 
-:deep(.items-table td.el-table__cell) {
-  padding: 8px 0;
+:deep(.items-table .el-table__body td.el-table__cell) {
+  padding: 10px 0;
+  font-size: 14px;
 }
 
 :deep(.items-table .el-table__footer td.el-table__cell) {
+  padding: 6px 0;
   font-weight: 600;
-  font-size: 14px;
+  font-size: 13px;
 }
 </style>
