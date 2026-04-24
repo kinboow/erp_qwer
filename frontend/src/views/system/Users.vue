@@ -254,16 +254,14 @@
                 show-overflow-tooltip
               />
             </template>
-            <el-table-column label="操作" width="260" fixed="right">
+            <el-table-column label="操作" width="200" fixed="right">
               <template #default="{ row }">
-                <div class="action-cell">
+                <div class="action-cell compact">
                   <el-tooltip v-if="row.status !== 1" content="ERP未启用，不可绑定" placement="top">
                     <el-button link type="info" class="lark-link" disabled>绑定</el-button>
                   </el-tooltip>
                   <el-button v-else link type="primary" class="lark-link" @click="handleCustomerBind(row)">绑定</el-button>
-                  <el-divider direction="vertical" />
                   <el-button link type="primary" class="lark-link" @click="handleCustomerDetail(row)">详情</el-button>
-                  <el-divider direction="vertical" />
                   <el-button link type="primary" class="lark-link" @click="handleViewOrders(row)">关联订单</el-button>
                 </div>
               </template>
@@ -1299,6 +1297,10 @@ onMounted(async () => {
 .action-cell {
   display: flex;
   align-items: center;
+}
+
+.action-cell.compact {
+  gap: 4px;
 }
 
 .lark-link {
