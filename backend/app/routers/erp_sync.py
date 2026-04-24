@@ -139,8 +139,22 @@ async def api_sync_trigger(request: Request, days_back: int = 90) -> dict[str, A
     }}
 
 
+@router.post("/trigger-orders", summary="手动触发销售订单同步")
+async def api_sync_orders_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
+    erp_client = request.app.state.erp_client
+    result = await sync_sales_orders(erp_client, days_back=days_back)
+    return {"code": 200, "message": "订单同步完成", "data": result}
+
+
 @router.post("/trigger-shipments", summary="手动触发发货单同步")
 async def api_sync_shipments_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
     erp_client = request.app.state.erp_client
     result = await sync_sales_shipments(erp_client, days_back=days_back)
     return {"code": 200, "message": "发货单同步完成", "data": result}
+
+
+@router.post("/trigger-products", summary="手动触发产品同步")
+async def api_sync_products_trigger(request: Request) -> dict[str, Any]:
+    erp_client = request.app.state.erp_client
+    result = await sync_products(erp_client)
+    return {"code": 200, "message": "产品同步完成", "data": result}

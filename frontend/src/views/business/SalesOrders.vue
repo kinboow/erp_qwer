@@ -35,7 +35,7 @@
           </div>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="Refresh" @click="handleSearch" :loading="loading">刷新</el-button>
+          <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步销售订单</el-button>
         </div>
       </div>
 
@@ -103,11 +103,12 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
-import { getSalesOrders } from '@/api/salesOrders'
+import { getSalesOrders, syncOrders } from '@/api/salesOrders'
 
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
+const syncing = ref(false)
 const orders = ref([])
 const total = ref(0)
 
@@ -154,6 +155,20 @@ async function fetchOrders() {
     total.value = 0
   } finally {
     loading.value = false
+  }
+}
+
+async function handleSync() {
+  syncing.value = true
+  try {
+    const res = await syncOrders(90)
+    const d = res.data || {}
+    ElMessage.success(`同步完成：共 ${d.total_found || 0} 张，成功 ${d.synced || 0}，失败 ${d.failed || 0}`)
+    fetchOrders()
+  } catch {
+    ElMessage.error('同步失败，请检查 ERP 配置')
+  } finally {
+    syncing.value = false
   }
 }
 

@@ -35,8 +35,7 @@
           </div>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="Download" @click="handleSync" :loading="syncing">同步发货单</el-button>
-          <el-button :icon="Refresh" @click="handleSearch" :loading="loading">刷新</el-button>
+          <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步发货单</el-button>
         </div>
       </div>
 
@@ -151,7 +150,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Search, Refresh, Download } from '@element-plus/icons-vue'
+import { Search, Refresh } from '@element-plus/icons-vue'
 import { getSalesShipments, getShipmentItems, syncShipments } from '@/api/salesShipments'
 
 const loading = ref(false)

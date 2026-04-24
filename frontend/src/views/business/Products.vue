@@ -19,7 +19,9 @@
             @clear="handleSearch"
           />
           <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
-          <el-button :icon="Refresh" @click="handleReset">重置</el-button>
+        </div>
+        <div class="toolbar-right">
+          <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步产品列表</el-button>
         </div>
       </div>
 
@@ -76,9 +78,10 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
-import { getProducts } from '@/api/products'
+import { getProducts, syncProducts } from '@/api/products'
 
 const loading = ref(false)
+const syncing = ref(false)
 const allProducts = ref([])
 const total = ref(0)
 
@@ -94,10 +97,18 @@ function handleSearch() {
   fetchProducts()
 }
 
-function handleReset() {
-  filter.keyword = ''
-  filter.page = 1
-  fetchProducts()
+async function handleSync() {
+  syncing.value = true
+  try {
+    const res = await syncProducts()
+    const d = res.data || {}
+    ElMessage.success(`同步完成：共 ${d.total_found || 0} 个，成功 ${d.synced || 0}，失败 ${d.failed || 0}`)
+    fetchProducts()
+  } catch {
+    ElMessage.error('同步失败，请检查 ERP 配置')
+  } finally {
+    syncing.value = false
+  }
 }
 
 async function fetchProducts() {
