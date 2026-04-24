@@ -142,9 +142,11 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getSalesOrders, getOrderItems } from '@/api/salesOrders'
 
+const route = useRoute()
 const loading = ref(false)
 const orders = ref([])
 const total = ref(0)
@@ -210,6 +212,9 @@ async function handleExpand(row, expandedRows) {
 }
 
 onMounted(() => {
+  if (route.query.customer) {
+    filter.keyword = route.query.customer
+  }
   fetchOrders()
 })
 </script>

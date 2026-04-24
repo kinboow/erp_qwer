@@ -254,16 +254,15 @@
                 show-overflow-tooltip
               />
             </template>
-            <el-table-column label="操作" width="120" fixed="right">
+            <el-table-column label="操作" width="200" fixed="right">
               <template #default="{ row }">
-                <div class="action-cell" v-if="!row.erp_customer_id">
-                  <el-button link type="primary" class="lark-link" @click="handleCustomerEdit(row)">编辑</el-button>
+                <div class="action-cell">
+                  <el-button link type="primary" class="lark-link" @click="handleCustomerBind(row)">绑定</el-button>
                   <el-divider direction="vertical" />
-                  <el-button link type="danger" class="lark-link" @click="handleCustomerDelete(row)">删除</el-button>
+                  <el-button link type="primary" class="lark-link" @click="handleCustomerDetail(row)">详情</el-button>
+                  <el-divider direction="vertical" />
+                  <el-button link type="primary" class="lark-link" @click="handleViewOrders(row)">关联订单</el-button>
                 </div>
-                <el-tooltip v-else content="ERP同步数据不可修改" placement="top">
-                  <span class="empty-text" style="font-size:12px;">ERP同步</span>
-                </el-tooltip>
               </template>
             </el-table-column>
           </el-table>
@@ -345,97 +344,108 @@
       </template>
     </el-dialog>
 
+    <!-- 绑定群聊弹窗 -->
     <el-dialog
-      v-model="customerDialogVisible"
-      :title="customerDialogTitle"
-      width="560px"
-      @close="resetCustomerForm"
+      v-model="bindDialogVisible"
+      title="绑定企微群聊"
+      width="520px"
       destroy-on-close
       class="lark-dialog"
       :show-close="true"
     >
-      <div class="lark-form-container">
-        <el-form :model="customerFormData" :rules="customerRules" ref="customerFormRef" label-position="top">
-          <el-row :gutter="20">
-            <el-col :span="12">
-              <el-form-item label="客户名称" prop="customer_name">
-                <el-input v-model="customerFormData.customer_name" placeholder="请输入客户名称" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item label="联系人" prop="contact_person">
-                <el-input v-model="customerFormData.contact_person" placeholder="请输入联系人" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item label="联系电话" prop="phone">
-                <el-input v-model="customerFormData.phone" placeholder="请输入联系电话" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item label="邮箱" prop="email">
-                <el-input v-model="customerFormData.email" placeholder="请输入邮箱" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="24">
-              <el-form-item label="所属公司" prop="company_name">
-                <el-input v-model="customerFormData.company_name" placeholder="请输入公司名称" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="24">
-              <el-form-item label="ERP客户编号" prop="erp_customer_id">
-                <el-input v-model="customerFormData.erp_customer_id" placeholder="请输入 ERP 客户编号（khid）" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="24">
-              <el-form-item label="地址" prop="address">
-                <el-input v-model="customerFormData.address" placeholder="请输入地址" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="24">
-              <el-form-item label="关联企微群">
-                <el-select
-                  v-model="customerFormData.wechat_room_ids"
-                  multiple
-                  filterable
-                  clearable
-                  collapse-tags
-                  collapse-tags-tooltip
-                  placeholder="请选择要关联的企微群"
-                  style="width: 100%"
-                  :loading="wechatRoomLoading"
-                  :disabled="!hasBoundWechatInstance || wechatRoomLoading"
-                >
-                  <el-option
-                    v-for="room in wechatRoomOptions"
-                    :key="room.room_id"
-                    :label="room.room_name"
-                    :value="room.room_id"
-                  />
-                </el-select>
-                <div class="wechat-room-hint">
-                  <template v-if="hasBoundWechatInstance">
-                    <span>当前实例：{{ wechatBoundInstance.name || wechatBoundInstance.wxid }}</span>
-                    <span v-if="!wechatRoomLoading && wechatRoomOptions.length === 0">，暂未获取到群聊，系统已自动尝试同步，请确认该实例已登录且群聊可被接口读取</span>
-                  </template>
-                  <template v-else>
-                    请先在“企微配置”中绑定当前企业微信实例
-                  </template>
-                </div>
-              </el-form-item>
-            </el-col>
-            <el-col :span="24">
-              <el-form-item label="备注" prop="remark">
-                <el-input v-model="customerFormData.remark" type="textarea" :rows="3" placeholder="请输入备注" />
-              </el-form-item>
-            </el-col>
-          </el-row>
+      <div class="bind-dialog-info">
+        <span class="bind-label">客户：</span>
+        <span class="bind-value">{{ bindTarget.customer_name }}</span>
+        <el-tag v-if="bindTarget.erp_customer_id" size="small" style="margin-left:8px;">{{ bindTarget.erp_customer_id }}</el-tag>
+      </div>
+      <div class="lark-form-container" style="margin-top:12px;">
+        <el-form label-position="top">
+          <el-form-item label="关联企微群">
+            <el-select
+              v-model="bindRoomIds"
+              multiple
+              filterable
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              placeholder="请选择要关联的企微群"
+              style="width: 100%"
+              :loading="wechatRoomLoading"
+              :disabled="!hasBoundWechatInstance || wechatRoomLoading"
+            >
+              <el-option
+                v-for="room in wechatRoomOptions"
+                :key="room.room_id"
+                :label="room.room_name"
+                :value="room.room_id"
+              />
+            </el-select>
+            <div class="wechat-room-hint">
+              <template v-if="hasBoundWechatInstance">
+                <span>当前实例：{{ wechatBoundInstance.name || wechatBoundInstance.wxid }}</span>
+                <span v-if="!wechatRoomLoading && wechatRoomOptions.length === 0">，暂未获取到群聊</span>
+              </template>
+              <template v-else>
+                请先在"企微配置"中绑定当前企业微信实例
+              </template>
+            </div>
+          </el-form-item>
         </el-form>
       </div>
       <template #footer>
         <div class="lark-dialog-footer">
-          <el-button class="lark-btn-secondary" @click="customerDialogVisible = false">取消</el-button>
-          <el-button type="primary" @click="handleCustomerSubmit" :loading="customerSubmitLoading">确定</el-button>
+          <el-button class="lark-btn-secondary" @click="bindDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="handleBindSubmit" :loading="bindLoading">保存</el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- 客户详情弹窗 -->
+    <el-dialog
+      v-model="detailDialogVisible"
+      title="客户详情"
+      width="640px"
+      destroy-on-close
+      class="lark-dialog"
+      :show-close="true"
+    >
+      <el-descriptions :column="2" border size="default" class="customer-detail-desc">
+        <el-descriptions-item label="ERP编号">{{ detailData.erp_customer_id || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="客户名称">{{ detailData.customer_name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="简码">{{ detailData.short_code || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="联系人">{{ detailData.contact_person || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="手机">{{ detailData.phone || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="固定电话">{{ detailData.telephone || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="地址" :span="2">{{ detailData.address || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="收货地址" :span="2">{{ detailData.shipping_address || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="收货电话">{{ detailData.shipping_phone || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="邮箱">{{ detailData.email || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="所属公司">{{ detailData.company_name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="业务员">{{ detailData.salesperson || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="客户类型">{{ detailData.customer_type || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="客户性质">{{ parseNature(detailData.nature) }}</el-descriptions-item>
+        <el-descriptions-item label="信用额度">{{ detailData.credit_limit != null ? Number(detailData.credit_limit).toLocaleString() : '-' }}</el-descriptions-item>
+        <el-descriptions-item label="状态">
+          <el-tag :type="detailData.status === 1 ? 'success' : 'info'" size="small">
+            {{ detailData.status === 1 ? '启用' : '停用' }}
+          </el-tag>
+        </el-descriptions-item>
+        <el-descriptions-item label="关联群聊" :span="2">
+          <div class="tags-wrapper" v-if="detailData.wechat_rooms && detailData.wechat_rooms.length">
+            <span v-for="room in detailData.wechat_rooms" :key="room.room_id" class="lark-tag tag-blue">
+              {{ room.room_name || room.room_id }}
+            </span>
+          </div>
+          <span v-else class="empty-text">-</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="备注" :span="2">{{ detailData.remark || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="同步时间">{{ detailData.synced_at || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="创建时间">{{ detailData.created_at || '-' }}</el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <div class="lark-dialog-footer">
+          <el-button @click="detailDialogVisible = false">关闭</el-button>
+          <el-button type="primary" @click="handleViewOrders(detailData)">查看关联订单</el-button>
         </div>
       </template>
     </el-dialog>
@@ -444,6 +454,7 @@
 
 <script setup>
 import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Search, Plus, Delete, Key, CircleClose,
@@ -453,6 +464,7 @@ import { getUserList, createUser, updateUser, deleteUser } from '@/api/user'
 import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp } from '@/api/customer'
 import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig } from '@/api/wechat'
 
+const router = useRouter()
 const activeTab = ref('employees')
 const loading = ref(false)
 const tableData = ref([])
@@ -551,6 +563,16 @@ const parseNature = (val) => {
     return val
   }
 }
+// 绑定群聊弹窗
+const bindDialogVisible = ref(false)
+const bindLoading = ref(false)
+const bindTarget = reactive({ id: null, customer_name: '', erp_customer_id: '' })
+const bindRoomIds = ref([])
+
+// 详情弹窗
+const detailDialogVisible = ref(false)
+const detailData = ref({})
+
 const customerDialogVisible = ref(false)
 const customerDialogTitle = ref('新增客户')
 const customerSubmitLoading = ref(false)
@@ -861,6 +883,47 @@ const handleCustomerEdit = async (row) => {
   customerFormData.status = row.status
   customerFormData.wechat_room_ids = (row.wechat_rooms || []).map(item => item.room_id)
   customerDialogVisible.value = true
+}
+
+const handleCustomerBind = async (row) => {
+  bindTarget.id = row.id
+  bindTarget.customer_name = row.customer_name
+  bindTarget.erp_customer_id = row.erp_customer_id || ''
+  bindRoomIds.value = (row.wechat_rooms || []).map(r => r.room_id)
+  await fetchWechatRoomsForCustomer()
+  bindDialogVisible.value = true
+}
+
+const handleBindSubmit = async () => {
+  bindLoading.value = true
+  try {
+    const rooms = bindRoomIds.value.map(roomId => {
+      const room = wechatRoomOptions.value.find(r => r.room_id === roomId)
+      return {
+        instance_id: wechatBoundInstance.value?.id,
+        room_id: roomId,
+        room_name: room?.room_name || ''
+      }
+    })
+    await updateCustomer(bindTarget.id, { wechat_rooms: rooms })
+    ElMessage.success('绑定成功')
+    bindDialogVisible.value = false
+    fetchCustomerData()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.detail || e?.message || '绑定失败')
+  } finally {
+    bindLoading.value = false
+  }
+}
+
+const handleCustomerDetail = (row) => {
+  detailData.value = { ...row }
+  detailDialogVisible.value = true
+}
+
+const handleViewOrders = (row) => {
+  detailDialogVisible.value = false
+  router.push({ path: '/sales', query: { customer: row.customer_name } })
 }
 
 const handleCustomerDelete = (row) => {
