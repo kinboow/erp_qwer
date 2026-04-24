@@ -36,11 +36,15 @@
               <el-icon><List /></el-icon>
               <template #title>销售订单</template>
             </el-menu-item>
+            <el-menu-item index="/shipments">
+              <el-icon><Box /></el-icon>
+              <template #title>销售发货单</template>
+            </el-menu-item>
             <el-menu-item index="/downstream-order-reviews">
               <el-icon><ChatDotRound /></el-icon>
               <template #title>订单待审核</template>
             </el-menu-item>
-            <el-menu-item index="/inventory">
+            <el-menu-item index="/inventory" @click="handleUndeveloped">
               <el-icon><Goods /></el-icon>
               <template #title>库存查询</template>
             </el-menu-item>
@@ -53,7 +57,7 @@
             </template>
             <el-menu-item index="/users">
               <el-icon><UserFilled /></el-icon>
-              <template #title>组织架构</template>
+              <template #title>人员管理</template>
             </el-menu-item>
             <el-menu-item index="/roles">
               <el-icon><Stamp /></el-icon>
@@ -155,8 +159,8 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { useRoute } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   DataLine, User, Setting, Fold, Expand, Box, UserFilled,
   Search, Bell, SwitchButton, Stamp, Management, Goods, List, QuestionFilled,
@@ -165,10 +169,17 @@ import {
 import { useUserStore } from '@/stores/user'
 
 const route = useRoute()
+const router = useRouter()
 const userStore = useUserStore()
 const isCollapse = ref(false)
 
-const activeMenu = computed(() => route.path)
+const activeMenu = computed(() => route.path === '/customers' ? '/users' : route.path)
+
+const handleUndeveloped = () => {
+  ElMessage.warning('该功能暂未开发，敬请期待！')
+  // 阻止导航，回到当前页
+  router.replace(route.fullPath)
+}
 
 const toggleCollapse = () => {
   isCollapse.value = !isCollapse.value

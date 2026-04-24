@@ -18,6 +18,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.services.sales_orders import get_order_detail, list_orders
+from app.ncloud.services.shipments import get_shipment_detail, list_shipments
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,72 @@ CREATE TABLE IF NOT EXISTS erp_sales_order_items (
 """
 
 
+_DDL_SHIPMENTS = """
+CREATE TABLE IF NOT EXISTS erp_sales_shipments (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_no        VARCHAR(100) NOT NULL,
+    order_date      VARCHAR(50)  DEFAULT '',
+    state           INT          NOT NULL DEFAULT 0,
+    customer_id     VARCHAR(100) DEFAULT '',
+    customer_name   VARCHAR(255) DEFAULT '',
+    customer_tel    VARCHAR(100) DEFAULT '',
+    customer_addr   VARCHAR(500) DEFAULT '',
+    salesperson     VARCHAR(100) DEFAULT '',
+    creator         VARCHAR(100) DEFAULT '',
+    handler         VARCHAR(100) DEFAULT '',
+    warehouse       VARCHAR(100) DEFAULT '',
+    shipping_method VARCHAR(100) DEFAULT '',
+    shipping_tel    VARCHAR(100) DEFAULT '',
+    shipping_addr   VARCHAR(500) DEFAULT '',
+    tracking_no     VARCHAR(200) DEFAULT '',
+    delivery_person VARCHAR(100) DEFAULT '',
+    contact_person  VARCHAR(100) DEFAULT '',
+    contact_tel     VARCHAR(100) DEFAULT '',
+    currency        VARCHAR(50)  DEFAULT '',
+    customer_type   VARCHAR(100) DEFAULT '',
+    price_print     INT          DEFAULT NULL,
+    freight         DECIMAL(12,2) DEFAULT NULL,
+    payment_amount  DECIMAL(12,2) DEFAULT NULL,
+    total_qty       DECIMAL(12,2) DEFAULT 0,
+    total_amount    DECIMAL(12,2) DEFAULT 0,
+    remark          TEXT NULL,
+    synced_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_order_no (order_no),
+    INDEX idx_customer_id (customer_id),
+    INDEX idx_order_date (order_date),
+    INDEX idx_state (state),
+    INDEX idx_synced_at (synced_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+_DDL_SHIPMENT_ITEMS = """
+CREATE TABLE IF NOT EXISTS erp_sales_shipment_items (
+    id                  BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_no            VARCHAR(100) NOT NULL,
+    sort_index          INT          NOT NULL DEFAULT 0,
+    brand               VARCHAR(100) DEFAULT '',
+    product_no          VARCHAR(100) DEFAULT '',
+    product_name        VARCHAR(255) DEFAULT '',
+    color               VARCHAR(100) DEFAULT '',
+    customer_product_no VARCHAR(100) DEFAULT '',
+    packaging           VARCHAR(100) DEFAULT '',
+    unit                VARCHAR(50)  DEFAULT '',
+    price               DECIMAL(12,2) DEFAULT 0,
+    discount            INT          DEFAULT 100,
+    order_ref           VARCHAR(100) DEFAULT '',
+    sizes_json          TEXT NULL,
+    total_qty           DECIMAL(12,2) DEFAULT 0,
+    remark              TEXT NULL,
+    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_order_no  (order_no),
+    INDEX idx_product_no (product_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
 _DDL_SYNC_CONFIG = """
 CREATE TABLE IF NOT EXISTS erp_sync_config (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -114,6 +181,8 @@ def ensure_tables(db: Session) -> None:
     """确保同步表存在"""
     db.execute(text(_DDL_ORDERS))
     db.execute(text(_DDL_ITEMS))
+    db.execute(text(_DDL_SHIPMENTS))
+    db.execute(text(_DDL_SHIPMENT_ITEMS))
     db.execute(text(_DDL_SYNC_CONFIG))
     db.commit()
 
@@ -405,6 +474,182 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
 
 
 # ---------------------------------------------------------------------------
+# 发货单同步
+# ---------------------------------------------------------------------------
+
+async def sync_sales_shipments(erp_client: ERPClient, days_back: int | None = None) -> dict[str, Any]:
+    """
+    拉取 ERP 销售发货单列表 + 每张发货单的详情，写入本地数据库。
+    返回同步统计信息。
+    """
+    cfg = _get_db_config()
+    days = days_back or cfg.get("sync_days_back", 90)
+    datee = datetime.now().strftime("%Y-%m-%d")
+    dates = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    db: Session = SessionLocal()
+    try:
+        ensure_tables(db)
+
+        # 1. 获取发货单列表（分页拉取全部）
+        list_data: dict[str, Any] = {}  # order_no -> list item data
+        page = 1
+        rows_per_page = 200
+        while True:
+            shipment_list = await list_shipments(
+                erp_client,
+                dates=dates,
+                datee=datee,
+                state=["0", "1"],
+                page=page,
+                rows=rows_per_page,
+            )
+            for item in shipment_list.rows:
+                list_data[item.order_no] = {
+                    "customer_name": item.customer_name or "",
+                    "customer_id": item.customer_id or "",
+                    "salesperson": item.salesperson or "",
+                    "total_qty": item.total_qty or 0,
+                    "total_amount": item.total_amount or 0,
+                    "tracking_no": item.tracking_no or "",
+                    "shipping_method": item.shipping_method or "",
+                    "freight": item.freight,
+                }
+            if page * rows_per_page >= shipment_list.total:
+                break
+            page += 1
+
+        all_order_nos = list(list_data.keys())
+        logger.info("[ERP Sync] 获取到 %d 张销售发货单（%s ~ %s）", len(all_order_nos), dates, datee)
+
+        synced = 0
+        failed = 0
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 2. 逐单获取详情并写入数据库
+        for order_no in all_order_nos:
+            try:
+                detail = await get_shipment_detail(erp_client, order_no)
+                _upsert_shipment(db, detail, now_str, list_extra=list_data.get(order_no))
+                synced += 1
+            except Exception as exc:
+                logger.warning("[ERP Sync] 同步发货单 %s 失败: %s", order_no, exc)
+                failed += 1
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+        result = {
+            "dates": dates,
+            "datee": datee,
+            "total_found": len(all_order_nos),
+            "synced": synced,
+            "failed": failed,
+            "synced_at": now_str,
+        }
+        logger.info("[ERP Sync] 发货单同步完成: %s", result)
+        return result
+
+    except Exception:
+        logger.exception("[ERP Sync] 发货单同步异常")
+        raise
+    finally:
+        db.close()
+
+
+def _upsert_shipment(db: Session, detail: Any, synced_at: str, list_extra: dict | None = None) -> None:
+    """插入或更新一张发货单（主表 + 明细行）"""
+    main = detail.main
+    order_no = main.order_no
+    extra = list_extra or {}
+
+    existing = db.execute(
+        text("SELECT id FROM erp_sales_shipments WHERE order_no = :order_no"),
+        {"order_no": order_no},
+    ).mappings().first()
+
+    shipment_data = {
+        "order_no": order_no,
+        "order_date": main.order_date or "",
+        "state": main.state,
+        "customer_id": main.customer_id or extra.get("customer_id", ""),
+        "customer_name": main.customer_name or extra.get("customer_name", ""),
+        "customer_tel": main.customer_tel or "",
+        "customer_addr": main.customer_addr or "",
+        "salesperson": main.salesperson or extra.get("salesperson", ""),
+        "creator": main.creator or "",
+        "handler": main.handler or "",
+        "warehouse": main.warehouse or "",
+        "shipping_method": main.shipping_method or extra.get("shipping_method", ""),
+        "shipping_tel": main.shipping_tel or "",
+        "shipping_addr": main.shipping_addr or "",
+        "tracking_no": main.tracking_no or extra.get("tracking_no", ""),
+        "delivery_person": main.delivery_person or "",
+        "contact_person": main.contact_person or "",
+        "contact_tel": main.contact_tel or "",
+        "currency": main.currency or "",
+        "customer_type": main.customer_type or "",
+        "price_print": main.price_print,
+        "freight": main.freight if main.freight is not None else extra.get("freight"),
+        "payment_amount": main.payment_amount,
+        "total_qty": main.total_qty or 0,
+        "total_amount": main.total_amount or 0,
+        "remark": main.remark or "",
+        "synced_at": synced_at,
+    }
+
+    if existing:
+        set_clause = ", ".join(f"{k} = :{k}" for k in shipment_data if k != "order_no")
+        db.execute(
+            text(f"UPDATE erp_sales_shipments SET {set_clause} WHERE order_no = :order_no"),
+            shipment_data,
+        )
+    else:
+        cols = ", ".join(shipment_data.keys())
+        vals = ", ".join(f":{k}" for k in shipment_data.keys())
+        db.execute(
+            text(f"INSERT INTO erp_sales_shipments ({cols}) VALUES ({vals})"),
+            shipment_data,
+        )
+
+    # 删除旧明细，重新插入
+    db.execute(
+        text("DELETE FROM erp_sales_shipment_items WHERE order_no = :order_no"),
+        {"order_no": order_no},
+    )
+
+    for idx, row in enumerate(detail.detail):
+        sizes_list = [{"size": s.size, "qty": s.qty} for s in row.sizes]
+        total_qty = sum(s.qty for s in row.sizes)
+        item_data = {
+            "order_no": order_no,
+            "sort_index": idx + 1,
+            "brand": row.brand or "",
+            "product_no": row.product_no or "",
+            "product_name": row.product_name or "",
+            "color": row.color or "",
+            "customer_product_no": row.customer_product_no or "",
+            "packaging": row.packaging or "",
+            "unit": row.unit or "",
+            "price": row.price or 0,
+            "discount": row.discount or 100,
+            "order_ref": row.order_ref or "",
+            "sizes_json": json.dumps(sizes_list, ensure_ascii=False),
+            "total_qty": total_qty,
+            "remark": row.remark or "",
+        }
+        cols = ", ".join(item_data.keys())
+        vals = ", ".join(f":{k}" for k in item_data.keys())
+        db.execute(
+            text(f"INSERT INTO erp_sales_shipment_items ({cols}) VALUES ({vals})"),
+            item_data,
+        )
+
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
 # 定时调度器
 # ---------------------------------------------------------------------------
 
@@ -424,7 +669,9 @@ async def _sync_loop(erp_client: ERPClient) -> None:
         cfg = _get_db_config()
         try:
             _is_syncing = True
-            _last_sync_result = await sync_sales_orders(erp_client)
+            orders_result = await sync_sales_orders(erp_client)
+            shipments_result = await sync_sales_shipments(erp_client)
+            _last_sync_result = {"orders": orders_result, "shipments": shipments_result}
         except Exception as exc:
             _last_sync_result = {"error": str(exc), "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         finally:

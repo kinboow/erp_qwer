@@ -45,3 +45,18 @@ export const syncCustomersFromErp = () => {
     timeout: 120000,
   })
 }
+
+export const getPreference = (key) => {
+  return request({
+    url: `/api/customers/preferences/${key}`,
+    method: 'get'
+  })
+}
+
+export const savePreference = (key, value) => {
+  return request({
+    url: `/api/customers/preferences/${key}`,
+    method: 'put',
+    data: { value }
+  })
+}

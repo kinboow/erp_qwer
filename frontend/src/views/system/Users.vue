@@ -1,7 +1,7 @@
 <template>
   <div class="lark-users">
     <div class="lark-page-header">
-      <div class="header-title">组织架构</div>
+      <div class="header-title">人员管理</div>
       <div class="header-desc">管理企业内部员工与下游客户资料</div>
     </div>
 
@@ -154,7 +154,7 @@
             </div>
 
             <div class="toolbar-right">
-              <el-popover placement="bottom-end" :width="220" trigger="click">
+              <el-popover placement="bottom-end" trigger="click" :show-arrow="true">
                 <template #reference>
                   <el-button :icon="Setting">列设置</el-button>
                 </template>
@@ -196,8 +196,8 @@
                 align="center"
               >
                 <template #default="{ row }">
-                  <el-tag :type="row.status === 1 ? 'success' : 'info'" size="small">
-                    {{ row.status === 1 ? '启用' : '停用' }}
+                  <el-tag :type="getCustomerStatusType(row)" size="small">
+                    {{ getCustomerStatusText(row) }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -257,7 +257,10 @@
             <el-table-column label="操作" width="200" fixed="right">
               <template #default="{ row }">
                 <div class="action-cell">
-                  <el-button link type="primary" class="lark-link" @click="handleCustomerBind(row)">绑定</el-button>
+                  <el-tooltip v-if="row.status !== 1" content="ERP未启用，不可绑定" placement="top">
+                    <el-button link type="info" class="lark-link" disabled>绑定</el-button>
+                  </el-tooltip>
+                  <el-button v-else link type="primary" class="lark-link" @click="handleCustomerBind(row)">绑定</el-button>
                   <el-divider direction="vertical" />
                   <el-button link type="primary" class="lark-link" @click="handleCustomerDetail(row)">详情</el-button>
                   <el-divider direction="vertical" />
@@ -426,8 +429,8 @@
         <el-descriptions-item label="客户性质">{{ parseNature(detailData.nature) }}</el-descriptions-item>
         <el-descriptions-item label="信用额度">{{ detailData.credit_limit != null ? Number(detailData.credit_limit).toLocaleString() : '-' }}</el-descriptions-item>
         <el-descriptions-item label="状态">
-          <el-tag :type="detailData.status === 1 ? 'success' : 'info'" size="small">
-            {{ detailData.status === 1 ? '启用' : '停用' }}
+          <el-tag :type="getCustomerStatusType(detailData)" size="small">
+            {{ getCustomerStatusText(detailData) }}
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="关联群聊" :span="2">
@@ -454,18 +457,19 @@
 
 <script setup>
 import { ref, reactive, onMounted, computed, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Search, Plus, Delete, Key, CircleClose,
   Message, Phone, Download, ArrowDown, Switch, Refresh, Setting
 } from '@element-plus/icons-vue'
 import { getUserList, createUser, updateUser, deleteUser } from '@/api/user'
-import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp } from '@/api/customer'
+import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp, getPreference, savePreference } from '@/api/customer'
 import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig } from '@/api/wechat'
 
 const router = useRouter()
-const activeTab = ref('employees')
+const route = useRoute()
+const activeTab = ref(route.meta.tab || 'employees')
 const loading = ref(false)
 const tableData = ref([])
 const searchKeyword = ref('')
@@ -504,46 +508,51 @@ const customerPagination = reactive({
 // 客户表全部列定义
 const allCustomerColumns = [
   { prop: 'erp_customer_id', label: 'ERP编号', width: 100, sortable: true },
-  { prop: 'customer_name', label: '客户名称', minWidth: 150, sortable: true },
+  { prop: 'customer_name', label: '客户名称', minWidth: 105, sortable: true },
   { prop: 'short_code', label: '简码', width: 90, sortable: true },
   { prop: 'contact_person', label: '联系人', width: 100 },
   { prop: 'phone', label: '手机', width: 130 },
   { prop: 'telephone', label: '固定电话', width: 130 },
-  { prop: 'address', label: '地址', minWidth: 180 },
+  { prop: 'address', label: '地址', minWidth: 220 },
   { prop: 'shipping_address', label: '收货地址', minWidth: 180 },
   { prop: 'shipping_phone', label: '收货电话', width: 130 },
   { prop: 'salesperson', label: '业务员', width: 90, sortable: true },
   { prop: 'customer_type', label: '客户类型', width: 100, sortable: true },
   { prop: 'nature', label: '客户性质', width: 120 },
   { prop: 'credit_limit', label: '信用额度', width: 110, sortable: true },
-  { prop: 'status', label: '状态', width: 80, sortable: true },
   { prop: 'email', label: '邮箱', width: 160 },
   { prop: 'company_name', label: '所属公司', minWidth: 150 },
-  { prop: 'wechat_rooms', label: '关联群聊', minWidth: 200 },
   { prop: 'remark', label: '备注', minWidth: 140 },
+  { prop: 'wechat_rooms', label: '关联群聊', minWidth: 200 },
   { prop: 'synced_at', label: '同步时间', width: 160, sortable: true },
+  { prop: 'status', label: '状态', width: 110, sortable: true },
 ]
 
 // 默认显示的列
 const defaultVisibleCols = [
-  'erp_customer_id', 'customer_name', 'short_code', 'contact_person', 'phone',
-  'address', 'salesperson', 'customer_type', 'status', 'remark'
+  'erp_customer_id', 'customer_name', 'short_code', 'phone',
+  'address', 'credit_limit', 'remark', 'wechat_rooms', 'status'
 ]
 
-// 从 localStorage 读取用户列设置
-const STORAGE_KEY = 'customer_visible_cols'
-const savedCols = (() => {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) return JSON.parse(raw)
-  } catch {}
-  return null
-})()
-const visibleCustomerCols = ref(savedCols || [...defaultVisibleCols])
+// 列设置（从数据库加载，变更时保存到数据库）
+const PREF_KEY = 'customer_visible_cols'
+const visibleCustomerCols = ref([...defaultVisibleCols])
+let _colsLoaded = false
 
-// 监听变化，保存到 localStorage
+const loadVisibleCols = async () => {
+  try {
+    const res = await getPreference(PREF_KEY)
+    const val = res.data?.value
+    if (val) {
+      visibleCustomerCols.value = JSON.parse(val)
+    }
+  } catch {}
+  _colsLoaded = true
+}
+
 watch(visibleCustomerCols, (val) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(val))
+  if (!_colsLoaded) return
+  savePreference(PREF_KEY, JSON.stringify(val)).catch(() => {})
 }, { deep: true })
 
 const activeCustomerColumns = computed(() =>
@@ -552,6 +561,24 @@ const activeCustomerColumns = computed(() =>
 
 const resetCustomerColumns = () => {
   visibleCustomerCols.value = [...defaultVisibleCols]
+}
+
+const getCustomerStatusText = (row) => {
+  const erpOn = row.status === 1
+  const hasBind = row.wechat_rooms && row.wechat_rooms.length > 0
+  if (erpOn && hasBind) return '正常'
+  if (erpOn && !hasBind) return '未绑定群聊'
+  if (!erpOn && hasBind) return '异常'
+  return '停用'
+}
+
+const getCustomerStatusType = (row) => {
+  const erpOn = row.status === 1
+  const hasBind = row.wechat_rooms && row.wechat_rooms.length > 0
+  if (erpOn && hasBind) return 'success'
+  if (erpOn && !hasBind) return 'warning'
+  if (!erpOn && hasBind) return 'danger'
+  return 'info'
 }
 
 const parseNature = (val) => {
@@ -1051,9 +1078,9 @@ const resetCustomerForm = () => {
 
 const handleTabChange = (tab) => {
   if (tab === 'employees') {
-    fetchData()
+    router.push('/users')
   } else {
-    fetchCustomerData()
+    router.push('/customers')
   }
 }
 
@@ -1065,11 +1092,13 @@ const formatDate = (dateStr) => {
   })
 }
 
-onMounted(() => {
+onMounted(async () => {
   loadBoundWechatInstance()
-  fetchData()
+  await loadVisibleCols()
   if (activeTab.value === 'customers') {
     fetchCustomerData()
+  } else {
+    fetchData()
   }
 })
 </script>
@@ -1342,6 +1371,13 @@ onMounted(() => {
 .col-setting-panel {
   max-height: 400px;
   overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.col-setting-panel::-webkit-scrollbar {
+  display: none;
 }
 
 .col-setting-header {
@@ -1363,6 +1399,29 @@ onMounted(() => {
 .col-setting-list .el-checkbox {
   margin-right: 0;
   height: 28px;
+}
+
+/* 绑定弹窗客户信息 */
+.bind-dialog-info {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--lark-bg-subtle, #f7f8fa);
+  border-radius: var(--lark-radius, 6px);
+  font-size: 14px;
+}
+.bind-label {
+  color: var(--lark-text-secondary);
+}
+.bind-value {
+  font-weight: 600;
+  color: var(--lark-text-primary);
+}
+
+/* 客户详情描述列表 */
+:deep(.customer-detail-desc .el-descriptions__label) {
+  width: 90px;
+  font-weight: 500;
 }
 
 /* 表头文字不换行，排序图标与文字同行 */

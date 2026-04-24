@@ -213,13 +213,16 @@ async def update_customer(
     ).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="客户不存在")
-    if row["erp_customer_id"]:
-        raise HTTPException(status_code=403, detail="ERP同步的客户数据不可修改")
+    is_erp = bool(row["erp_customer_id"])
+
+    # ERP 同步客户只允许更新关联群聊，不允许改其他字段
     updates = []
     params = {"customer_id": customer_id}
     for key in ["customer_name", "contact_person", "phone", "email", "company_name", "address", "remark", "erp_customer_id", "status"]:
         value = getattr(payload, key)
         if value is not None:
+            if is_erp:
+                raise HTTPException(status_code=403, detail="ERP同步的客户基本信息不可修改，仅可绑定群聊")
             updates.append(f"{key} = :{key}")
             params[key] = value
 
@@ -249,3 +252,43 @@ async def delete_customer(
     db.execute(text("DELETE FROM downstream_customer_wechat_rooms WHERE customer_id = :customer_id"), {"customer_id": customer_id})
     db.commit()
     return json_response(message="删除成功")
+
+
+# ---------- 用户偏好设置 ----------
+
+class PrefUpdateDto(BaseModel):
+    value: str
+
+
+@router.get("/preferences/{pref_key}", summary="获取用户偏好")
+async def get_preference(
+    pref_key: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ensure_downstream_support_tables(db)
+    row = db.execute(
+        text("SELECT pref_value FROM user_preferences WHERE user_id = :uid AND pref_key = :key"),
+        {"uid": current_user.id, "key": pref_key},
+    ).mappings().first()
+    return json_response(data={"value": row["pref_value"] if row else None})
+
+
+@router.put("/preferences/{pref_key}", summary="保存用户偏好")
+async def save_preference(
+    pref_key: str,
+    payload: PrefUpdateDto,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ensure_downstream_support_tables(db)
+    db.execute(
+        text(
+            "INSERT INTO user_preferences (user_id, pref_key, pref_value) "
+            "VALUES (:uid, :key, :val) "
+            "ON DUPLICATE KEY UPDATE pref_value = :val"
+        ),
+        {"uid": current_user.id, "key": pref_key, "val": payload.value},
+    )
+    db.commit()
+    return json_response(message="保存成功")

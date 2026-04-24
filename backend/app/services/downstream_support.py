@@ -94,6 +94,16 @@ def ensure_downstream_support_tables(db: Session):
         "INDEX idx_created_at (created_at)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     ))
+    db.execute(text(
+        "CREATE TABLE IF NOT EXISTS user_preferences ("
+        "id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
+        "user_id INT UNSIGNED NOT NULL, "
+        "pref_key VARCHAR(100) NOT NULL, "
+        "pref_value LONGTEXT NULL, "
+        "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+        "UNIQUE KEY uk_user_pref (user_id, pref_key)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ))
     # 追加 ERP 同步相关字段（兼容已有表）
     _add_column_if_not_exists(db, "downstream_customers", "salesperson", "VARCHAR(100) DEFAULT ''")
     _add_column_if_not_exists(db, "downstream_customers", "customer_type", "VARCHAR(100) DEFAULT ''")

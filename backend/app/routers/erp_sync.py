@@ -15,6 +15,7 @@ from app.services.erp_sync import (
     get_sync_status,
     save_erp_sync_config,
     sync_sales_orders,
+    sync_sales_shipments,
 )
 
 router = APIRouter(tags=["ERP-同步"])
@@ -124,8 +125,15 @@ def api_sync_status() -> dict[str, Any]:
     return {"code": 200, "data": get_sync_status()}
 
 
-@router.post("/trigger", summary="手动触发同步")
+@router.post("/trigger", summary="手动触发订单同步")
 async def api_sync_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
     erp_client = request.app.state.erp_client
     result = await sync_sales_orders(erp_client, days_back=days_back)
     return {"code": 200, "message": "同步完成", "data": result}
+
+
+@router.post("/trigger-shipments", summary="手动触发发货单同步")
+async def api_sync_shipments_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
+    erp_client = request.app.state.erp_client
+    result = await sync_sales_shipments(erp_client, days_back=days_back)
+    return {"code": 200, "message": "发货单同步完成", "data": result}

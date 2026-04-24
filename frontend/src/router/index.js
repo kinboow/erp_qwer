@@ -24,7 +24,13 @@ const routes = [
         path: 'users',
         name: 'Users',
         component: () => import('@/views/system/Users.vue'),
-        meta: { title: '用户管理' }
+        meta: { title: '员工管理', tab: 'employees' }
+      },
+      {
+        path: 'customers',
+        name: 'Customers',
+        component: () => import('@/views/system/Users.vue'),
+        meta: { title: '下游客户', tab: 'customers' }
       },
       {
         path: 'roles',
@@ -55,6 +61,12 @@ const routes = [
         name: 'SalesOrders',
         component: () => import('@/views/business/SalesOrders.vue'),
         meta: { title: '销售订单' }
+      },
+      {
+        path: 'shipments',
+        name: 'SalesShipments',
+        component: () => import('@/views/business/SalesShipments.vue'),
+        meta: { title: '销售发货单' }
       },
       {
         path: 'wechat-listeners/:instanceId',
