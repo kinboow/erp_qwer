@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import SessionLocal
 from app.ncloud.client.erp_client import ERPClient
+from app.ncloud.services.base import list_products as erp_list_products
 from app.ncloud.services.sales_orders import get_order_detail, list_orders
 from app.ncloud.services.shipments import get_shipment_detail, list_shipments
 
@@ -159,6 +160,30 @@ CREATE TABLE IF NOT EXISTS erp_sales_shipment_items (
 """
 
 
+_DDL_PRODUCTS = """
+CREATE TABLE IF NOT EXISTS erp_products (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    product_id      VARCHAR(100) NOT NULL,
+    product_no      VARCHAR(200) DEFAULT '',
+    product_name    VARCHAR(255) DEFAULT '',
+    brand           VARCHAR(200) DEFAULT '',
+    category        VARCHAR(200) DEFAULT '',
+    color           TEXT NULL,
+    unit            VARCHAR(50)  DEFAULT '',
+    price           DECIMAL(12,2) DEFAULT 0,
+    spec            TEXT NULL,
+    material        VARCHAR(200) DEFAULT '',
+    image_url       VARCHAR(500) DEFAULT '',
+    remark          TEXT NULL,
+    synced_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_product_id (product_id),
+    INDEX idx_product_no (product_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
 _DDL_SYNC_CONFIG = """
 CREATE TABLE IF NOT EXISTS erp_sync_config (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -185,6 +210,7 @@ def ensure_tables(db: Session) -> None:
     db.execute(text(_DDL_ITEMS))
     db.execute(text(_DDL_SHIPMENTS))
     db.execute(text(_DDL_SHIPMENT_ITEMS))
+    db.execute(text(_DDL_PRODUCTS))
     db.execute(text(_DDL_SYNC_CONFIG))
     # 补加字段（已有表结构升级）
     for col, defn in [
@@ -696,6 +722,90 @@ def _upsert_shipment(db: Session, detail: Any, synced_at: str, list_extra: dict 
 
 
 # ---------------------------------------------------------------------------
+# 产品同步
+# ---------------------------------------------------------------------------
+
+async def sync_products(erp_client: ERPClient) -> dict[str, Any]:
+    """分页拉取 ERP 产品列表，写入本地 erp_products 表。"""
+    db: Session = SessionLocal()
+    try:
+        ensure_tables(db)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        synced = 0
+        failed = 0
+        page = 1
+        rows_per_page = 200
+
+        while True:
+            product_list = await erp_list_products(erp_client, page=page, rows=rows_per_page)
+            for item in product_list.rows:
+                try:
+                    _upsert_product(db, item, now_str)
+                    synced += 1
+                except Exception as exc:
+                    logger.warning("[ERP Sync] 同步产品 %s 失败: %s", item.product_id, exc)
+                    failed += 1
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
+            if page * rows_per_page >= product_list.total:
+                break
+            page += 1
+
+        result = {
+            "total_found": synced + failed,
+            "synced": synced,
+            "failed": failed,
+            "synced_at": now_str,
+        }
+        logger.info("[ERP Sync] 产品同步完成: %s", result)
+        return result
+
+    except Exception:
+        logger.exception("[ERP Sync] 产品同步异常")
+        raise
+    finally:
+        db.close()
+
+
+def _upsert_product(db: Session, item: Any, synced_at: str) -> None:
+    """插入或更新一条产品记录"""
+    existing = db.execute(
+        text("SELECT id FROM erp_products WHERE product_id = :pid"),
+        {"pid": item.product_id},
+    ).mappings().first()
+
+    data = {
+        "product_id": item.product_id,
+        "product_no": item.product_no or "",
+        "product_name": item.product_name or "",
+        "brand": item.brand or "",
+        "category": item.category or "",
+        "color": item.color or "",
+        "unit": item.unit or "",
+        "price": item.price or 0,
+        "spec": item.spec or "",
+        "material": item.material or "",
+        "image_url": item.image_url or "",
+        "remark": item.remark or "",
+        "synced_at": synced_at,
+    }
+
+    if existing:
+        sets = ", ".join(f"{k} = :{k}" for k in data if k != "product_id")
+        data["_id"] = existing["id"]
+        db.execute(text(f"UPDATE erp_products SET {sets} WHERE id = :_id"), data)
+    else:
+        cols = ", ".join(data.keys())
+        vals = ", ".join(f":{k}" for k in data.keys())
+        db.execute(text(f"INSERT INTO erp_products ({cols}) VALUES ({vals})"), data)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
 # 定时调度器
 # ---------------------------------------------------------------------------
 
@@ -717,7 +827,8 @@ async def _sync_loop(erp_client: ERPClient) -> None:
             _is_syncing = True
             orders_result = await sync_sales_orders(erp_client)
             shipments_result = await sync_sales_shipments(erp_client)
-            _last_sync_result = {"orders": orders_result, "shipments": shipments_result}
+            products_result = await sync_products(erp_client)
+            _last_sync_result = {"orders": orders_result, "shipments": shipments_result, "products": products_result}
         except Exception as exc:
             _last_sync_result = {"error": str(exc), "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         finally:

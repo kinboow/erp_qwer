@@ -30,7 +30,7 @@
 
       <!-- 表格 -->
       <el-table
-        :data="filteredProducts"
+        :data="allProducts"
         v-loading="loading"
         stripe
         class="lark-table"
@@ -73,7 +73,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getProducts } from '@/api/products'
@@ -88,15 +88,6 @@ const filter = reactive({
   page_size: 50,
 })
 
-const filteredProducts = computed(() => {
-  if (!filter.keyword) return allProducts.value
-  const kw = filter.keyword.toLowerCase()
-  return allProducts.value.filter(p =>
-    (p.product_no || '').toLowerCase().includes(kw) ||
-    (p.product_name || '').toLowerCase().includes(kw) ||
-    (p.brand || '').toLowerCase().includes(kw)
-  )
-})
 
 function handleSearch() {
   filter.page = 1
@@ -112,12 +103,15 @@ function handleReset() {
 async function fetchProducts() {
   loading.value = true
   try {
-    const res = await getProducts({
+    const params = {
       page: filter.page,
-      rows: filter.page_size,
-    })
-    allProducts.value = res.rows || []
-    total.value = res.total || 0
+      page_size: filter.page_size,
+    }
+    if (filter.keyword) params.keyword = filter.keyword
+    const res = await getProducts(params)
+    const d = res.data || {}
+    allProducts.value = d.list || []
+    total.value = d.total || 0
   } catch (e) {
     console.error('获取产品列表失败:', e)
     allProducts.value = []
