@@ -182,7 +182,6 @@
             style="width: 100%"
             v-loading="customerLoading"
             class="lark-table"
-            :default-sort="{ prop: 'erp_customer_id', order: 'ascending' }"
             :cell-style="{'border-bottom': '1px solid var(--lark-border-light)'}"
             :header-cell-style="{'border-bottom': '1px solid var(--lark-border-light)', 'background-color': 'var(--lark-bg-sidebar)', 'color': 'var(--lark-text-regular)', 'font-weight': '600'}"
           >
@@ -193,7 +192,7 @@
                 :prop="col.prop"
                 :width="col.width"
                 :min-width="col.minWidth"
-                :sortable="col.sortable ? 'custom' : false"
+                :sortable="!!col.sortable"
                 align="center"
               >
                 <template #default="{ row }">
@@ -208,7 +207,7 @@
                 :prop="col.prop"
                 :width="col.width"
                 :min-width="col.minWidth"
-                :sortable="col.sortable ? 'custom' : false"
+                :sortable="!!col.sortable"
                 show-overflow-tooltip
               >
                 <template #default="{ row }">
@@ -221,7 +220,7 @@
                 :prop="col.prop"
                 :width="col.width"
                 :min-width="col.minWidth"
-                :sortable="col.sortable ? 'custom' : false"
+                :sortable="!!col.sortable"
                 align="right"
               >
                 <template #default="{ row }">
@@ -251,17 +250,20 @@
                 :prop="col.prop"
                 :width="col.width"
                 :min-width="col.minWidth"
-                :sortable="col.sortable ? 'custom' : false"
+                :sortable="!!col.sortable"
                 show-overflow-tooltip
               />
             </template>
             <el-table-column label="操作" width="120" fixed="right">
               <template #default="{ row }">
-                <div class="action-cell">
+                <div class="action-cell" v-if="!row.erp_customer_id">
                   <el-button link type="primary" class="lark-link" @click="handleCustomerEdit(row)">编辑</el-button>
                   <el-divider direction="vertical" />
                   <el-button link type="danger" class="lark-link" @click="handleCustomerDelete(row)">删除</el-button>
                 </div>
+                <el-tooltip v-else content="ERP同步数据不可修改" placement="top">
+                  <span class="empty-text" style="font-size:12px;">ERP同步</span>
+                </el-tooltip>
               </template>
             </el-table-column>
           </el-table>
@@ -272,7 +274,7 @@
               v-model:current-page="customerPagination.page"
               v-model:page-size="customerPagination.pageSize"
               :total="customerPagination.total"
-              :page-sizes="[10, 20, 50, 100]"
+              :page-sizes="[20, 50, 100, 200]"
               layout="sizes, prev, pager, next, jumper"
               @size-change="fetchCustomerData"
               @current-change="fetchCustomerData"
@@ -483,7 +485,7 @@ const customerTableData = ref([])
 const customerSearchKeyword = ref('')
 const customerPagination = reactive({
   page: 1,
-  pageSize: 10,
+  pageSize: 20,
   total: 0
 })
 
@@ -1298,5 +1300,12 @@ onMounted(() => {
 .col-setting-list .el-checkbox {
   margin-right: 0;
   height: 28px;
+}
+
+/* 表头文字不换行，排序图标与文字同行 */
+:deep(.lark-table .el-table__header th .cell) {
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
 }
 </style>

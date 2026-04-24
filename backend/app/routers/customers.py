@@ -117,7 +117,7 @@ async def api_sync_customers(
 @router.get("", summary="获取客户列表")
 async def get_customer_list(
     page: int = Query(1, ge=1),
-    pageSize: int = Query(10, ge=1, le=100),
+    pageSize: int = Query(20, ge=1, le=200),
     keyword: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -129,7 +129,7 @@ async def get_customer_list(
         where_sql += " AND (customer_name LIKE :keyword OR contact_person LIKE :keyword OR phone LIKE :keyword OR company_name LIKE :keyword OR erp_customer_id LIKE :keyword OR salesperson LIKE :keyword OR short_code LIKE :keyword OR address LIKE :keyword)"
         params["keyword"] = f"%{keyword}%"
 
-    list_sql = text(f"SELECT id, customer_name, contact_person, phone, telephone, email, company_name, address, remark, erp_customer_id, status, salesperson, customer_type, shipping_address, shipping_phone, short_code, nature, credit_limit, synced_at, created_at, updated_at FROM downstream_customers {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset")
+    list_sql = text(f"SELECT id, customer_name, contact_person, phone, telephone, email, company_name, address, remark, erp_customer_id, status, salesperson, customer_type, shipping_address, shipping_phone, short_code, nature, credit_limit, synced_at, created_at, updated_at FROM downstream_customers {where_sql} ORDER BY CAST(erp_customer_id AS UNSIGNED) ASC, id ASC LIMIT :limit OFFSET :offset")
     params.update({"limit": pageSize, "offset": (page - 1) * pageSize})
     rows = db.execute(list_sql, params).mappings().all()
 
@@ -207,6 +207,14 @@ async def update_customer(
     current_user: User = Depends(get_current_user)
 ):
     ensure_downstream_support_tables(db)
+    row = db.execute(
+        text("SELECT erp_customer_id FROM downstream_customers WHERE id = :cid AND deleted_at IS NULL"),
+        {"cid": customer_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    if row["erp_customer_id"]:
+        raise HTTPException(status_code=403, detail="ERP同步的客户数据不可修改")
     updates = []
     params = {"customer_id": customer_id}
     for key in ["customer_name", "contact_person", "phone", "email", "company_name", "address", "remark", "erp_customer_id", "status"]:
@@ -231,6 +239,12 @@ async def delete_customer(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    row = db.execute(
+        text("SELECT erp_customer_id FROM downstream_customers WHERE id = :cid AND deleted_at IS NULL"),
+        {"cid": customer_id},
+    ).mappings().first()
+    if row and row["erp_customer_id"]:
+        raise HTTPException(status_code=403, detail="ERP同步的客户数据不可删除")
     db.execute(text("UPDATE downstream_customers SET deleted_at = NOW() WHERE id = :customer_id"), {"customer_id": customer_id})
     db.execute(text("DELETE FROM downstream_customer_wechat_rooms WHERE customer_id = :customer_id"), {"customer_id": customer_id})
     db.commit()
