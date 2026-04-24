@@ -254,7 +254,7 @@
                 show-overflow-tooltip
               />
             </template>
-            <el-table-column label="操作" width="200" fixed="right">
+            <el-table-column label="操作" width="180" fixed="right">
               <template #default="{ row }">
                 <div class="action-cell compact">
                   <el-tooltip v-if="row.status !== 1" content="ERP未启用，不可绑定" placement="top">
@@ -410,7 +410,7 @@
       class="lark-dialog"
       :show-close="true"
     >
-      <el-descriptions :column="2" border size="default" class="customer-detail-desc">
+      <el-descriptions :column="2" border size="small" class="customer-detail-desc">
         <el-descriptions-item label="ERP编号">{{ detailData.erp_customer_id || '-' }}</el-descriptions-item>
         <el-descriptions-item label="客户名称">{{ detailData.customer_name || '-' }}</el-descriptions-item>
         <el-descriptions-item label="简码">{{ detailData.short_code || '-' }}</el-descriptions-item>
@@ -440,8 +440,8 @@
           <span v-else class="empty-text">-</span>
         </el-descriptions-item>
         <el-descriptions-item label="备注" :span="2">{{ detailData.remark || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="同步时间">{{ detailData.synced_at || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="创建时间">{{ detailData.created_at || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="同步时间">{{ formatDateTime(detailData.synced_at) }}</el-descriptions-item>
+        <el-descriptions-item label="创建时间">{{ formatDateTime(detailData.created_at) }}</el-descriptions-item>
       </el-descriptions>
       <template #footer>
         <div class="lark-dialog-footer">
@@ -584,6 +584,18 @@ const parseNature = (val) => {
   try {
     const arr = JSON.parse(val)
     return Array.isArray(arr) ? arr.join(', ') : val
+  } catch {
+    return val
+  }
+}
+
+const formatDateTime = (val) => {
+  if (!val) return '-'
+  try {
+    const d = new Date(val)
+    if (isNaN(d.getTime())) return val
+    const pad = (n) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   } catch {
     return val
   }
@@ -1077,8 +1089,10 @@ const resetCustomerForm = () => {
 const handleTabChange = (tab) => {
   if (tab === 'employees') {
     router.push('/users')
+    fetchData()
   } else {
     router.push('/customers')
+    fetchCustomerData()
   }
 }
 
@@ -1300,7 +1314,12 @@ onMounted(async () => {
 }
 
 .action-cell.compact {
-  gap: 4px;
+  gap: 0;
+}
+
+.action-cell.compact .lark-link {
+  padding: 4px 4px;
+  font-size: 13px;
 }
 
 .lark-link {
@@ -1422,8 +1441,13 @@ onMounted(async () => {
 
 /* 客户详情描述列表 */
 :deep(.customer-detail-desc .el-descriptions__label) {
-  width: 90px;
+  width: 80px;
   font-weight: 500;
+  padding: 8px 10px;
+}
+
+:deep(.customer-detail-desc .el-descriptions__content) {
+  padding: 8px 10px;
 }
 
 /* 表头文字不换行，排序图标与文字同行 */

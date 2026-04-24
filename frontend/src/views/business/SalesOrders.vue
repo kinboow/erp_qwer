@@ -53,50 +53,8 @@
         stripe
         class="lark-table"
         row-key="order_no"
-        @expand-change="handleExpand"
       >
-        <el-table-column type="expand">
-          <template #default="{ row }">
-            <div class="expand-detail" v-loading="row._loadingItems">
-              <el-table
-                v-if="row._items && row._items.length"
-                :data="row._items"
-                size="small"
-                class="detail-table"
-                :show-header="true"
-              >
-                <el-table-column label="#" prop="sort_index" width="50" align="center" />
-                <el-table-column label="货号" prop="product_no" width="120" />
-                <el-table-column label="颜色" prop="color" width="100" />
-                <el-table-column label="单位" prop="unit" width="60" align="center" />
-                <el-table-column label="单价" width="90" align="right">
-                  <template #default="{ row: item }">
-                    {{ item.price > 0 ? item.price.toFixed(2) : '-' }}
-                  </template>
-                </el-table-column>
-                <el-table-column label="尺码明细" min-width="260">
-                  <template #default="{ row: item }">
-                    <div class="size-tags">
-                      <el-tag
-                        v-for="s in item.sizes"
-                        :key="s.size"
-                        size="small"
-                        type="info"
-                        class="size-tag"
-                      >
-                        {{ s.size }}: {{ s.qty }}
-                      </el-tag>
-                    </div>
-                  </template>
-                </el-table-column>
-                <el-table-column label="小计" prop="total_qty" width="80" align="right" />
-                <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
-              </el-table>
-              <el-empty v-else-if="!row._loadingItems" description="无明细数据" :image-size="48" />
-            </div>
-          </template>
-        </el-table-column>
-
+        <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column label="状态" width="80" align="center">
           <template #default="{ row }">
             <el-tag :type="row.state === 1 ? 'success' : 'warning'" size="small">
@@ -116,11 +74,10 @@
         <el-table-column label="客户地址" prop="customer_addr" min-width="160" show-overflow-tooltip />
         <el-table-column label="货号" prop="product_no" width="130" show-overflow-tooltip />
         <el-table-column label="总数量" prop="total_qty" width="80" align="right" />
-        <el-table-column label="业务员" prop="salesperson" width="90" />
-        <el-table-column label="托运方式" prop="shipping_method" width="100" />
-        <el-table-column label="运费" width="90" align="right">
+        <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
+        <el-table-column label="操作" width="90" fixed="right" align="center">
           <template #default="{ row }">
-            {{ row.total_amount > 0 ? '-' : '-' }}
+            <el-button link type="primary" size="small" @click="viewDetail(row)">查看详情</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -143,11 +100,12 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Search, Refresh } from '@element-plus/icons-vue'
-import { getSalesOrders, getOrderItems } from '@/api/salesOrders'
+import { getSalesOrders } from '@/api/salesOrders'
 
 const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const orders = ref([])
 const total = ref(0)
@@ -188,7 +146,7 @@ async function fetchOrders() {
     }
     const res = await getSalesOrders(params)
     const d = res.data || {}
-    orders.value = (d.list || []).map(o => ({ ...o, _items: null, _loadingItems: false }))
+    orders.value = d.list || []
     total.value = d.total || 0
   } catch {
     orders.value = []
@@ -198,18 +156,8 @@ async function fetchOrders() {
   }
 }
 
-async function handleExpand(row, expandedRows) {
-  if (!expandedRows.includes(row)) return
-  if (row._items !== null) return
-  row._loadingItems = true
-  try {
-    const res = await getOrderItems(row.order_no)
-    row._items = res.data || []
-  } catch {
-    row._items = []
-  } finally {
-    row._loadingItems = false
-  }
+function viewDetail(row) {
+  router.push({ path: `/sales/${encodeURIComponent(row.order_no)}` })
 }
 
 onMounted(() => {
@@ -329,25 +277,6 @@ onMounted(() => {
   color: var(--lark-text-primary);
 }
 
-.expand-detail {
-  padding: 12px 16px 12px 48px;
-}
-
-.detail-table {
-  font-size: 12px;
-}
-
-.size-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.size-tag {
-  font-size: 11px;
-  border-radius: 4px;
-}
-
 .lark-pagination {
   display: flex;
   justify-content: flex-end;
@@ -360,13 +289,13 @@ onMounted(() => {
   font-size: 13px;
 }
 
+:deep(.el-table td.el-table__cell) {
+  padding: 4px 0;
+}
+
 :deep(.el-table th.el-table__cell) {
   font-weight: 600;
   color: var(--lark-text-primary);
 }
 
-:deep(.el-table__expanded-cell) {
-  padding: 0 !important;
-  background: var(--lark-bg-subtle, #fafbfc);
-}
 </style>

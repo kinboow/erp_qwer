@@ -401,6 +401,23 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
     order_no = main.order_no
     extra = list_extra or {}
 
+    # 客户名称兜底：ERP详情 → 列表API → 本地下游客户表
+    customer_id = main.customer_id or extra.get("customer_id", "")
+    customer_name = main.customer_name or extra.get("customer_name", "")
+    customer_tel = main.customer_tel or extra.get("customer_tel", "")
+    if not customer_name and customer_id:
+        try:
+            local = db.execute(
+                text("SELECT customer_name, phone FROM downstream_customers WHERE erp_customer_id = :cid LIMIT 1"),
+                {"cid": customer_id},
+            ).mappings().first()
+            if local:
+                customer_name = local["customer_name"] or ""
+                if not customer_tel:
+                    customer_tel = local["phone"] or ""
+        except Exception:
+            pass
+
     # upsert 主表
     existing = db.execute(
         text("SELECT id FROM erp_sales_orders WHERE order_no = :order_no"),
@@ -411,9 +428,9 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
         "order_no": order_no,
         "order_date": main.order_date or "",
         "state": main.state,
-        "customer_id": main.customer_id or extra.get("customer_id", ""),
-        "customer_name": main.customer_name or extra.get("customer_name", ""),
-        "customer_tel": main.customer_tel or extra.get("customer_tel", ""),
+        "customer_id": customer_id,
+        "customer_name": customer_name,
+        "customer_tel": customer_tel,
         "customer_addr": main.customer_addr or "",
         "salesperson": main.salesperson or extra.get("salesperson", ""),
         "creator": main.creator or extra.get("creator", ""),
@@ -579,6 +596,20 @@ def _upsert_shipment(db: Session, detail: Any, synced_at: str, list_extra: dict 
     order_no = main.order_no
     extra = list_extra or {}
 
+    # 客户名称兜底：ERP详情 → 列表API → 本地下游客户表
+    customer_id = main.customer_id or extra.get("customer_id", "")
+    customer_name = main.customer_name or extra.get("customer_name", "")
+    if not customer_name and customer_id:
+        try:
+            local = db.execute(
+                text("SELECT customer_name FROM downstream_customers WHERE erp_customer_id = :cid LIMIT 1"),
+                {"cid": customer_id},
+            ).mappings().first()
+            if local:
+                customer_name = local["customer_name"] or ""
+        except Exception:
+            pass
+
     existing = db.execute(
         text("SELECT id FROM erp_sales_shipments WHERE order_no = :order_no"),
         {"order_no": order_no},
@@ -588,8 +619,8 @@ def _upsert_shipment(db: Session, detail: Any, synced_at: str, list_extra: dict 
         "order_no": order_no,
         "order_date": main.order_date or "",
         "state": main.state,
-        "customer_id": main.customer_id or extra.get("customer_id", ""),
-        "customer_name": main.customer_name or extra.get("customer_name", ""),
+        "customer_id": customer_id,
+        "customer_name": customer_name,
         "customer_tel": main.customer_tel or "",
         "customer_addr": main.customer_addr or "",
         "salesperson": main.salesperson or extra.get("salesperson", ""),

@@ -63,6 +63,12 @@ const routes = [
         meta: { title: '销售订单' }
       },
       {
+        path: 'sales/:orderNo',
+        name: 'SalesOrderDetail',
+        component: () => import('@/views/business/SalesOrderDetail.vue'),
+        meta: { title: '订单详情' }
+      },
+      {
         path: 'shipments',
         name: 'SalesShipments',
         component: () => import('@/views/business/SalesShipments.vue'),
