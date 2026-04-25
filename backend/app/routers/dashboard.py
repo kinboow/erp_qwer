@@ -122,12 +122,9 @@ def dashboard_stats(
     # 服务状态
     wechat_online = False
     try:
-        from app.services.wechat_ws_service import wechat_ws_service
-        ws_status = wechat_ws_service.get_status()
-        wechat_online = ws_status.get("connected", False) if isinstance(ws_status, dict) else False
-        if not wechat_online and isinstance(ws_status, dict):
-            # 检查是否有任何活跃连接
-            wechat_online = len(ws_status.get("connections", {})) > 0
+        from app.services.wechat_health import get_wechat_health_status
+        wechat_status = get_wechat_health_status()
+        wechat_online = wechat_status.get("online", False)
     except Exception:
         pass
 

@@ -20,6 +20,7 @@ from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.services.base import list_products as erp_list_products
 from app.ncloud.services.sales_orders import get_order_detail, list_orders
 from app.ncloud.services.shipments import get_shipment_detail, list_shipments
+from app.services.message_logs import record_message_log_background
 
 logger = logging.getLogger(__name__)
 
@@ -822,6 +823,36 @@ def _upsert_product(db: Session, item: Any, synced_at: str) -> None:
 _sync_task: Optional[asyncio.Task] = None
 _last_sync_result: dict[str, Any] = {}
 _is_syncing: bool = False
+_FAILURE_MESSAGE_DEDUP_SECONDS = 600
+_last_failure_message_at: dict[str, datetime] = {}
+
+
+def _record_sync_failure_message(module_name: str, exc: Exception) -> None:
+    error_text = str(exc).strip() or repr(exc)
+    now = datetime.now()
+    dedup_key = f"{module_name}|{error_text}"
+    last_time = _last_failure_message_at.get(dedup_key)
+    if last_time and (now - last_time).total_seconds() < _FAILURE_MESSAGE_DEDUP_SECONDS:
+        return
+
+    _last_failure_message_at[dedup_key] = now
+
+    # 清理过期的去重键，避免长期运行时内存增长
+    for key, ts in list(_last_failure_message_at.items()):
+        if (now - ts).total_seconds() >= _FAILURE_MESSAGE_DEDUP_SECONDS:
+            _last_failure_message_at.pop(key, None)
+
+    payload = {
+        "type": "erp_sync_failure",
+        "module": module_name,
+        "content": f"{module_name}同步失败：{error_text}",
+        "error": error_text,
+        "occurred_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        record_message_log_background(payload, source="erp_sync")
+    except Exception:
+        logger.exception("[ERP Sync] 写入同步失败消息日志失败")
 
 
 async def _sync_loop(erp_client: ERPClient) -> None:
@@ -833,14 +864,35 @@ async def _sync_loop(erp_client: ERPClient) -> None:
 
     while True:
         cfg = _get_db_config()
+        cycle_result: dict[str, Any] = {}
         try:
             _is_syncing = True
-            orders_result = await sync_sales_orders(erp_client)
-            shipments_result = await sync_sales_shipments(erp_client)
-            products_result = await sync_products(erp_client)
-            _last_sync_result = {"orders": orders_result, "shipments": shipments_result, "products": products_result}
-        except Exception as exc:
-            _last_sync_result = {"error": str(exc), "synced_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+            try:
+                orders_result = await sync_sales_orders(erp_client)
+                cycle_result["orders"] = orders_result
+            except Exception as exc:
+                logger.exception("[ERP Sync] 销售订单同步异常")
+                cycle_result["orders"] = {"error": str(exc)}
+                _record_sync_failure_message("销售订单", exc)
+
+            try:
+                shipments_result = await sync_sales_shipments(erp_client)
+                cycle_result["shipments"] = shipments_result
+            except Exception as exc:
+                logger.exception("[ERP Sync] 发货单同步异常")
+                cycle_result["shipments"] = {"error": str(exc)}
+                _record_sync_failure_message("销售发货单", exc)
+
+            try:
+                products_result = await sync_products(erp_client)
+                cycle_result["products"] = products_result
+            except Exception as exc:
+                logger.exception("[ERP Sync] 产品同步异常")
+                cycle_result["products"] = {"error": str(exc)}
+                _record_sync_failure_message("产品", exc)
+
+            cycle_result["synced_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _last_sync_result = cycle_result
         finally:
             _is_syncing = False
 

@@ -41,8 +41,9 @@ request.interceptors.request.use(
 request.interceptors.response.use(
   response => {
     const res = response.data
+    const silentError = !!response.config?.silentError
     if (res.code && res.code !== 200) {
-      ElMessage.error(res.message || '请求失败')
+      if (!silentError) ElMessage.error(res.message || '请求失败')
       return Promise.reject(new Error(res.message || '请求失败'))
     }
     return res

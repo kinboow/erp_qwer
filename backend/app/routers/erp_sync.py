@@ -25,9 +25,11 @@ from app.services.erp_sync import (
 router = APIRouter(tags=["ERP-同步"])
 
 
-async def _refresh_erp_status_safely() -> None:
+def _refresh_erp_status_background() -> None:
+    """后台刷新 ERP 健康状态（不阻塞当前请求）"""
+    import asyncio
     try:
-        await refresh_erp_health_status()
+        asyncio.create_task(refresh_erp_health_status())
     except Exception:
         pass
 
@@ -127,8 +129,13 @@ async def api_test_connection(payload: ErpConnectionTestPayload) -> dict[str, An
 
             login_payload = login_resp.json()
             login_rs = str(login_payload.get("rs", ""))
+            _rs_errors = {
+                "4": "账号或密码错误",
+                "2": "账号已被锁定",
+            }
             if login_rs != "3":
-                return {"code": 502, "message": f"登录失败, rs={login_rs}"}
+                hint = _rs_errors.get(login_rs, f"未知错误 (rs={login_rs})")
+                return {"code": 502, "message": f"登录失败：{hint}"}
 
             return {
                 "code": 200,
@@ -160,7 +167,7 @@ async def api_save_config(
     from app.services.erp_sync import reload_erp_client, restart_sync_scheduler
     await reload_erp_client(request.app)
     restart_sync_scheduler(request.app)
-    await _refresh_erp_status_safely()
+    _refresh_erp_status_background()
     return {"code": 200, "message": "配置已保存", "data": cfg}
 
 
@@ -196,7 +203,7 @@ async def api_upload_qr(
     # 热更新 ncloud config
     from app.services.erp_sync import reload_erp_client
     await reload_erp_client(request.app)
-    await _refresh_erp_status_safely()
+    _refresh_erp_status_background()
     return {"code": 200, "message": "上传成功", "data": {"url": url}}
 
 
@@ -250,7 +257,7 @@ async def api_sync_trigger(request: Request, days_back: int = 90) -> dict[str, A
             "products": products_result,
         }}
     finally:
-        await _refresh_erp_status_safely()
+        _refresh_erp_status_background()
 
 
 @router.post("/trigger-orders", summary="手动触发销售订单同步")
@@ -260,7 +267,7 @@ async def api_sync_orders_trigger(request: Request, days_back: int = 90) -> dict
         result = await sync_sales_orders(erp_client, days_back=days_back)
         return {"code": 200, "message": "订单同步完成", "data": result}
     finally:
-        await _refresh_erp_status_safely()
+        _refresh_erp_status_background()
 
 
 @router.post("/trigger-shipments", summary="手动触发发货单同步")
@@ -270,7 +277,7 @@ async def api_sync_shipments_trigger(request: Request, days_back: int = 90) -> d
         result = await sync_sales_shipments(erp_client, days_back=days_back)
         return {"code": 200, "message": "发货单同步完成", "data": result}
     finally:
-        await _refresh_erp_status_safely()
+        _refresh_erp_status_background()
 
 
 @router.post("/trigger-products", summary="手动触发产品同步")
@@ -280,4 +287,4 @@ async def api_sync_products_trigger(request: Request) -> dict[str, Any]:
         result = await sync_products(erp_client)
         return {"code": 200, "message": "产品同步完成", "data": result}
     finally:
-        await _refresh_erp_status_safely()
+        _refresh_erp_status_background()

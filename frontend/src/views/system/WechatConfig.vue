@@ -187,7 +187,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Connection, Check, Refresh, Monitor, User, Select,
@@ -256,6 +256,17 @@ const hasApiConfig = computed(() => configLoaded.value && !!(configForm.host && 
 const runningInstances = computed(() => instances.value.filter(item => item.status))
 const loggedInCount = computed(() => instances.value.filter(item => item.login_status).length)
 const runningCount = computed(() => runningInstances.value.length)
+
+watch(
+  () => [configForm.host, configForm.port, configForm.apiKey],
+  (newVal, oldVal) => {
+    if (!configLoaded.value || !oldVal) return
+    if (newVal[0] !== oldVal[0] || newVal[1] !== oldVal[1] || newVal[2] !== oldVal[2]) {
+      connectionTested.value = false
+      testResult.value = null
+    }
+  }
+)
 
 const getInstanceStatusClass = (inst) => {
   if (inst.login_status) return 'online'
@@ -328,7 +339,8 @@ async function handleTestConnection() {
         data: { api_base_url: apiBaseUrl.value, api_key: configForm.apiKey || null }
       })
 
-      testResult.value = { success: true, message: `API 服务正常 (${apiBaseUrl.value})` }
+      testResult.value = null
+      ElMessage.success(`连接测试成功：API 服务正常 (${apiBaseUrl.value})`)
       connectionTested.value = true
     } catch (error) {
       testResult.value = { success: false, message: error?.response?.data?.message || error.message || '无法连接到服务器' }

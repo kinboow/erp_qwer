@@ -8,8 +8,8 @@ export const saveErpSyncConfig = (data) => {
   return request({ url: '/api/erp/sync/config', method: 'put', data })
 }
 
-export const testErpConnection = (data) => {
-  return request({ url: '/api/erp/sync/test-connection', method: 'post', data })
+export const testErpConnection = (data, options = {}) => {
+  return request({ url: '/api/erp/sync/test-connection', method: 'post', data, ...options })
 }
 
 export const getErpSyncStatus = () => {

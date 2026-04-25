@@ -100,4 +100,13 @@ async def save_wechat_config(
     })
     db.commit()
     await wechat_ws_service.auto_connect_from_saved_config()
+
+    # 后台刷新企微健康状态（不阻塞保存响应）
+    import asyncio
+    try:
+        from app.services.wechat_health import refresh_wechat_health_status
+        asyncio.create_task(refresh_wechat_health_status())
+    except Exception:
+        pass
+
     return json_response(message="配置已保存")

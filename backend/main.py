@@ -11,6 +11,7 @@ from app.routers import auth, users, wechat, roles, customers, logs, wechat_runt
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
+from app.services.wechat_health import start_wechat_health_checker, stop_wechat_health_checker
 
 # ncloud2 ERP API 子模块
 from app.ncloud.client.erp_client import ERPClient
@@ -105,14 +106,18 @@ async def startup_event():
     from app.services.erp_sync import start_sync_scheduler
     start_sync_scheduler(erp_client)
 
-    # 启动 ERP 健康检查轮询（每30秒）
-    start_erp_health_checker(interval_seconds=30)
+    # 启动 ERP 健康检查轮询（每5分钟）
+    start_erp_health_checker(interval_seconds=300)
+
+    # 启动企微健康检查轮询（每5分钟）
+    start_wechat_health_checker(interval_seconds=300)
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    # 停止 ERP 健康检查轮询
+    # 停止健康检查轮询
     stop_erp_health_checker()
+    stop_wechat_health_checker()
 
     # 关闭 ERP HTTP 客户端
     http_client = getattr(app.state, "http_client", None)

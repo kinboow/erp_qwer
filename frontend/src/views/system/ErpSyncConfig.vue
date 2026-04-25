@@ -46,11 +46,11 @@
       </div>
 
       <div class="form-actions">
-        <el-button @click="handleTestConnection" :loading="testing" :disabled="!form.erp_base_url">
+        <el-button type="primary" @click="handleTestConnection" :loading="testing" :disabled="!form.erp_base_url">
           <el-icon><Connection /></el-icon>
           测试连接
         </el-button>
-        <el-button type="primary" @click="handleSave" :loading="saving">
+        <el-button type="success" @click="handleSave" :loading="saving" :disabled="!connectionTested">
           <el-icon><Check /></el-icon>
           保存配置
         </el-button>
@@ -127,7 +127,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Connection, Check, Refresh, Timer, DataAnalysis, Upload, Plus, Loading, WarningFilled } from '@element-plus/icons-vue'
 import { getErpSyncConfig, saveErpSyncConfig, testErpConnection, getErpSyncStatus, uploadErpQr, fetchQrImageUrl } from '@/api/erpSync'
@@ -136,6 +136,7 @@ const formRef = ref(null)
 const saving = ref(false)
 const testing = ref(false)
 const uploading = ref(false)
+const connectionTested = ref(false)
 const qrPreviewUrl = ref('')
 
 const form = reactive({
@@ -199,6 +200,7 @@ async function handleUploadQr({ file }) {
     const url = res.data?.url
     if (url) {
       form.erp_qr_image_path = url
+      connectionTested.value = false
       await loadQrPreview()
       ElMessage.success('账套二维码上传成功')
     } else {
@@ -212,6 +214,10 @@ async function handleUploadQr({ file }) {
 }
 
 async function handleSave() {
+  if (!connectionTested.value) {
+    ElMessage.warning('请先测试连接成功后再保存配置')
+    return
+  }
   saving.value = true
   try {
     await saveErpSyncConfig({
@@ -253,12 +259,15 @@ async function handleTestConnection() {
       erp_username: form.erp_username,
       erp_password: form.erp_password,
       erp_qr_image_path: form.erp_qr_image_path,
-    })
+    }, { silentError: true })
     const data = res.data || {}
     const accountSetName = data.account_set_name || '未返回'
+    connectionTested.value = true
     ElMessage.success(`连接测试成功，账套：${accountSetName}`)
   } catch (e) {
-    ElMessage.error(e?.response?.data?.message || '连接测试失败')
+    connectionTested.value = false
+    const msg = e?.message || e?.response?.data?.message || e?.response?.data?.detail
+    ElMessage.error(msg || '连接测试失败')
   } finally {
     testing.value = false
   }
@@ -279,6 +288,13 @@ onMounted(async () => {
   await loadStatus()
   if (form.erp_qr_image_path) await loadQrPreview()
 })
+
+watch(
+  () => [form.erp_base_url, form.erp_username, form.erp_password, form.erp_qr_image_path],
+  () => {
+    connectionTested.value = false
+  }
+)
 </script>
 
 <style scoped>
