@@ -46,13 +46,13 @@
       </div>
 
       <div class="form-actions">
+        <el-button @click="handleTestConnection" :loading="testing" :disabled="!form.erp_base_url">
+          <el-icon><Connection /></el-icon>
+          测试连接
+        </el-button>
         <el-button type="primary" @click="handleSave" :loading="saving">
           <el-icon><Check /></el-icon>
           保存配置
-        </el-button>
-        <el-button @click="handleTriggerSync" :loading="syncing" :disabled="!form.erp_base_url">
-          <el-icon><Refresh /></el-icon>
-          立即同步
         </el-button>
       </div>
     </div>
@@ -130,11 +130,11 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Connection, Check, Refresh, Timer, DataAnalysis, Upload, Plus, Loading, WarningFilled } from '@element-plus/icons-vue'
-import { getErpSyncConfig, saveErpSyncConfig, getErpSyncStatus, triggerErpSync, uploadErpQr, fetchQrImageUrl } from '@/api/erpSync'
+import { getErpSyncConfig, saveErpSyncConfig, testErpConnection, getErpSyncStatus, uploadErpQr, fetchQrImageUrl } from '@/api/erpSync'
 
 const formRef = ref(null)
 const saving = ref(false)
-const syncing = ref(false)
+const testing = ref(false)
 const uploading = ref(false)
 const qrPreviewUrl = ref('')
 
@@ -232,17 +232,35 @@ async function handleSave() {
   }
 }
 
-async function handleTriggerSync() {
-  syncing.value = true
+async function handleTestConnection() {
+  if (!form.erp_base_url) {
+    ElMessage.warning('请先填写 ERP 服务地址')
+    return
+  }
+  if (!form.erp_username || !form.erp_password) {
+    ElMessage.warning('请先填写 ERP 登录账号和密码')
+    return
+  }
+  if (!form.erp_qr_image_path) {
+    ElMessage.warning('请先上传账套二维码')
+    return
+  }
+
+  testing.value = true
   try {
-    const res = await triggerErpSync(form.sync_days_back)
+    const res = await testErpConnection({
+      erp_base_url: form.erp_base_url,
+      erp_username: form.erp_username,
+      erp_password: form.erp_password,
+      erp_qr_image_path: form.erp_qr_image_path,
+    })
     const data = res.data || {}
-    ElMessage.success(`同步完成：${data.synced || 0} 成功，${data.failed || 0} 失败`)
-    await loadStatus()
+    const accountSetName = data.account_set_name || '未返回'
+    ElMessage.success(`连接测试成功，账套：${accountSetName}`)
   } catch (e) {
-    ElMessage.error(e?.response?.data?.message || '同步失败')
+    ElMessage.error(e?.response?.data?.message || '连接测试失败')
   } finally {
-    syncing.value = false
+    testing.value = false
   }
 }
 

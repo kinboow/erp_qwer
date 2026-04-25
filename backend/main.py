@@ -10,6 +10,7 @@ from app.database import SessionLocal
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
+from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
 
 # ncloud2 ERP API 子模块
 from app.ncloud.client.erp_client import ERPClient
@@ -103,6 +104,23 @@ async def startup_event():
     # 启动 ERP 销售订单定时同步
     from app.services.erp_sync import start_sync_scheduler
     start_sync_scheduler(erp_client)
+
+    # 启动 ERP 健康检查轮询（每30秒）
+    start_erp_health_checker(interval_seconds=30)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    # 停止 ERP 健康检查轮询
+    stop_erp_health_checker()
+
+    # 关闭 ERP HTTP 客户端
+    http_client = getattr(app.state, "http_client", None)
+    if http_client:
+        try:
+            await http_client.aclose()
+        except Exception:
+            pass
 
 
 @app.api_route("/qwmspush", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调", tags=["企业微信运行时"])

@@ -133,9 +133,9 @@ def dashboard_stats(
 
     erp_online = False
     try:
-        from app.services.erp_sync import get_sync_status
-        erp_status = get_sync_status()
-        erp_online = erp_status.get("scheduler_running", False)
+        from app.services.erp_health import get_erp_health_status
+        erp_status = get_erp_health_status()
+        erp_online = erp_status.get("online", False)
     except Exception:
         pass
 

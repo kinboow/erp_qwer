@@ -72,7 +72,8 @@ def get_user_permission_codes(db: Session, user_id: int) -> list[str]:
     role_rows = db.query(Role.code, Role.name).join(
         UserRole, Role.id == UserRole.role_id
     ).filter(
-        UserRole.user_id == user_id
+        UserRole.user_id == user_id,
+        Role.status == 1
     ).all()
     role_tokens = {
         str(token).strip().lower()
