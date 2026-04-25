@@ -328,9 +328,12 @@
             <el-col :span="24">
               <el-form-item label="所属角色" prop="role_ids">
                 <el-select v-model="formData.role_ids" multiple placeholder="请选择角色" style="width: 100%">
-                  <el-option label="系统超级管理员" :value="1" />
-                  <el-option label="业务管理员" :value="2" />
-                  <el-option label="普通员工" :value="3" />
+                  <el-option
+                    v-for="role in roleOptions"
+                    :key="role.id"
+                    :label="role.name"
+                    :value="role.id"
+                  />
                 </el-select>
               </el-form-item>
             </el-col>
@@ -451,12 +454,14 @@ import {
   Search, Plus, Delete, Key, CircleClose,
   Message, Phone, Download, ArrowDown, Switch, Refresh, Setting
 } from '@element-plus/icons-vue'
-import { getUserList, createUser, updateUser, deleteUser } from '@/api/user'
+import { useUserStore } from '@/stores/user'
+import { getUserList, createUser, updateUser, deleteUser, getUserRoleOptions } from '@/api/user'
 import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp, getPreference, savePreference } from '@/api/customer'
 import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig } from '@/api/wechat'
 
 const router = useRouter()
 const route = useRoute()
+const userStore = useUserStore()
 const activeTab = ref(route.meta.tab || 'employees')
 const loading = ref(false)
 const tableData = ref([])
@@ -482,6 +487,7 @@ const formData = reactive({
   status: 1,
   role_ids: []
 })
+const roleOptions = ref([])
 
 const customerLoading = ref(false)
 const customerSyncing = ref(false)
@@ -576,6 +582,34 @@ const parseNature = (val) => {
     return Array.isArray(arr) ? arr.join(', ') : val
   } catch {
     return val
+  }
+}
+
+const snapshotAuth = () => ({
+  roles: [...(userStore.roles || [])].sort().join(','),
+  permissions: [...(userStore.permissions || [])].sort().join(',')
+})
+
+const syncAuthAndPromptReload = async (reason) => {
+  const before = snapshotAuth()
+  await userStore.fetchUserInfo().catch(() => {})
+  const after = snapshotAuth()
+  if (before.roles === after.roles && before.permissions === after.permissions) return
+
+  try {
+    await ElMessageBox.confirm(
+      `你的账号权限已更新（${reason}），建议立即刷新页面以应用最新权限。`,
+      '权限已更新',
+      {
+        confirmButtonText: '立即刷新',
+        cancelButtonText: '稍后',
+        type: 'warning',
+        customClass: 'lark-confirm'
+      }
+    )
+    window.location.reload()
+  } catch {
+    ElMessage.warning('权限已更新，建议稍后手动刷新页面')
   }
 }
 
@@ -829,10 +863,18 @@ const handleEdit = (row) => {
   formData.email = row.email
   formData.phone = row.phone
   formData.status = row.status
-  if (row.roles.includes('super_admin')) formData.role_ids = [1]
-  else if (row.roles.includes('admin')) formData.role_ids = [2]
-  else formData.role_ids = [3]
+  formData.role_ids = Array.isArray(row.role_ids) ? [...row.role_ids] : []
   dialogVisible.value = true
+}
+
+const fetchRoleOptions = async () => {
+  try {
+    const res = await getUserRoleOptions()
+    roleOptions.value = Array.isArray(res.data) ? res.data : []
+  } catch (error) {
+    roleOptions.value = []
+    console.error('获取角色选项失败:', error)
+  }
 }
 
 const handleMoreCommand = (command, row) => {
@@ -857,6 +899,14 @@ const handleStatusToggle = async (row) => {
     try {
       await updateUser(row.id, { status: newStatus })
       ElMessage.success(`已${actionText}`)
+      if (Number(row.id) === Number(userStore.userInfo?.id)) {
+        if (newStatus === 0) {
+          ElMessage.warning('当前账号已被停用，将自动退出登录')
+          await userStore.logout()
+          return
+        }
+        await syncAuthAndPromptReload('账号状态变更')
+      }
       fetchData()
     } catch (error) {
       console.error(error)
@@ -978,6 +1028,7 @@ const handleSubmit = async () => {
       submitLoading.value = true
       try {
         if (isEdit.value) {
+          const isSelf = Number(formData.id) === Number(userStore.userInfo?.id)
           await updateUser(formData.id, {
             real_name: formData.real_name,
             email: formData.email,
@@ -985,6 +1036,9 @@ const handleSubmit = async () => {
             role_ids: formData.role_ids
           })
           ElMessage.success('保存成功')
+          if (isSelf) {
+            await syncAuthAndPromptReload('角色变更')
+          }
         } else {
           await createUser(formData)
           ElMessage.success('添加成功')
@@ -1095,8 +1149,13 @@ const formatDate = (dateStr) => {
 }
 
 onMounted(async () => {
+  await fetchRoleOptions()
   loadBoundWechatInstance()
   await loadVisibleCols()
+  if (route.query.keyword) {
+    searchKeyword.value = String(route.query.keyword)
+    activeTab.value = 'employees'
+  }
   if (activeTab.value === 'customers') {
     fetchCustomerData()
   } else {

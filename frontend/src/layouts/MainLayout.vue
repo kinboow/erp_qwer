@@ -97,10 +97,33 @@
         </div>
 
         <div class="lark-header-right">
-          <div class="lark-search-box">
+          <div class="lark-search-box" @keydown.enter.prevent="handleSearchEnter">
              <el-icon class="search-icon"><Search /></el-icon>
-             <input type="text" placeholder="搜索应用、功能或文档..." class="lark-search-input" />
-             <span class="search-shortcut">⌘K</span>
+             <input
+               ref="searchInputRef"
+               v-model.trim="searchKeyword"
+               type="text"
+               placeholder="搜索应用、功能或文档..."
+               class="lark-search-input"
+               @focus="searchFocused = true"
+               @blur="onSearchBlur"
+             />
+             <span class="search-shortcut">{{ isMac ? '⌘K' : 'Ctrl+K' }}</span>
+
+             <div v-if="showSearchPanel" class="search-result-panel">
+               <div v-if="searchLoading" class="search-empty">搜索中...</div>
+               <div v-else-if="filteredSearchItems.length === 0" class="search-empty">未找到匹配内容</div>
+               <button
+                 v-for="item in filteredSearchItems"
+                 :key="item.id"
+                 class="search-result-item"
+                 @mousedown.prevent
+                 @click="goToSearchItem(item)"
+               >
+                 <span class="result-title">{{ item.title }}</span>
+                 <span class="result-meta">{{ item.meta }}</span>
+               </button>
+             </div>
           </div>
 
           <div class="lark-actions">
@@ -122,7 +145,7 @@
               <div class="lark-dropdown-header">
                 <div class="user-info-detail">
                   <div class="user-name">{{ userStore.realName || userStore.username }}</div>
-                  <div class="user-role">{{ userStore.roles.includes('super_admin') ? '系统超级管理员' : '普通用户' }}</div>
+                  <div class="user-role">{{ isSuperAdmin ? '系统超级管理员' : '普通用户' }}</div>
                 </div>
               </div>
               <el-dropdown-menu class="lark-dropdown-menu">
@@ -156,7 +179,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -165,10 +188,212 @@ import {
   ChatDotRound, Monitor, Link, Document
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
+import { getProducts } from '@/api/products'
+import { getSalesOrders } from '@/api/salesOrders'
+import { getSalesShipments } from '@/api/salesShipments'
+import { getUserList } from '@/api/user'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const isMac = /Mac|iPhone|iPad|iPod/i.test(navigator.platform)
+const superAdminAliases = ['super_admin', 'superadmin', 'sys_admin', '系统超级管理员', '超级管理员']
+
+const searchInputRef = ref(null)
+const searchKeyword = ref('')
+const searchFocused = ref(false)
+const searchLoading = ref(false)
+const remoteSearchItems = ref([])
+let searchTimer = null
+let searchTaskId = 0
+
+const globalSearchItems = computed(() => {
+  const routeItems = router.getRoutes()
+    .filter((r) => {
+      if (!r.meta?.title) return false
+      if (!r.path || r.path === '/login') return false
+      if (r.path.includes('/:')) return false
+      return true
+    })
+    .map((r) => ({
+      id: `route:${r.path}`,
+      title: r.meta.title,
+      path: r.path,
+      meta: '页面',
+      keywords: `${r.name || ''} ${r.meta.title || ''} ${r.path}`,
+      itemType: 'route'
+    }))
+
+  return Array.from(new Map(routeItems.map((item) => [item.path, item])).values())
+})
+
+function normalizeText(text) {
+  return String(text || '').toLowerCase().trim()
+}
+
+const filteredSearchItems = computed(() => {
+  const q = normalizeText(searchKeyword.value)
+  const baseItems = [...globalSearchItems.value, ...remoteSearchItems.value]
+  if (!q) return baseItems.slice(0, 8)
+
+  const scored = baseItems.map((item) => {
+    const title = normalizeText(item.title)
+    const meta = normalizeText(item.meta)
+    const keywords = normalizeText(item.keywords)
+
+    let score = 0
+    if (title.startsWith(q)) score += 100
+    else if (title.includes(q)) score += 70
+    if (meta.includes(q)) score += 25
+    if (keywords.includes(q)) score += 20
+
+    return { item, score }
+  })
+
+  return scored
+    .filter((s) => s.score > 0)
+    .sort((a, b) => b.score - a.score || a.item.title.length - b.item.title.length)
+    .slice(0, 8)
+    .map((s) => s.item)
+})
+
+const showSearchPanel = computed(() => searchFocused.value)
+
+function onSearchBlur() {
+  setTimeout(() => {
+    searchFocused.value = false
+  }, 120)
+}
+
+function goToSearchItem(item) {
+  if (!item?.path) return
+  if (item.query) router.push({ path: item.path, query: item.query })
+  else if (route.path !== item.path) router.push(item.path)
+  searchKeyword.value = ''
+  searchFocused.value = false
+}
+
+function handleSearchEnter() {
+  if (!filteredSearchItems.value.length) {
+    ElMessage.warning('未找到匹配内容')
+    return
+  }
+  goToSearchItem(filteredSearchItems.value[0])
+}
+
+function handleGlobalShortcut(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault()
+    searchFocused.value = true
+    searchInputRef.value?.focus()
+    searchInputRef.value?.select()
+  }
+}
+
+const isSuperAdmin = computed(() => {
+  const roles = (userStore.roles || []).map((item) => String(item || '').trim().toLowerCase())
+  return userStore.permissions.includes('*') || roles.some((role) => superAdminAliases.includes(role))
+})
+
+function hasPermission(permissionCode) {
+  if (isSuperAdmin.value) return true
+  if (userStore.permissions.includes('*')) return true
+  return userStore.permissions.includes(permissionCode)
+}
+
+async function fetchRemoteSearchItems(keyword) {
+  const taskId = ++searchTaskId
+  const q = normalizeText(keyword)
+  if (!q) {
+    remoteSearchItems.value = []
+    return
+  }
+
+  searchLoading.value = true
+  try {
+    const userSearchTask = hasPermission('system:user:list')
+      ? getUserList({ page: 1, page_size: 5, keyword: q })
+      : Promise.resolve({ data: { list: [] } })
+
+    const [productRes, orderRes, shipmentRes, userRes] = await Promise.allSettled([
+      getProducts({ page: 1, page_size: 5, keyword: q }),
+      getSalesOrders({ page: 1, page_size: 5, keyword: q }),
+      getSalesShipments({ page: 1, page_size: 5, keyword: q }),
+      userSearchTask
+    ])
+
+    if (taskId !== searchTaskId) return
+
+    const products = productRes.status === 'fulfilled'
+      ? (productRes.value?.data?.list || []).map((p) => ({
+          id: `product:${p.id}`,
+          title: `${p.product_name || '未命名产品'}`,
+          meta: `产品 · ${p.product_no || '-'}${p.brand ? ` · ${p.brand}` : ''}`,
+          path: '/products',
+          query: { keyword: q },
+          keywords: `${p.product_name || ''} ${p.product_no || ''} ${p.brand || ''}`,
+          itemType: 'product'
+        }))
+      : []
+
+    const orders = orderRes.status === 'fulfilled'
+      ? (orderRes.value?.data?.list || []).map((o) => ({
+          id: `order:${o.id}`,
+          title: `${o.order_no || '订单'}`,
+          meta: `销售订单 · ${o.customer_name || '未知客户'}`,
+          path: o.order_no ? `/sales/${encodeURIComponent(o.order_no)}` : '/sales',
+          keywords: `${o.order_no || ''} ${o.customer_name || ''}`,
+          itemType: 'order'
+        }))
+      : []
+
+    const shipments = shipmentRes.status === 'fulfilled'
+      ? (shipmentRes.value?.data?.list || []).map((s) => ({
+          id: `shipment:${s.id}`,
+          title: `${s.order_no || '发货单'}`,
+          meta: `销售发货单 · ${s.customer_name || '未知客户'}`,
+          path: s.order_no ? `/shipments/${encodeURIComponent(s.order_no)}` : '/shipments',
+          keywords: `${s.order_no || ''} ${s.customer_name || ''}`,
+          itemType: 'shipment'
+        }))
+      : []
+
+    const users = userRes.status === 'fulfilled'
+      ? (userRes.value?.data?.list || []).map((u) => ({
+          id: `user:${u.id}`,
+          title: `${u.real_name || u.username || '用户'}`,
+          meta: `人员管理 · ${u.username || '-'}${u.email ? ` · ${u.email}` : ''}`,
+          path: '/users',
+          query: { keyword: q },
+          keywords: `${u.real_name || ''} ${u.username || ''} ${u.email || ''}`,
+          itemType: 'user'
+        }))
+      : []
+
+    remoteSearchItems.value = [...products, ...orders, ...shipments, ...users]
+  } catch {
+    if (taskId === searchTaskId) {
+      remoteSearchItems.value = []
+    }
+  } finally {
+    if (taskId === searchTaskId) {
+      searchLoading.value = false
+    }
+  }
+}
+
+watch(searchKeyword, (v) => {
+  clearTimeout(searchTimer)
+  const keyword = normalizeText(v)
+  if (!keyword) {
+    remoteSearchItems.value = []
+    searchLoading.value = false
+    return
+  }
+  searchTimer = setTimeout(() => {
+    fetchRemoteSearchItems(keyword)
+  }, 250)
+})
 
 const activeMenu = computed(() => {
   const p = route.path
@@ -197,6 +422,16 @@ const handleCommand = (command) => {
     }).catch(() => {})
   }
 }
+
+onMounted(() => {
+  userStore.fetchUserInfo().catch(() => {})
+  window.addEventListener('keydown', handleGlobalShortcut)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleGlobalShortcut)
+  clearTimeout(searchTimer)
+})
 </script>
 
 <style scoped>
@@ -333,6 +568,7 @@ const handleCommand = (command) => {
 .lark-search-box {
   display: flex;
   align-items: center;
+  position: relative;
   background-color: var(--lark-bg-hover);
   border-radius: 18px;
   padding: 0 12px;
@@ -374,6 +610,59 @@ const handleCommand = (command) => {
   padding: 2px 6px;
   border-radius: 4px;
   border: 1px solid var(--lark-border-light);
+}
+
+.search-result-panel {
+  position: absolute;
+  top: 42px;
+  left: 0;
+  right: 0;
+  background: #fff;
+  border: 1px solid var(--lark-border-light);
+  border-radius: 12px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+  padding: 6px;
+  z-index: 200;
+  max-height: 300px;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.search-result-panel::-webkit-scrollbar {
+  display: none;
+}
+
+.search-empty {
+  font-size: 13px;
+  color: var(--lark-text-secondary);
+  padding: 10px 12px;
+}
+
+.search-result-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+}
+
+.search-result-item:hover {
+  background-color: var(--lark-bg-hover);
+}
+
+.result-title {
+  font-size: 14px;
+  color: var(--lark-text-primary);
+}
+
+.result-meta {
+  font-size: 12px;
+  color: var(--lark-text-secondary);
 }
 
 /* 操作图标 */

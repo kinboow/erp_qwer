@@ -111,9 +111,12 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getProducts, syncProducts } from '@/api/products'
+
+const route = useRoute()
 
 const loading = ref(false)
 const syncing = ref(false)
@@ -211,7 +214,12 @@ function fallbackCopy(text) {
   document.body.removeChild(ta)
 }
 
-onMounted(fetchProducts)
+onMounted(() => {
+  if (route.query.keyword) {
+    filter.keyword = String(route.query.keyword)
+  }
+  fetchProducts()
+})
 </script>
 
 <style scoped>

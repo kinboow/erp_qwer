@@ -9,6 +9,14 @@ export const getUserList = (params) => {
   })
 }
 
+// 用户管理可分配角色选项
+export const getUserRoleOptions = () => {
+  return request({
+    url: '/api/users/roles/options',
+    method: 'get'
+  })
+}
+
 // 获取用户详情
 export const getUserById = (id) => {
   return request({

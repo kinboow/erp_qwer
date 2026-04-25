@@ -10,6 +10,14 @@ from app.utils.redis_client import redis_client
 
 security = HTTPBearer()
 
+SUPER_ADMIN_ROLE_ALIASES = {
+    "super_admin",
+    "superadmin",
+    "sys_admin",
+    "系统超级管理员",
+    "超级管理员",
+}
+
 
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
@@ -57,54 +65,67 @@ async def get_current_user(
     return user
 
 
+def get_user_permission_codes(db: Session, user_id: int) -> list[str]:
+    """获取用户权限编码（含缓存）"""
+    from app.models import Permission, RolePermission, UserRole, Role
+
+    role_rows = db.query(Role.code, Role.name).join(
+        UserRole, Role.id == UserRole.role_id
+    ).filter(
+        UserRole.user_id == user_id
+    ).all()
+    role_tokens = {
+        str(token).strip().lower()
+        for row in role_rows
+        for token in (row.code, row.name)
+        if token
+    }
+    super_admin_aliases = {item.lower() for item in SUPER_ADMIN_ROLE_ALIASES}
+
+    if role_tokens.intersection(super_admin_aliases):
+        return ["*"]
+
+    cache_key = f"user:permissions:{user_id}"
+    permissions_json = redis_client.get(cache_key)
+    if permissions_json:
+        try:
+            return json.loads(permissions_json)
+        except Exception:
+            redis_client.delete(cache_key)
+
+    permission_rows = db.query(Permission.code).join(
+        RolePermission, Permission.id == RolePermission.permission_id
+    ).join(
+        UserRole, RolePermission.role_id == UserRole.role_id
+    ).join(
+        Role, Role.id == UserRole.role_id
+    ).filter(
+        UserRole.user_id == user_id,
+        Permission.status == 1,
+        Role.status == 1
+    ).distinct().all()
+
+    permissions = [p.code for p in permission_rows]
+    redis_client.set(cache_key, json.dumps(permissions), ex=3600)
+    return permissions
+
+
 def check_permission(required_permission: str):
     """检查权限装饰器"""
     async def permission_checker(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
     ):
-        # 检查用户是否是超级管理员（通过角色）
-        from app.models import Role, UserRole
-        user_roles = db.query(Role.code).join(
-            UserRole, Role.id == UserRole.role_id
-        ).filter(
-            UserRole.user_id == current_user.id
-        ).all()
+        permissions = get_user_permission_codes(db=db, user_id=current_user.id)
 
-        role_codes = [r.code for r in user_roles]
-
-        # 超级管理员拥有所有权限
-        if "super_admin" in role_codes:
+        if "*" in permissions:
             return current_user
-
-        # 从缓存获取用户权限
-        cache_key = f"user:permissions:{current_user.id}"
-        permissions_json = redis_client.get(cache_key)
-
-        if permissions_json:
-            permissions = json.loads(permissions_json)
-        else:
-            # 从数据库查询权限
-            from app.models import Permission, RolePermission
-            permissions_query = db.query(Permission.code).join(
-                RolePermission, Permission.id == RolePermission.permission_id
-            ).join(
-                UserRole, RolePermission.role_id == UserRole.role_id
-            ).filter(
-                UserRole.user_id == current_user.id,
-                Permission.status == 1
-            ).distinct()
-
-            permissions = [p.code for p in permissions_query.all()]
-
-            # 缓存权限（1小时）
-            redis_client.set(cache_key, json.dumps(permissions), ex=3600)
 
         # 检查所需权限
         if required_permission not in permissions:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="权限不足"
+                detail=f"权限不足，缺少权限：{required_permission}"
             )
 
         return current_user

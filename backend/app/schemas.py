@@ -36,6 +36,7 @@ class UserResponse(UserBase):
     last_login_time: Optional[datetime] = None  # 最后登录时间
     created_at: datetime  # 创建时间
     roles: Optional[List[str]] = []  # 角色列表
+    permissions: Optional[List[str]] = []  # 权限编码列表
 
     class Config:
         from_attributes = True

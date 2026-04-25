@@ -5,7 +5,7 @@ from typing import Optional
 from app.database import get_db
 from app.models import User, UserRole, Role
 from app.schemas import UserCreate, UserUpdate, UserResponse, PageResponse
-from app.dependencies import get_current_user, check_permission
+from app.dependencies import get_current_user, check_permission, get_user_permission_codes
 from app.utils.security import get_password_hash
 from app.utils.redis_client import redis_client
 
@@ -45,11 +45,27 @@ async def get_user_list(
     # 分页查询
     users = query.order_by(User.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
+    user_ids = [u.id for u in users]
+    role_map: dict[int, dict[str, list]] = {}
+    if user_ids:
+        role_rows = db.query(
+            UserRole.user_id,
+            Role.id,
+            Role.code,
+            Role.name
+        ).join(Role, Role.id == UserRole.role_id).filter(UserRole.user_id.in_(user_ids)).all()
+
+        for user_id, role_id, role_code, role_name in role_rows:
+            if user_id not in role_map:
+                role_map[user_id] = {"ids": [], "codes": [], "names": []}
+            role_map[user_id]["ids"].append(role_id)
+            role_map[user_id]["codes"].append(role_code)
+            role_map[user_id]["names"].append(role_name)
+
     # 查询每个用户的角色
     user_list = []
     for user in users:
-        roles = db.query(Role.name).join(UserRole).filter(UserRole.user_id == user.id).all()
-        role_names = [role.name for role in roles]
+        role_info = role_map.get(user.id, {"ids": [], "codes": [], "names": []})
 
         user_list.append({
             "id": user.id,
@@ -61,7 +77,9 @@ async def get_user_list(
             "status": user.status,
             "last_login_time": user.last_login_time,
             "created_at": user.created_at,
-            "roles": role_names
+            "roles": role_info["codes"],
+            "role_ids": role_info["ids"],
+            "role_names": role_info["names"]
         })
 
     return PageResponse(
@@ -72,6 +90,26 @@ async def get_user_list(
             "page_size": page_size
         }
     )
+
+
+@router.get("/roles/options", response_model=dict, summary="用户管理角色选项")
+async def get_user_role_options(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_permission("system:user:edit"))
+):
+    roles = db.query(Role).filter(Role.status == 1).order_by(Role.sort.asc(), Role.created_at.asc()).all()
+    return {
+        "code": 200,
+        "message": "success",
+        "data": [
+            {
+                "id": role.id,
+                "name": role.name,
+                "code": role.code,
+            }
+            for role in roles
+        ]
+    }
 
 
 @router.get("/{user_id}", response_model=UserResponse, summary="获取用户详情")
@@ -91,6 +129,7 @@ async def get_user_by_id(
 
     roles = db.query(Role.code).join(UserRole).filter(UserRole.user_id == user.id).all()
     role_codes = [role.code for role in roles]
+    permission_codes = get_user_permission_codes(db=db, user_id=user.id)
 
     return UserResponse(
         id=user.id,
@@ -102,7 +141,8 @@ async def get_user_by_id(
         status=user.status,
         last_login_time=user.last_login_time,
         created_at=user.created_at,
-        roles=role_codes
+        roles=role_codes,
+        permissions=permission_codes
     )
 
 

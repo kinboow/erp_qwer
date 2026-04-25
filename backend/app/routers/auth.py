@@ -6,7 +6,7 @@ from app.models import User, UserRole, Role
 from app.schemas import LoginRequest, LoginResponse, UserResponse, TokenData
 from app.utils.security import verify_password, create_access_token
 from app.utils.redis_client import redis_client
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, get_user_permission_codes
 import json
 
 router = APIRouter(tags=["认证管理"])
@@ -61,6 +61,7 @@ async def login(request: Request, login_data: LoginRequest, db: Session = Depend
         UserRole.user_id == user.id
     ).all()
     role_codes = [role.code for role in roles]
+    permission_codes = get_user_permission_codes(db=db, user_id=user.id)
 
     # 缓存用户信息（2小时）
     user_info = {
@@ -87,7 +88,8 @@ async def login(request: Request, login_data: LoginRequest, db: Session = Depend
                 "status": user.status,
                 "last_login_time": str(user.last_login_time) if user.last_login_time else None,
                 "created_at": str(user.created_at) if user.created_at else None,
-                "roles": role_codes
+                "roles": role_codes,
+                "permissions": permission_codes
             }
         }
     }
@@ -119,6 +121,7 @@ async def get_user_info(current_user: User = Depends(get_current_user), db: Sess
         UserRole.user_id == current_user.id
     ).all()
     role_codes = [role.code for role in roles]
+    permission_codes = get_user_permission_codes(db=db, user_id=current_user.id)
 
     return UserResponse(
         id=current_user.id,
@@ -130,5 +133,6 @@ async def get_user_info(current_user: User = Depends(get_current_user), db: Sess
         status=current_user.status,
         last_login_time=current_user.last_login_time,
         created_at=current_user.created_at,
-        roles=role_codes
+        roles=role_codes,
+        permissions=permission_codes
     )

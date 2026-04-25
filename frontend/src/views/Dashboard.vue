@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="lark-dashboard">
     <!-- 顶部欢迎区域 -->
     <div class="lark-welcome-panel">
@@ -167,6 +167,10 @@
               </div>
             </div>
           </div>
+        </div>
+      </el-col>
+    </el-row>
+  </div>
 </template>
 
 <script setup>
@@ -207,47 +211,326 @@
     erp_online: false,
   })
 
-  // ...
+const activities = computed(() => stats.value.recent_activities || [])
 
-  .mini-status-dot.red {
-    background-color: #F54A45;
-    box-shadow: 0 0 0 3px rgba(245,74,69,0.15);
+function updateGreeting() {
+  const h = new Date().getHours()
+  if (h >= 5 && h < 9) { greeting.value = '早安'; greetingSuffix.value = '祝你度过充实的一天' }
+  else if (h >= 9 && h < 11) { greeting.value = '上午好'; greetingSuffix.value = '工作顺利' }
+  else if (h >= 11 && h < 13) { greeting.value = '中午好'; greetingSuffix.value = '记得午休哦' }
+  else if (h >= 13 && h < 18) { greeting.value = '下午好'; greetingSuffix.value = '继续加油' }
+  else if (h >= 18 && h < 22) { greeting.value = '晚上好'; greetingSuffix.value = '辛苦了今天' }
+  else { greeting.value = '夜深了'; greetingSuffix.value = '注意休息' }
+}
+
+const updateTime = () => {
+  const now = new Date()
+  currentTime.value = now.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })
+  currentDate.value = now.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' })
+  updateGreeting()
+}
+
+function calcTrend(today, yesterday) {
+  if (yesterday === 0 && today === 0) return 0
+  if (yesterday === 0) return 100
+  return ((today - yesterday) / yesterday) * 100
+}
+
+function formatRevenue(val) {
+  if (val >= 10000) return `¥${(val / 10000).toFixed(1)}万`
+  if (val >= 1000) return `¥${(val / 1000).toFixed(1)}k`
+  return `¥${val.toFixed(0)}`
+}
+
+const statCards = computed(() => {
+  const s = stats.value
+  return [
+    { title: '在线产品', value: s.product_count.toLocaleString(), trend: null, trendLabel: '', icon: iconProduct, color: '#00B365' },
+    { title: '今日订单', value: s.today_orders.toLocaleString(), trend: calcTrend(s.today_orders, s.yesterday_orders), trendLabel: '较昨日', icon: iconOrder, color: '#3370FF' },
+    { title: '发货订单', value: s.today_shipments.toLocaleString(), trend: calcTrend(s.today_shipments, s.yesterday_shipments), trendLabel: '较昨日', icon: iconShipment, color: '#FF8800' }
+  ]
+})
+
+// ---- 趋势图相关 ----
+const chartRange = ref('7d')
+const chartAnimKey = ref(0)
+
+function polylineLength(dots) {
+  let len = 0
+  for (let i = 1; i < dots.length; i++) {
+    const dx = dots[i].x - dots[i - 1].x
+    const dy = dots[i].y - dots[i - 1].y
+    len += Math.sqrt(dx * dx + dy * dy)
   }
+  return len
+}
 
-  .mini-status-info {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    flex: 1;
+const rangeOptions = [
+  { label: '近一日', value: '1d' },
+  { label: '近一周', value: '7d' },
+  { label: '近一月', value: '30d' }
+]
+
+function switchRange(v) {
+  chartRange.value = v
+  chartAnimKey.value++
+  fetchStats()
+}
+
+const chartData = computed(() => {
+  const orders = stats.value.daily_orders || []
+  const shipments = stats.value.daily_shipments || []
+  return orders.map((o, i) => ({
+    date: o.date,
+    orders: o.count,
+    shipments: shipments[i]?.count || 0
+  }))
+})
+
+const chartMax = computed(() => {
+  let m = 0
+  chartData.value.forEach(d => { m = Math.max(m, d.orders, d.shipments) })
+  return Math.max(m, 1)
+})
+
+const svgW = 800, svgH = 260, padL = 10, padR = 10, padT = 20, padB = 30
+const gridCount = 4
+const gridLines = computed(() => Array.from({ length: gridCount + 1 }, (_, i) => padT + (svgH - padT - padB) * (i / gridCount)))
+const gridLinePercents = computed(() => gridLines.value.map(y => `${(y / svgH) * 100}%`))
+const yAxisLabels = computed(() => {
+  const max = chartMax.value
+  return Array.from({ length: gridCount + 1 }, (_, i) => Math.round(max * (1 - i / gridCount)))
+})
+
+function toSvgPts(data, key) {
+  const len = data.length
+  if (!len) return []
+  const areaW = svgW - padL - padR
+  const areaH = svgH - padT - padB
+  return data.map((d, i) => {
+    const x = padL + (len === 1 ? areaW / 2 : (i / (len - 1)) * areaW)
+    const y = padT + areaH - (d[key] / chartMax.value) * areaH
+    return { x, y }
+  })
+}
+
+const orderDots = computed(() => toSvgPts(chartData.value, 'orders'))
+const shipmentDots = computed(() => toSvgPts(chartData.value, 'shipments'))
+const orderPoints = computed(() => orderDots.value.map(p => `${p.x},${p.y}`).join(' '))
+const shipmentPoints = computed(() => shipmentDots.value.map(p => `${p.x},${p.y}`).join(' '))
+
+const orderLineLen = computed(() => polylineLength(orderDots.value))
+const shipmentLineLen = computed(() => polylineLength(shipmentDots.value))
+
+// ---- Hover tooltip ----
+const chartWrapperRef = ref(null)
+const hoverIdx = ref(-1)
+
+const tooltipData = computed(() => {
+  const idx = hoverIdx.value
+  if (idx < 0 || idx >= chartData.value.length) return { date: '', orders: 0, shipments: 0 }
+  const d = chartData.value[idx]
+  const isHourly = chartRange.value === '1d'
+  const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+  let dateStr = d.date
+  if (!isHourly) {
+    const dt = new Date(d.date)
+    dateStr = `${d.date} ${weekdays[dt.getDay()]}`
   }
+  return { date: dateStr, orders: d.orders, shipments: d.shipments }
+})
 
-  .mini-status-label {
-    font-size: 12px;
-    color: var(--lark-text-secondary);
-    line-height: 1;
-  }
+const tooltipStyle = computed(() => {
+  const idx = hoverIdx.value
+  if (idx < 0 || !chartWrapperRef.value) return {}
+  const dots = orderDots.value
+  if (!dots[idx]) return {}
+  const rect = chartWrapperRef.value.getBoundingClientRect()
+  const xRatio = dots[idx].x / svgW
+  let left = xRatio * rect.width + 16
+  if (left + 160 > rect.width) left = xRatio * rect.width - 176
+  const yRatio = dots[idx].y / svgH
+  let top = yRatio * rect.height - 20
+  return { left: `${left}px`, top: `${top}px` }
+})
 
-  .mini-status-card.online .mini-status-text {
-    color: #00B365;
-  }
+function onChartMouseMove(e) {
+  const svg = e.currentTarget
+  const rect = svg.getBoundingClientRect()
+  const mouseX = ((e.clientX - rect.left) / rect.width) * svgW
+  const dots = orderDots.value
+  if (!dots.length) { hoverIdx.value = -1; return }
+  let closest = 0, minDist = Infinity
+  dots.forEach((p, i) => {
+    const dist = Math.abs(p.x - mouseX)
+    if (dist < minDist) { minDist = dist; closest = i }
+  })
+  hoverIdx.value = minDist < 30 ? closest : -1
+}
 
-  .mini-status-card.offline .mini-status-text {
-    color: var(--lark-text-secondary);
-  }
+function onChartMouseLeave() { hoverIdx.value = -1 }
 
-  .mini-status-icon {
-    width: 24px;
-    height: 24px;
-    flex-shrink: 0;
-    object-fit: contain;
-  }
+const xLabels = computed(() => {
+  const data = chartData.value
+  if (!data.length) return []
+  const isHourly = chartRange.value === '1d'
+  return data.map((d, i) => {
+    if (isHourly) {
+      if (i % 3 === 0) { const parts = d.date.split(' '); return parts[1] ? parts[1].slice(0, 5) : d.date }
+      return ''
+    }
+    if (chartRange.value === '30d') {
+      if (i % 5 === 0) return d.date.slice(5)
+      return ''
+    }
+    return d.date.slice(5)
+  })
+})
 
-  /* ... */
+const overviewItems = computed(() => {
+  const s = stats.value
+  return [
+    { label: '今日订单', value: s.today_orders },
+    { label: '今日发货', value: s.today_shipments },
+    { label: '待审核订单', value: s.pending_orders },
+    { label: '产品总数', value: s.product_count },
+    { label: '本月营收', value: formatRevenue(s.month_revenue) },
+  ]
+})
+
+async function fetchStats() {
+  try {
+    const res = await request.get('/api/dashboard/stats', { params: { range: chartRange.value } })
+    if (res.data) Object.assign(stats.value, res.data)
+  } catch (e) { console.error('fetchStats error', e) }
+}
+
+onMounted(() => {
+  updateTime()
+  timer = setInterval(updateTime, 1000)
+  fetchStats()
+})
+
+onUnmounted(() => { if (timer) clearInterval(timer) })
 </script>
 
 <style scoped>
-  /* ... */
-</style>
+/* 欢迎区域 */
+.lark-dashboard { padding: 0; }
+
+.lark-welcome-panel {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 24px 0 20px;
+}
+
+.welcome-title { font-size: 20px; font-weight: 600; color: var(--lark-text-primary); margin-bottom: 6px; }
+.welcome-desc { font-size: 14px; color: var(--lark-text-secondary); }
+.welcome-desc strong { color: var(--lark-primary); font-weight: 600; }
+.date-widget { text-align: right; }
+.date-time { font-size: 28px; font-weight: 700; color: var(--lark-text-primary); line-height: 1.2; }
+.date-day { font-size: 14px; color: var(--lark-text-secondary); }
+
+/* 核心指标卡片 */
+.stat-cards-wrapper { margin-bottom: 24px; }
+
+.lark-stat-card {
+  background: var(--lark-bg-base);
+  border-radius: var(--lark-radius-lg);
+  padding: 14px 24px 20px;
+  transition: transform 0.2s, box-shadow 0.2s;
+  cursor: pointer;
+  height: 100%;
+}
+
+.lark-stat-card:hover { transform: translateY(-2px); box-shadow: var(--lark-shadow-hover); }
+
+.stat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.stat-name { font-size: 16px; font-weight: 600; color: var(--lark-text-regular); }
+
+.stat-icon-wrap {
+  width: 48px;
+  height: 48px;
+  padding: 10px;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.stat-icon {
+  width: 28px;
+  height: 28px;
+  filter: brightness(0) invert(1);
+  display: block;
+  object-fit: contain;
+}
+
+.stat-body { margin-top: -6px; margin-bottom: 14px; }
+
+.stat-number {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--lark-text-primary);
+  line-height: 1.1;
+}
+
+.stat-footer { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.trend-label { color: var(--lark-text-secondary); }
+.trend-value { display: flex; align-items: center; gap: 2px; font-weight: 500; }
+.trend-value.is-up { color: #F54A45; }
+.trend-value.is-down { color: #00B365; }
+
+/* 服务状态卡片组 */
+.status-card-group {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+}
+
+.mini-status-card {
+  flex: 1;
+  background: var(--lark-bg-base);
+  border-radius: var(--lark-radius-lg);
+  padding: 16px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: transform 0.2s, box-shadow 0.2s;
+  cursor: default;
+}
+
+.mini-status-card:hover { transform: translateY(-1px); box-shadow: var(--lark-shadow-hover); }
+
+.mini-status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.mini-status-dot.green { background-color: #00B365; box-shadow: 0 0 0 3px rgba(0,179,101,0.15); }
+.mini-status-dot.red { background-color: #F54A45; box-shadow: 0 0 0 3px rgba(245,74,69,0.15); }
+
+.mini-status-info { display: flex; flex-direction: column; gap: 2px; flex: 1; }
+.mini-status-label { font-size: 12px; color: var(--lark-text-secondary); line-height: 1; }
+.mini-status-text { font-size: 16px; font-weight: 600; color: var(--lark-text-primary); line-height: 1.3; }
+.mini-status-card.online .mini-status-text { color: #00B365; }
+.mini-status-card.offline .mini-status-text { color: var(--lark-text-secondary); }
+.mini-status-icon { width: 24px; height: 24px; flex-shrink: 0; object-fit: contain; }
+
+.content-row { margin-bottom: 24px; }
+
+.lark-panel {
+  background: #fff;
+  border-radius: var(--lark-radius-lg, 12px);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .panel-header {

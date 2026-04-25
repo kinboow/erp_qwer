@@ -48,6 +48,7 @@ request.interceptors.response.use(
     return res
   },
   error => {
+    const silentError = !!error.config?.silentError
     if (error.response) {
       const { status, data } = error.response
       if (status === 401) {
@@ -56,19 +57,19 @@ request.interceptors.response.use(
         const isLogin = requestUrl.includes('/auth/login')
         const isLogout = error.config?.url?.includes('/auth/logout')
         if (isLogin) {
-          ElMessage.error(data.detail || data.message || '用户名或密码错误')
+          if (!silentError) ElMessage.error(data.detail || data.message || '用户名或密码错误')
         } else if (!isLogout && hasToken) {
           handleTokenExpired()
         } else {
-          ElMessage.error(data.detail || data.message || '未授权访问')
+          if (!silentError) ElMessage.error(data.detail || data.message || '未授权访问')
         }
       } else if (status === 403) {
-        ElMessage.error('权限不足')
+        if (!silentError) ElMessage.error(data.detail || data.message || '权限不足')
       } else {
-        ElMessage.error(data.detail || data.message || '请求失败')
+        if (!silentError) ElMessage.error(data.detail || data.message || '请求失败')
       }
     } else {
-      ElMessage.error('网络错误，请稍后重试')
+      if (!silentError) ElMessage.error('网络错误，请稍后重试')
     }
     return Promise.reject(error)
   }

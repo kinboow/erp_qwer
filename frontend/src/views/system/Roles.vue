@@ -193,8 +193,11 @@ import {
   Search, Plus, Delete, CircleClose, ArrowDown,
   Switch, Edit, InfoFilled
 } from '@element-plus/icons-vue'
+import { useUserStore } from '@/stores/user'
 import { getRoleList, createRole, updateRole, deleteRole, getRoleById, getPermissionTree } from '@/api/role'
 
+const userStore = useUserStore()
+const superAdminAliases = ['super_admin', 'superadmin', 'sys_admin', '系统超级管理员', '超级管理员']
 const loading = ref(false)
 const tableData = ref([])
 const searchKeyword = ref('')
@@ -220,6 +223,42 @@ const permissionTree = ref([])
 const permTreeRef = ref(null)
 const permSaveLoading = ref(false)
 const treeProps = { label: 'name', children: 'children' }
+
+const snapshotAuth = () => ({
+  roles: [...(userStore.roles || [])].sort().join(','),
+  permissions: [...(userStore.permissions || [])].sort().join(',')
+})
+
+const isSuperAdmin = () => {
+  const roles = (userStore.roles || []).map((item) => String(item || '').trim().toLowerCase())
+  return userStore.permissions.includes('*') || roles.some((role) => superAdminAliases.includes(role))
+}
+
+const maybePromptReloadForRoleChange = async (roleCode, reason) => {
+  if (!roleCode) return
+  if (!userStore.roles.includes(roleCode) && !isSuperAdmin()) return
+
+  const before = snapshotAuth()
+  await userStore.fetchUserInfo().catch(() => {})
+  const after = snapshotAuth()
+  if (before.roles === after.roles && before.permissions === after.permissions) return
+
+  try {
+    await ElMessageBox.confirm(
+      `你的账号权限已更新（${reason}），建议立即刷新页面以应用最新权限。`,
+      '权限已更新',
+      {
+        confirmButtonText: '立即刷新',
+        cancelButtonText: '稍后',
+        type: 'warning',
+        customClass: 'lark-confirm'
+      }
+    )
+    window.location.reload()
+  } catch {
+    ElMessage.warning('权限已更新，建议稍后手动刷新页面')
+  }
+}
 
 const fetchData = async () => {
   loading.value = true
@@ -291,9 +330,10 @@ const handleSavePermissions = async () => {
   try {
     const checkedIds = permTreeRef.value.getCheckedKeys()
     const halfCheckedIds = permTreeRef.value.getHalfCheckedKeys()
-    const permissionIds = [...checkedIds, ...halfCheckedIds]
-    await updateRole(currentRole.value.id, { permissionIds })
+    const permission_ids = [...checkedIds, ...halfCheckedIds]
+    await updateRole(currentRole.value.id, { permission_ids })
     ElMessage.success('权限配置已保存')
+    await maybePromptReloadForRoleChange(currentRole.value?.code, '角色权限变更')
     permDialogVisible.value = false
     fetchData()
   } catch (error) {
@@ -314,6 +354,7 @@ const handleStatusToggle = (row) => {
     try {
       await updateRole(row.id, { status: newStatus })
       ElMessage.success(`已${actionText}`)
+      await maybePromptReloadForRoleChange(row.code, '角色状态变更')
       fetchData()
     } catch (error) {
       console.error(error)
@@ -331,6 +372,7 @@ const handleDelete = (row) => {
     try {
       await deleteRole(row.id)
       ElMessage.success('已删除')
+      await maybePromptReloadForRoleChange(row.code, '角色删除')
       fetchData()
     } catch (error) {
       console.error('删除失败:', error)
