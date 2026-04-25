@@ -395,7 +395,7 @@ async function handleSave() {
     ElMessage.success('配置已保存，消息接收已自动开启')
     handleFetchInstances()
   } catch (error) {
-    ElMessage.error(error?.response?.data?.message || '保存失败')
+    ElMessage.error(error?.response?.data?.message || error?.message || '保存失败')
   } finally {
     saving.value = false
   }

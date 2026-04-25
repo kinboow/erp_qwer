@@ -73,6 +73,14 @@
               <el-icon><Document /></el-icon>
               <template #title>系统日志</template>
             </el-menu-item>
+            <el-menu-item index="/system-messages">
+              <el-icon><Bell /></el-icon>
+              <template #title>系统消息</template>
+            </el-menu-item>
+            <el-menu-item index="/system-activities">
+              <el-icon><Monitor /></el-icon>
+              <template #title>系统动态</template>
+            </el-menu-item>
           </el-sub-menu>
 
         </el-menu>
@@ -127,11 +135,58 @@
           </div>
 
           <div class="lark-actions">
-            <div class="lark-action-item">
-               <el-badge is-dot :hidden="false">
-                 <el-icon :size="20"><Bell /></el-icon>
-               </el-badge>
-            </div>
+            <el-popover
+              placement="bottom-end"
+              :width="380"
+              trigger="hover"
+              :show-after="150"
+              :hide-after="100"
+              @show="onMsgPopoverShow"
+            >
+              <template #reference>
+                <div class="lark-action-item" style="cursor:pointer;">
+                  <el-badge :value="msgUnreadCount" :hidden="msgUnreadCount === 0" :max="99">
+                    <el-icon :size="20"><Bell /></el-icon>
+                  </el-badge>
+                </div>
+              </template>
+              <div class="msg-popover">
+                <div class="msg-popover-tabs">
+                  <button
+                    :class="['msg-tab', msgPopoverTab === 'unread' && 'active']"
+                    @click="msgPopoverTab = 'unread'"
+                  >未读消息<span v-if="msgUnreadCount" class="msg-tab-badge">{{ msgUnreadCount }}</span></button>
+                  <button
+                    :class="['msg-tab', msgPopoverTab === 'all' && 'active']"
+                    @click="msgPopoverTab = 'all'"
+                  >全部消息</button>
+                  <span class="msg-tab-spacer" />
+                  <button v-if="msgUnreadCount > 0" class="msg-mark-all" @click="handlePopoverMarkAllRead">全部已读</button>
+                </div>
+                <div class="msg-popover-list" v-loading="msgPopoverLoading">
+                  <template v-if="msgPopoverList.length">
+                    <div
+                      v-for="msg in msgPopoverList"
+                      :key="msg.id"
+                      class="msg-popover-item"
+                      :class="{ unread: !msg.is_read }"
+                      @click="handlePopoverItemClick(msg)"
+                    >
+                      <div class="msg-item-header">
+                        <el-tag :type="popoverLevelType(msg.level)" size="small" effect="light" class="msg-level-tag">{{ popoverLevelLabel(msg.level) }}</el-tag>
+                        <span class="msg-item-time">{{ formatMsgTime(msg.created_at) }}</span>
+                      </div>
+                      <div class="msg-item-title">{{ msg.title }}</div>
+                      <div class="msg-item-content" v-if="msg.content">{{ msg.content }}</div>
+                    </div>
+                  </template>
+                  <div v-else class="msg-popover-empty">暂无消息</div>
+                </div>
+                <div class="msg-popover-footer">
+                  <el-button type="primary" link @click="router.push('/system-messages')">查看全部 →</el-button>
+                </div>
+              </div>
+            </el-popover>
             <div class="lark-action-item">
                <el-icon :size="20"><QuestionFilled /></el-icon>
             </div>
@@ -188,6 +243,7 @@ import {
   ChatDotRound, Monitor, Link, Document
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
+import request from '@/utils/request'
 import { getProducts } from '@/api/products'
 import { getSalesOrders } from '@/api/salesOrders'
 import { getSalesShipments } from '@/api/salesShipments'
@@ -395,6 +451,79 @@ watch(searchKeyword, (v) => {
   }, 250)
 })
 
+// ========== 系统消息悬浮窗 ==========
+const msgUnreadCount = ref(0)
+const msgPopoverTab = ref('unread')
+const msgPopoverLoading = ref(false)
+const msgPopoverUnread = ref([])
+const msgPopoverAll = ref([])
+let msgPollTimer = null
+
+const msgPopoverList = computed(() =>
+  msgPopoverTab.value === 'unread' ? msgPopoverUnread.value : msgPopoverAll.value
+)
+
+async function fetchMsgUnreadCount() {
+  try {
+    const res = await request({ url: '/api/system-messages/unread-count', method: 'get' })
+    msgUnreadCount.value = res.data?.count || 0
+  } catch { msgUnreadCount.value = 0 }
+}
+
+async function fetchMsgPopoverData() {
+  msgPopoverLoading.value = true
+  try {
+    const [unreadRes, allRes] = await Promise.all([
+      request({ url: '/api/system-messages', method: 'get', params: { is_read: 0, page: 1, page_size: 8 } }),
+      request({ url: '/api/system-messages', method: 'get', params: { page: 1, page_size: 8 } }),
+    ])
+    msgPopoverUnread.value = unreadRes.data?.items || []
+    msgPopoverAll.value = allRes.data?.items || []
+    msgUnreadCount.value = unreadRes.data?.total || 0
+  } catch { /* ignore */ } finally { msgPopoverLoading.value = false }
+}
+
+function onMsgPopoverShow() {
+  fetchMsgPopoverData()
+}
+
+async function handlePopoverMarkAllRead() {
+  try {
+    await request({ url: '/api/system-messages/read-all', method: 'put' })
+    msgPopoverUnread.value = []
+    msgPopoverAll.value.forEach(m => { m.is_read = 1 })
+    msgUnreadCount.value = 0
+  } catch { /* ignore */ }
+}
+
+async function handlePopoverItemClick(msg) {
+  if (!msg.is_read) {
+    try {
+      await request({ url: `/api/system-messages/${msg.id}/read`, method: 'put' })
+      msg.is_read = 1
+      msgUnreadCount.value = Math.max(0, msgUnreadCount.value - 1)
+      msgPopoverUnread.value = msgPopoverUnread.value.filter(m => !m.is_read)
+    } catch { /* ignore */ }
+  }
+}
+
+function popoverLevelType(level) {
+  return { error: 'danger', warning: 'warning', info: 'info' }[level] || ''
+}
+function popoverLevelLabel(level) {
+  return { error: '错误', warning: '警告', info: '信息' }[level] || level
+}
+function formatMsgTime(t) {
+  if (!t) return ''
+  const s = String(t)
+  return s.includes('T') ? s.replace('T', ' ').slice(0, 19) : s.slice(0, 19)
+}
+
+function startMsgPoll() {
+  fetchMsgUnreadCount()
+  msgPollTimer = setInterval(fetchMsgUnreadCount, 60000)
+}
+
 const activeMenu = computed(() => {
   const p = route.path
   if (p === '/customers') return '/users'
@@ -426,11 +555,13 @@ const handleCommand = (command) => {
 onMounted(() => {
   userStore.fetchUserInfo().catch(() => {})
   window.addEventListener('keydown', handleGlobalShortcut)
+  startMsgPoll()
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalShortcut)
   clearTimeout(searchTimer)
+  clearInterval(msgPollTimer)
 })
 </script>
 
@@ -782,5 +913,152 @@ onUnmounted(() => {
 .fade-page-leave-to {
   opacity: 0;
   transform: translateY(-10px);
+}
+
+/* ===== 系统消息悬浮窗 ===== */
+.msg-popover {
+  margin: -12px;
+}
+
+.msg-popover-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 12px 16px 0;
+  border-bottom: 1px solid var(--lark-border-light);
+}
+
+.msg-tab {
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lark-text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.msg-tab:hover {
+  color: var(--lark-text-primary);
+}
+
+.msg-tab.active {
+  color: var(--lark-primary);
+  border-bottom-color: var(--lark-primary);
+}
+
+.msg-tab-badge {
+  background: var(--el-color-danger);
+  color: #fff;
+  font-size: 11px;
+  min-width: 16px;
+  height: 16px;
+  line-height: 16px;
+  border-radius: 8px;
+  padding: 0 4px;
+  text-align: center;
+}
+
+.msg-tab-spacer {
+  flex: 1;
+}
+
+.msg-mark-all {
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--lark-primary);
+  cursor: pointer;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+}
+
+.msg-mark-all:hover {
+  opacity: 0.8;
+}
+
+.msg-popover-list {
+  max-height: 360px;
+  overflow-y: auto;
+  min-height: 80px;
+}
+
+.msg-popover-item {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--lark-border-light);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.msg-popover-item:last-child {
+  border-bottom: none;
+}
+
+.msg-popover-item:hover {
+  background: var(--lark-bg-hover);
+}
+
+.msg-popover-item.unread {
+  background: #f0f7ff;
+}
+
+.msg-popover-item.unread:hover {
+  background: #e4f0ff;
+}
+
+.msg-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.msg-level-tag {
+  transform: scale(0.85);
+  transform-origin: left center;
+}
+
+.msg-item-time {
+  font-size: 11px;
+  color: var(--lark-text-disabled);
+  flex-shrink: 0;
+}
+
+.msg-item-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--lark-text-primary);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-item-content {
+  font-size: 12px;
+  color: var(--lark-text-secondary);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msg-popover-empty {
+  text-align: center;
+  padding: 32px 0;
+  font-size: 13px;
+  color: var(--lark-text-disabled);
+}
+
+.msg-popover-footer {
+  text-align: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--lark-border-light);
 }
 </style>

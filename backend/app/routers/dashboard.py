@@ -168,6 +168,21 @@ def dashboard_stats(
             "type": "success" if r.get("state") == 1 else "warning",
         })
 
+    # 系统动态（同步失败等）
+    try:
+        from app.services.system_activities import get_recent_activities
+        sys_acts = get_recent_activities(db, limit=5)
+        for a in sys_acts:
+            created = a.get("created_at")
+            time_str = created.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created, "strftime") else str(created or "")
+            recent_activities.append({
+                "content": a.get("content") or a.get("title", ""),
+                "time": time_str,
+                "type": "danger" if a.get("type") == "error" else "warning" if a.get("type") == "warning" else "info",
+            })
+    except Exception:
+        pass
+
     # 按时间倒序排列，取最新10条
     recent_activities.sort(key=lambda x: x["time"], reverse=True)
     recent_activities = recent_activities[:10]

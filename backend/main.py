@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard
+from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard, system_messages, system_activities
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
@@ -55,6 +55,8 @@ app.include_router(sales_orders.router, prefix="/api/sales-orders", tags=["销�
 app.include_router(sales_shipments.router, prefix="/api/sales-shipments", tags=["销售发货单"])
 app.include_router(products.router, prefix="/api/products", tags=["产品列表"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["数据看板"])
+app.include_router(system_messages.router, prefix="/api/system-messages", tags=["系统消息"])
+app.include_router(system_activities.router, prefix="/api/system-activities", tags=["系统动态"])
 
 # ncloud2 ERP API 路由（弘兆云 ERP 操作）
 app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])
@@ -71,6 +73,11 @@ register_ncloud_exception_handlers(app)
 
 @app.on_event("startup")
 async def startup_event():
+    # 自动创建缺失的数据库表
+    from app.database import engine, Base
+    from app import models  # noqa: F401 – 确保所有 ORM 模型已导入
+    Base.metadata.create_all(bind=engine)
+
     # 从数据库加载 ERP 配置到 ncloud settings（这样无需每次手动点保存）
     try:
         from app.services.erp_sync import _get_db_config

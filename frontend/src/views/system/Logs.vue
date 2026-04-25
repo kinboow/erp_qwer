@@ -161,7 +161,6 @@
                 <el-option label="全部" value="" />
                 <el-option label="HTTP 回调" value="http_callback" />
                 <el-option label="WebSocket" value="websocket" />
-                <el-option label="ERP 同步" value="erp_sync" />
               </el-select>
               <el-select v-model="messageFilter.message_type" placeholder="消息类型" clearable style="width: 140px;" @change="fetchMessageLogs">
                 <el-option label="全部" value="" />
@@ -369,7 +368,7 @@ function moduleLabel(mod) {
 }
 
 function messageSourceLabel(source) {
-  const map = { http_callback: 'HTTP 回调', websocket: 'WebSocket', erp_sync: 'ERP 同步' }
+  const map = { http_callback: 'HTTP 回调', websocket: 'WebSocket' }
   return map[source] || source || '-'
 }
 

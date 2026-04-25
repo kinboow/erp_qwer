@@ -20,7 +20,8 @@ from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.services.base import list_products as erp_list_products
 from app.ncloud.services.sales_orders import get_order_detail, list_orders
 from app.ncloud.services.shipments import get_shipment_detail, list_shipments
-from app.services.message_logs import record_message_log_background
+from app.services.system_activities import create_activity_background
+from app.services.system_messages import create_system_message_background
 
 logger = logging.getLogger(__name__)
 
@@ -842,17 +843,23 @@ def _record_sync_failure_message(module_name: str, exc: Exception) -> None:
         if (now - ts).total_seconds() >= _FAILURE_MESSAGE_DEDUP_SECONDS:
             _last_failure_message_at.pop(key, None)
 
-    payload = {
-        "type": "erp_sync_failure",
-        "module": module_name,
-        "content": f"{module_name}同步失败：{error_text}",
-        "error": error_text,
-        "occurred_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-    }
     try:
-        record_message_log_background(payload, source="erp_sync")
+        # 系统动态：记录详细错误信息
+        create_activity_background(
+            title=f"{module_name}同步失败",
+            content=f"{module_name}同步失败：{error_text}",
+            type="error",
+            source="erp_sync",
+        )
+        # 系统消息：仅简要通知
+        create_system_message_background(
+            title=f"{module_name}同步失败",
+            content=f"{module_name}在 {now.strftime('%H:%M:%S')} 同步时发生错误",
+            level="error",
+            source="erp_sync",
+        )
     except Exception:
-        logger.exception("[ERP Sync] 写入同步失败消息日志失败")
+        logger.exception("[ERP Sync] 写入同步失败记录失败")
 
 
 async def _sync_loop(erp_client: ERPClient) -> None:

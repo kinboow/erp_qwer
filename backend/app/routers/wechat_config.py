@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -79,34 +81,40 @@ async def save_wechat_config(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    ensure_wechat_config_table(db)
-    db.execute(text(
-        "UPDATE wechat_config SET "
-        "host = :host, port = :port, api_key = :api_key, "
-        "selected_wxid = :selected_wxid, bound_instance_id = :bound_instance_id, "
-        "bound_instance_name = :bound_instance_name, "
-        "ws_path = :ws_path, http_path = :http_path, callback_timeout = :callback_timeout "
-        "WHERE id = 1"
-    ), {
-        "host": payload.host or "",
-        "port": payload.port or "",
-        "api_key": payload.api_key or "",
-        "selected_wxid": payload.selected_wxid or "",
-        "bound_instance_id": payload.bound_instance_id,
-        "bound_instance_name": payload.bound_instance_name or "",
-        "ws_path": payload.ws_path or "/ws/wechat/messages",
-        "http_path": payload.http_path or "/api/wechat/callback/http",
-        "callback_timeout": payload.callback_timeout or 5,
-    })
-    db.commit()
-    await wechat_ws_service.auto_connect_from_saved_config()
-
-    # 后台刷新企微健康状态（不阻塞保存响应）
-    import asyncio
     try:
-        from app.services.wechat_health import refresh_wechat_health_status
-        asyncio.create_task(refresh_wechat_health_status())
-    except Exception:
-        pass
+        ensure_wechat_config_table(db)
+        db.execute(text(
+            "UPDATE wechat_config SET "
+            "host = :host, port = :port, api_key = :api_key, "
+            "selected_wxid = :selected_wxid, bound_instance_id = :bound_instance_id, "
+            "bound_instance_name = :bound_instance_name, "
+            "ws_path = :ws_path, http_path = :http_path, callback_timeout = :callback_timeout "
+            "WHERE id = 1"
+        ), {
+            "host": payload.host or "",
+            "port": payload.port or "",
+            "api_key": payload.api_key or "",
+            "selected_wxid": payload.selected_wxid or "",
+            "bound_instance_id": payload.bound_instance_id,
+            "bound_instance_name": payload.bound_instance_name or "",
+            "ws_path": payload.ws_path or "/ws/wechat/messages",
+            "http_path": payload.http_path or "/api/wechat/callback/http",
+            "callback_timeout": payload.callback_timeout or 5,
+        })
+        db.commit()
 
-    return json_response(message="配置已保存")
+        # 后台恢复 WebSocket 与刷新企微健康状态（不阻塞保存响应）
+        try:
+            from app.services.wechat_health import refresh_wechat_health_status
+            asyncio.create_task(wechat_ws_service.auto_connect_from_saved_config())
+            asyncio.create_task(refresh_wechat_health_status())
+        except Exception:
+            pass
+
+        return json_response(message="配置已保存")
+    except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return json_response(code=500, message=f"保存配置失败: {exc}")

@@ -45,6 +45,18 @@ const routes = [
         meta: { title: '系统日志' }
       },
       {
+        path: 'system-messages',
+        name: 'SystemMessages',
+        component: () => import('@/views/system/SystemMessages.vue'),
+        meta: { title: '系统消息' }
+      },
+      {
+        path: 'system-activities',
+        name: 'SystemActivities',
+        component: () => import('@/views/system/SystemActivities.vue'),
+        meta: { title: '系统动态' }
+      },
+      {
         path: 'external-config',
         name: 'ExternalConfig',
         component: () => import('@/views/system/ExternalConfig.vue'),
