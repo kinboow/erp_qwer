@@ -79,18 +79,24 @@
             <div class="toolbar-left">
               <el-select v-model="opFilter.module" placeholder="功能模块" clearable style="width: 140px;" @change="fetchOpLogs">
                 <el-option label="全部" value="" />
+                <el-option label="登录认证" value="auth" />
                 <el-option label="用户管理" value="user" />
                 <el-option label="角色管理" value="role" />
+                <el-option label="客户管理" value="customer" />
                 <el-option label="企微配置" value="wechat" />
-                <el-option label="登录认证" value="auth" />
+                <el-option label="ERP同步" value="erp_sync" />
+                <el-option label="AI配置" value="ai" />
+                <el-option label="订单审核" value="order_review" />
               </el-select>
               <el-select v-model="opFilter.action" placeholder="操作类型" clearable style="width: 120px;" @change="fetchOpLogs">
                 <el-option label="全部" value="" />
                 <el-option label="新增" value="create" />
                 <el-option label="修改" value="update" />
                 <el-option label="删除" value="delete" />
+                <el-option label="同步" value="sync" />
                 <el-option label="登录" value="login" />
                 <el-option label="登出" value="logout" />
+                <el-option label="查看" value="view" />
               </el-select>
               <el-date-picker
                 v-model="opFilter.dateRange"
@@ -138,6 +144,19 @@
               </template>
             </el-table-column>
             <el-table-column label="描述" prop="description" min-width="280" show-overflow-tooltip />
+            <el-table-column label="状态" prop="status" width="80" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.status === 1 ? 'success' : 'danger'" size="small" effect="plain">
+                  {{ row.status === 1 ? '成功' : '失败' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="耗时" prop="duration" width="90" align="right">
+              <template #default="{ row }">
+                <span v-if="row.duration != null" class="log-time">{{ row.duration }}ms</span>
+                <span v-else>-</span>
+              </template>
+            </el-table-column>
             <el-table-column label="IP 地址" prop="ip" width="140" />
           </el-table>
 
@@ -184,7 +203,7 @@
                 <input
                   v-model="messageFilter.keyword"
                   class="lark-input"
-                  placeholder="搜索群名、发送人、消息内容"
+                  placeholder="搜索发送人、消息内容"
                   @keyup.enter="fetchMessageLogs"
                 />
               </div>
@@ -349,17 +368,17 @@ function levelTagType(level) {
 }
 
 function actionTagType(action) {
-  const map = { create: 'success', update: 'warning', delete: 'danger', login: 'info', logout: '' }
+  const map = { create: 'success', update: 'warning', delete: 'danger', login: 'info', logout: '', sync: 'primary', view: '' }
   return map[action] || ''
 }
 
 function actionLabel(action) {
-  const map = { create: '新增', update: '修改', delete: '删除', login: '登录', logout: '登出' }
+  const map = { create: '新增', update: '修改', delete: '删除', login: '登录', logout: '登出', sync: '同步', view: '查看' }
   return map[action] || action
 }
 
 function moduleLabel(mod) {
-  const map = { user: '用户管理', role: '角色管理', wechat: '企微配置', auth: '登录认证' }
+  const map = { user: '用户管理', role: '角色管理', wechat: '企微配置', auth: '登录认证', customer: '客户管理', erp_sync: 'ERP同步', ai: 'AI配置', order_review: '订单审核' }
   return map[mod] || mod
 }
 

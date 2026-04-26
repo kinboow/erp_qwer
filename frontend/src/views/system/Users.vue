@@ -1,8 +1,8 @@
 <template>
   <div class="lark-users">
     <div class="lark-page-header">
-      <div class="header-title">人员管理</div>
-      <div class="header-desc">管理企业内部员工与下游客户资料</div>
+      <div class="header-title">组织架构</div>
+      <div class="header-desc">管理企业内部员工、下游客户与企微群聊</div>
     </div>
 
     <div class="lark-table-panel">
@@ -281,6 +281,12 @@
             />
           </div>
         </el-tab-pane>
+
+        <el-tab-pane label="企微群聊" name="wechat-rooms">
+          <div style="padding: 8px 0;">
+            <MonitoredRooms />
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </div>
 
@@ -460,6 +466,7 @@ import { useUserStore } from '@/stores/user'
 import { getUserList, createUser, updateUser, deleteUser, getUserRoleOptions } from '@/api/user'
 import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp, getPreference, savePreference } from '@/api/customer'
 import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig } from '@/api/wechat'
+import MonitoredRooms from './MonitoredRooms.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -1125,9 +1132,11 @@ const handleTabChange = (tab) => {
   if (tab === 'employees') {
     router.push('/users')
     fetchData()
-  } else {
+  } else if (tab === 'customers') {
     router.push('/customers')
     fetchCustomerData()
+  } else if (tab === 'wechat-rooms') {
+    router.push('/wechat-rooms')
   }
 }
 

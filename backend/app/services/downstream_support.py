@@ -95,6 +95,19 @@ def ensure_downstream_support_tables(db: Session):
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     ))
     db.execute(text(
+        "CREATE TABLE IF NOT EXISTS internal_wechat_rooms ("
+        "id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
+        "room_id VARCHAR(100) NOT NULL, "
+        "room_name VARCHAR(200) DEFAULT '', "
+        "room_type VARCHAR(50) NOT NULL DEFAULT 'shipping', "
+        "remark VARCHAR(500) DEFAULT '', "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+        "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+        "UNIQUE KEY uk_room_id (room_id), "
+        "INDEX idx_room_type (room_type)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ))
+    db.execute(text(
         "CREATE TABLE IF NOT EXISTS user_preferences ("
         "id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
         "user_id INT UNSIGNED NOT NULL, "

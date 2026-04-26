@@ -59,7 +59,7 @@
             </template>
             <el-menu-item index="/users">
               <el-icon><UserFilled /></el-icon>
-              <template #title>人员管理</template>
+              <template #title>组织架构</template>
             </el-menu-item>
             <el-menu-item index="/roles">
               <el-icon><Stamp /></el-icon>

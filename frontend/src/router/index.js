@@ -24,13 +24,19 @@ const routes = [
         path: 'users',
         name: 'Users',
         component: () => import('@/views/system/Users.vue'),
-        meta: { title: '员工管理', tab: 'employees' }
+        meta: { title: '组织架构', tab: 'employees' }
       },
       {
         path: 'customers',
         name: 'Customers',
         component: () => import('@/views/system/Users.vue'),
         meta: { title: '下游客户', tab: 'customers' }
+      },
+      {
+        path: 'wechat-rooms',
+        name: 'WechatRooms',
+        component: () => import('@/views/system/Users.vue'),
+        meta: { title: '企微群聊', tab: 'wechat-rooms' }
       },
       {
         path: 'roles',

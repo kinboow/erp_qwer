@@ -19,6 +19,12 @@
           </template>
           <ErpSyncConfig />
         </el-tab-pane>
+        <el-tab-pane name="ai">
+          <template #label>
+            <span class="tab-label"><el-icon><Cpu /></el-icon>AI 模型配置</span>
+          </template>
+          <AiModelConfig />
+        </el-tab-pane>
       </el-tabs>
     </div>
   </div>
@@ -26,9 +32,10 @@
 
 <script setup>
 import { ref } from 'vue'
-import { ChatDotRound, DataLine } from '@element-plus/icons-vue'
+import { ChatDotRound, DataLine, Cpu } from '@element-plus/icons-vue'
 import WechatConfig from './WechatConfig.vue'
 import ErpSyncConfig from './ErpSyncConfig.vue'
+import AiModelConfig from './AiModelConfig.vue'
 
 const activeTab = ref('wechat')
 </script>

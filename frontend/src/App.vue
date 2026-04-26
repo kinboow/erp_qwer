@@ -101,4 +101,12 @@ html, body, #app {
   --el-dialog-border-radius: var(--lark-radius-lg);
   box-shadow: var(--lark-shadow-hover);
 }
+
+/* 表格溢出提示框：限制宽度，自动换行 */
+.el-popper.is-dark {
+  max-width: 360px !important;
+  white-space: normal !important;
+  word-break: break-word !important;
+  line-height: 1.6 !important;
+}
 </style>

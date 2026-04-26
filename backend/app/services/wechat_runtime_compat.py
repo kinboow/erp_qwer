@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any, Optional
@@ -5,8 +6,9 @@ from typing import Any, Optional
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.services.downstream_orders import create_review_from_callback
+from app.services.downstream_orders import create_review_from_callback, resolve_customer_by_room
 from app.services.message_logs import record_message_log
+from app.services.at_order_handler import extract_trigger_info, handle_at_order, is_at_bot
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +112,36 @@ async def ingest_runtime_message(
         except Exception:
             pass
 
+    # @机器人 自动接单检测
+    at_order_triggered = False
+    try:
+        bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
+        if bot_wxid and is_at_bot(normalized_payload, bot_wxid):
+            trigger_info = extract_trigger_info(normalized_payload, resolved_instance_id)
+            trigger_room_id = trigger_info.get("room_id") or ""
+            trigger_sender_id = trigger_info.get("sender_id") or ""
+            if trigger_room_id and trigger_sender_id:
+                customer = resolve_customer_by_room(db, trigger_room_id, resolved_instance_id)
+                if customer:
+                    trigger_msg_id = (log_result or {}).get("id") or 0
+                    asyncio.create_task(handle_at_order(
+                        room_id=trigger_room_id,
+                        sender_id=trigger_sender_id,
+                        customer=dict(customer),
+                        trigger_msg_id=trigger_msg_id,
+                        instance_id=trigger_info.get("instance_id") or "",
+                    ))
+                    at_order_triggered = True
+                    logger.info("@接单: 已触发 room=%s sender=%s customer=%s",
+                                trigger_room_id, trigger_sender_id, customer.get("customer_name"))
+    except Exception as exc:
+        logger.warning("@接单检测异常: %s", exc)
+
     return {
         "instanceId": resolved_instance_id,
         "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
         "received": True,
         "log": log_result,
         "review": review_result,
+        "at_order_triggered": at_order_triggered,
     }

@@ -1,10 +1,14 @@
 import base64
 import json
-from typing import Any
+import logging
+from typing import Any, Optional
 
 import httpx
+from sqlalchemy.orm import Session
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class AIOrderParserError(Exception):
@@ -45,24 +49,54 @@ ORDER_PARSE_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客�
 
 class AIOrderParser:
     def __init__(self) -> None:
-        self.base_url = settings.OPENAI_BASE_URL.rstrip("/")
+        # .env 回退默认值
+        self._fallback_base_url = settings.OPENAI_BASE_URL.rstrip("/")
+        self._fallback_api_key = settings.OPENAI_API_KEY
+        self._fallback_model = settings.OPENAI_MODEL
+        self._fallback_vision_model = settings.OPENAI_VISION_MODEL
 
-    def _ensure_enabled(self):
-        if not settings.OPENAI_API_KEY:
-            raise AIOrderParserError("未配置 OPENAI_API_KEY，无法进行 AI 解析")
+    # ------------------------------------------------------------------
+    # 配置加载（DB 优先，.env 回退）
+    # ------------------------------------------------------------------
+    def _load_config(self, db: Optional[Session] = None) -> dict[str, Any]:
+        if db is not None:
+            try:
+                from app.services.ai_config import get_ai_config_for_parser
+                return get_ai_config_for_parser(db)
+            except Exception as exc:
+                logger.warning("从数据库加载 AI 配置失败，回退到 .env: %s", exc)
+        return {
+            "base_url": self._fallback_base_url,
+            "api_key": self._fallback_api_key,
+            "model": self._fallback_model,
+            "vision_model": self._fallback_vision_model,
+            "temperature": 0.1,
+            "enabled": True,
+        }
 
-    async def _chat(self, model: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        self._ensure_enabled()
+    def _ensure_enabled(self, cfg: dict[str, Any]):
+        if not cfg.get("enabled", True):
+            raise AIOrderParserError("AI 解析已在后台配置中关闭")
+        if not cfg.get("api_key"):
+            raise AIOrderParserError("未配置 AI API Key，无法进行 AI 解析")
+
+    async def _chat(self, model: str, messages: list[dict[str, Any]], db: Optional[Session] = None) -> dict[str, Any]:
+        cfg = self._load_config(db)
+        self._ensure_enabled(cfg)
+        base_url = cfg["base_url"].rstrip("/")
+        api_key = cfg["api_key"]
+        temperature = cfg.get("temperature", 0.1)
+
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
-                f"{self.base_url}/chat/completions",
+                f"{base_url}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json={
                     "model": model,
-                    "temperature": 0.1,
+                    "temperature": temperature,
                     "response_format": {"type": "json_object"},
                     "messages": messages,
                 },
@@ -75,9 +109,10 @@ class AIOrderParser:
         except Exception as exc:
             raise AIOrderParserError(f"AI 返回内容不是有效 JSON: {content[:200]}") from exc
 
-    async def parse_text(self, text: str, customer_hint: str = "") -> dict[str, Any]:
+    async def parse_text(self, text: str, customer_hint: str = "", db: Optional[Session] = None) -> dict[str, Any]:
+        cfg = self._load_config(db)
         return await self._chat(
-            settings.OPENAI_MODEL,
+            cfg["model"],
             [
                 {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
                 {
@@ -85,11 +120,13 @@ class AIOrderParser:
                     "content": f"客户提示: {customer_hint or '无'}\n原始文本:\n{text}",
                 },
             ],
+            db=db,
         )
 
-    async def parse_image_base64(self, image_base64: str, mime_type: str = "image/png", extra_text: str = "") -> dict[str, Any]:
+    async def parse_image_base64(self, image_base64: str, mime_type: str = "image/png", extra_text: str = "", db: Optional[Session] = None) -> dict[str, Any]:
+        cfg = self._load_config(db)
         return await self._chat(
-            settings.OPENAI_VISION_MODEL,
+            cfg["vision_model"],
             [
                 {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
                 {
@@ -100,11 +137,13 @@ class AIOrderParser:
                     ],
                 },
             ],
+            db=db,
         )
 
-    async def parse_excel_summary(self, file_name: str, text_summary: str, customer_hint: str = "") -> dict[str, Any]:
+    async def parse_excel_summary(self, file_name: str, text_summary: str, customer_hint: str = "", db: Optional[Session] = None) -> dict[str, Any]:
+        cfg = self._load_config(db)
         return await self._chat(
-            settings.OPENAI_MODEL,
+            cfg["model"],
             [
                 {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
                 {
@@ -112,6 +151,55 @@ class AIOrderParser:
                     "content": f"文件名: {file_name}\n客户提示: {customer_hint or '无'}\n表格摘要:\n{text_summary}",
                 },
             ],
+            db=db,
+        )
+
+    async def parse_batch(
+        self,
+        context_messages: list[dict[str, Any]],
+        customer_hint: str = "",
+        db: Optional[Session] = None,
+    ) -> dict[str, Any]:
+        """批量解析多条上下文消息（文字+图片混合），用于 @机器人 场景。
+
+        context_messages 每项结构:
+        {
+            "type": "text" | "image" | "file",
+            "content": "文字内容",               # type=text 时
+            "base64": "...",                     # type=image 时
+            "mime": "image/png",                  # type=image 时
+            "file_name": "订单.xlsx",             # type=file 时
+            "excel_summary": "表格摘要文本",       # type=file 时（已预处理）
+        }
+        """
+        cfg = self._load_config(db)
+        has_image = any(m.get("type") == "image" for m in context_messages)
+        model = cfg["vision_model"] if has_image else cfg["model"]
+
+        # 构造多模态 user content
+        user_parts: list[dict[str, Any]] = []
+        user_parts.append({"type": "text", "text": f"客户提示: {customer_hint or '无'}\n以下是客户在群聊中发的下单相关消息，请合并解析为一个完整订单："})
+
+        for idx, msg in enumerate(context_messages, 1):
+            msg_type = msg.get("type", "text")
+            if msg_type == "text":
+                user_parts.append({"type": "text", "text": f"[消息{idx}] {msg.get('content', '')}"})
+            elif msg_type == "image" and msg.get("base64"):
+                mime = msg.get("mime") or "image/png"
+                user_parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
+                user_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
+            elif msg_type == "file":
+                summary = msg.get("excel_summary") or msg.get("content") or ""
+                fname = msg.get("file_name") or "附件"
+                user_parts.append({"type": "text", "text": f"[消息{idx}] 文件 {fname}:\n{summary}"})
+
+        return await self._chat(
+            model,
+            [
+                {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_parts},
+            ],
+            db=db,
         )
 
 

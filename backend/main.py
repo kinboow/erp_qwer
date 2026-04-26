@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard, system_messages, system_activities, inventory
+from app.routers import ai_config as ai_config_router
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
@@ -41,6 +42,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 操作日志中间件
+from app.middleware.operation_log import OperationLogMiddleware
+app.add_middleware(OperationLogMiddleware)
+
 # 注册路由模块
 app.include_router(auth.router, prefix="/api/auth")
 app.include_router(users.router, prefix="/api/users")
@@ -59,6 +64,7 @@ app.include_router(inventory.router, prefix="/api", tags=["库存查询"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["数据看板"])
 app.include_router(system_messages.router, prefix="/api/system-messages", tags=["系统消息"])
 app.include_router(system_activities.router, prefix="/api/system-activities", tags=["系统动态"])
+app.include_router(ai_config_router.router, prefix="/api/ai", tags=["AI-模型配置"])
 
 # ncloud2 ERP API 路由（弘兆云 ERP 操作）
 app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])
@@ -121,12 +127,27 @@ async def startup_event():
     # 启动企微健康检查轮询（每20秒）
     start_wechat_health_checker(interval_seconds=20)
 
+    # 注册系统日志 DB handler
+    from app.services.db_log_handler import DatabaseLogHandler
+    db_handler = DatabaseLogHandler(SessionLocal, level=logging.INFO)
+    db_handler.setFormatter(logging.Formatter("%(message)s"))
+    logging.getLogger().addHandler(db_handler)
+    logger.info("[Startup] 系统日志 DB handler 已注册")
+
+    # 启动日志清理定时任务（15天）
+    from app.services.log_cleanup import start_log_cleanup
+    start_log_cleanup()
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
     # 停止健康检查轮询
     stop_erp_health_checker()
     stop_wechat_health_checker()
+
+    # 停止日志清理
+    from app.services.log_cleanup import stop_log_cleanup
+    stop_log_cleanup()
 
     # 关闭 ERP HTTP 客户端
     http_client = getattr(app.state, "http_client", None)
