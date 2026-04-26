@@ -25,6 +25,7 @@ _status: dict[str, Any] = {
     "last_checked_at": None,
     "last_error": "尚未检测",
 }
+_prev_online: bool | None = None
 
 
 def _load_wechat_config() -> dict[str, Any]:
@@ -39,38 +40,42 @@ def _load_wechat_config() -> dict[str, Any]:
         db.close()
 
 
-def _check_bound_instance_logged_in(config: dict[str, Any]) -> tuple[bool, str]:
-    """检查是否有绑定实例且已登录"""
-    bound_id = config.get("bound_instance_id")
-    selected_wxid = (config.get("selected_wxid") or "").strip()
+async def _check_instance_status(base_url: str, api_key: str, selected_wxid: str) -> tuple[bool, str]:
+    """通过 live API 检查选中实例是否已登录且运行中"""
+    headers = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
 
-    if not bound_id and not selected_wxid:
-        return False, "未选择绑定实例"
-
-    db = SessionLocal()
     try:
-        if bound_id:
-            row = db.execute(
-                text("SELECT id, wxid, status FROM wechat_instances WHERE id = :id LIMIT 1"),
-                {"id": int(bound_id)},
-            ).mappings().first()
-        else:
-            row = db.execute(
-                text("SELECT id, wxid, status FROM wechat_instances WHERE wxid = :wxid LIMIT 1"),
-                {"wxid": selected_wxid},
-            ).mappings().first()
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, trust_env=False) as client:
+            resp = await client.post(
+                f"{base_url}/api/wechat/overview",
+                json={"only_attached": False},
+                headers=headers
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get("code") != 0:
+                return False, f"获取实例概览失败：{result.get('msg', '')}"
 
-        if not row:
-            return False, "绑定的实例不存在"
+            raw_data = result.get("data", {})
+            instances = raw_data.get("instances", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
 
-        if row["status"] != 1:
-            return False, f"实例 {row['wxid']} 未登录"
+            inst = next((i for i in instances if i.get("wxid") == selected_wxid), None)
+            if not inst:
+                return False, f"实例 {selected_wxid} 不在运行列表中"
 
-        return True, ""
+            nickname = inst.get('nickname') or selected_wxid
+            # 检查运行状态（status 或 attached）
+            if not (inst.get("status") or inst.get("attached")):
+                return False, f"实例 {nickname} 未运行"
+            # 检查登录状态
+            if not inst.get("login_status"):
+                return False, f"实例 {nickname} 未登录"
+
+            return True, ""
     except Exception as exc:
         return False, f"检查实例状态失败：{exc}"
-    finally:
-        db.close()
 
 
 async def _check_once() -> None:
@@ -112,16 +117,20 @@ async def _check_once() -> None:
         })
         return
 
-    # 步骤 2：检查绑定实例是否已登录
-    logged_in, reason = _check_bound_instance_logged_in(config)
-    if not logged_in:
-        _status.update({
-            "online": False,
-            "last_checked_at": datetime.now().isoformat(),
-            "last_error": reason,
-        })
-        return
+    # 步骤 2：根据是否有选中实例决定判断方式
+    selected_wxid = (config.get("selected_wxid") or "").strip()
+    if selected_wxid:
+        # 有选中实例：必须运行中 + 已登录才算在线
+        ok, reason = await _check_instance_status(base_url, api_key, selected_wxid)
+        if not ok:
+            _status.update({
+                "online": False,
+                "last_checked_at": datetime.now().isoformat(),
+                "last_error": reason,
+            })
+            return
 
+    # 没有选中实例时，健康检查通过即算在线
     _status.update({
         "online": True,
         "last_checked_at": datetime.now().isoformat(),
@@ -131,8 +140,26 @@ async def _check_once() -> None:
 
 async def refresh_wechat_health_status() -> dict[str, Any]:
     """立即执行一次企微状态检查并返回最新状态"""
+    global _prev_online
     async with _check_lock:
         await _check_once()
+        current_online = _status.get("online", False)
+
+        # 状态由在线变为离线时，写入紧急系统动态
+        if _prev_online is not None and _prev_online and not current_online:
+            error_msg = _status.get("last_error") or "未知原因"
+            try:
+                from app.services.system_activities import create_activity_background
+                create_activity_background(
+                    title="企微连接服务离线",
+                    content=f"企微连接检测失败：{error_msg}",
+                    type="urgent",
+                    source="wechat_health",
+                )
+            except Exception:
+                pass
+
+        _prev_online = current_online
         return get_wechat_health_status()
 
 
@@ -142,7 +169,7 @@ async def _poll_loop(interval_seconds: int) -> None:
         await asyncio.sleep(interval_seconds)
 
 
-def start_wechat_health_checker(interval_seconds: int = 30) -> None:
+def start_wechat_health_checker(interval_seconds: int = 20) -> None:
     global _poll_task
     if _poll_task and not _poll_task.done():
         return

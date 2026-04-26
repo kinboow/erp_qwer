@@ -8,6 +8,7 @@ from app.models import User
 from app.dependencies import get_current_user
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
+from app.services import ws_notify
 
 router = APIRouter(tags=["企业微信运行时"])
 
@@ -38,6 +39,7 @@ async def receive_http_callback(
         instance_id=instanceId,
         wxid=wxid,
     )
+    await ws_notify.broadcast("new_message_log")
     return json_response(message="回调接收成功", data=data)
 
 
@@ -55,6 +57,7 @@ async def receive_sync_callback(
         instance_id=instanceId,
         wxid=wxid,
     )
+    await ws_notify.broadcast("new_message_log")
     return json_response(message="回调接收成功", data=data)
 
 

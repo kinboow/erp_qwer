@@ -116,7 +116,6 @@
               size="small"
               type="primary"
               link
-              :loading="screenshotLoading && currentLoginInstanceKey === getInstanceRuntimeKey(inst)"
               @click.stop="handleLoginInstance(inst)"
             >
               登录
@@ -129,71 +128,48 @@
         </div>
       </div>
 
-      <div v-if="instances.length > 0" class="instance-summary">
-        <div class="summary-item">
-          <span class="summary-label">实例总数</span>
-          <span class="summary-value">{{ instances.length }}</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-label">已登录</span>
-          <span class="summary-value success">{{ loggedInCount }}</span>
-        </div>
-        <div class="summary-item">
-          <span class="summary-label">运行中</span>
-          <span class="summary-value">{{ runningCount }}</span>
-        </div>
-      </div>
 
       <!-- 已绑定实例信息 -->
-      <div v-if="savedInstance" class="bound-info">
+      <div v-if="boundInstanceInfo" class="bound-info">
         <el-icon color="var(--lark-primary)"><InfoFilled /></el-icon>
-        <span>当前绑定实例：<strong>{{ savedInstance.name || savedInstance.wxid }}</strong></span>
+        <span>当前绑定实例：<strong>{{ boundInstanceInfo.nickname || boundInstanceInfo.wxid }}</strong></span>
       </div>
 
 
     </div>
 
-    <!-- 登录二维码弹窗 -->
+    <!-- 登录提示弹窗 -->
     <el-dialog
-      v-model="qrDialogVisible"
-      title="扫码登录企业微信"
+      v-model="loginPromptVisible"
+      title="请登录企业微信"
       width="420px"
       :close-on-click-modal="false"
-      @closed="handleQrDialogClosed"
       align-center
     >
-      <div class="qr-dialog-body">
-        <div v-if="qrLoading" v-loading="true" class="qr-loading">{{ qrDisplayMode === 'screenshot' ? '正在获取窗口截图…' : '正在获取登录二维码…' }}</div>
-        <div v-else-if="qrError" class="qr-error">
-          <el-icon :size="48" color="var(--el-color-danger)"><CircleCloseFilled /></el-icon>
-          <div class="qr-error-text">{{ qrError }}</div>
-          <el-button type="primary" size="small" @click="handleRetryQr">重试</el-button>
+      <div class="login-prompt-body">
+        <el-icon :size="48" color="var(--lark-primary)"><Monitor /></el-icon>
+        <div class="login-prompt-text">
+          企业微信实例已启动，请在<strong>客户端窗口</strong>中完成登录操作。<br/>
+          登录完成后点击下方按钮确认。
         </div>
-        <div v-else-if="qrImageUrl" class="qr-code-wrapper">
-          <img :src="qrImageUrl" alt="登录二维码" class="qr-code-image" />
-          <div class="qr-hint">{{ qrDisplayMode === 'screenshot' ? '请在企业微信窗口中完成扫码登录' : '请使用企业微信扫描二维码登录' }}</div>
-          <div v-if="qrDisplayMode === 'qrcode'" class="qr-countdown">二维码将在 <strong>{{ qrCountdown }}</strong> 秒后自动刷新</div>
-          <div v-else class="qr-countdown">当前展示的是该实例窗口截图，PID：<strong>{{ screenshotPid || '-' }}</strong></div>
-        </div>
-        <div v-else class="qr-loading">等待中…</div>
       </div>
       <template #footer>
-        <el-button @click="qrDialogVisible = false">关闭</el-button>
-        <el-button v-if="qrDisplayMode === 'qrcode'" type="primary" @click="handleManualRefreshQr" :loading="qrRefreshing">刷新二维码</el-button>
-        <el-button v-else type="primary" @click="handleRefreshLoginScreenshot" :loading="screenshotLoading">刷新截图</el-button>
+        <el-button @click="handleCancelLogin">取消</el-button>
+        <el-button type="primary" @click="handleConfirmLoggedIn" :loading="loginPromptChecking">我已登录</el-button>
       </template>
     </el-dialog>
+
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Connection, Check, Refresh, Monitor, User, Select,
-  SuccessFilled, CircleCloseFilled, InfoFilled, Plus
+  InfoFilled, Plus
 } from '@element-plus/icons-vue'
-import { getInstances, createInstance, updateInstance, getWechatGlobalConfig, saveWechatGlobalConfig, proxyStartWechat, proxyWaitLogin, proxyRefreshQrcode, proxyLoginWindowScreenshot } from '@/api/wechat'
+import { getInstances, createInstance, updateInstance, getWechatGlobalConfig, saveWechatGlobalConfig, proxyStartWechat } from '@/api/wechat'
 import request from '@/utils/request'
 
 const formRef = ref(null)
@@ -204,23 +180,11 @@ const connectionTested = ref(false)
 const testResult = ref(null)
 const instances = ref([])
 const selectedWxid = ref('')
-const savedInstance = ref(null)
 
 const startingInstance = ref(false)
-const qrDialogVisible = ref(false)
-const qrLoading = ref(false)
-const qrRefreshing = ref(false)
-const qrError = ref('')
-const qrImageUrl = ref('')
-const qrCountdown = ref(60)
-const qrWxid = ref('')
-const qrDisplayMode = ref('qrcode')
-const screenshotLoading = ref(false)
-const screenshotPid = ref(null)
-const currentLoginInstanceKey = ref('')
-const currentLoginInstance = ref(null)
-let qrRefreshTimer = null
-let qrCountdownTimer = null
+const loginPromptVisible = ref(false)
+const loginPromptChecking = ref(false)
+const pendingLoginInst = ref(null)
 
 const configForm = reactive({
   host: '',
@@ -256,6 +220,10 @@ const hasApiConfig = computed(() => configLoaded.value && !!(configForm.host && 
 const runningInstances = computed(() => instances.value.filter(item => item.status))
 const loggedInCount = computed(() => instances.value.filter(item => item.login_status).length)
 const runningCount = computed(() => runningInstances.value.length)
+const boundInstanceInfo = computed(() => {
+  if (!selectedWxid.value) return null
+  return instances.value.find(i => i.wxid === selectedWxid.value) || null
+})
 
 watch(
   () => [configForm.host, configForm.port, configForm.apiKey],
@@ -274,8 +242,6 @@ const getInstanceStatusClass = (inst) => {
   return 'offline'
 }
 
-const getInstanceRuntimeKey = (inst) => String(inst.wxid || inst.client_id || inst.pid || '')
-
 const canShowLoginButton = (inst) => !!inst?.status && !inst?.login_status && !!(inst?.pid || inst?.client_id || inst?.wxid)
 
 async function loadConfig() {
@@ -286,13 +252,6 @@ async function loadConfig() {
     configForm.port = cfg.port || ''
     configForm.apiKey = cfg.api_key || ''
     selectedWxid.value = cfg.selected_wxid || ''
-    if (cfg.bound_instance_id) {
-      savedInstance.value = {
-        id: cfg.bound_instance_id,
-        wxid: cfg.selected_wxid || '',
-        name: cfg.bound_instance_name || ''
-      }
-    }
     if (configForm.host && configForm.port) {
       connectionTested.value = true
       configLoaded.value = true
@@ -354,14 +313,10 @@ async function handleTestConnection() {
 async function handleSave() {
   saving.value = true
   try {
-    let boundId = null
-    let boundName = ''
-
     if (selectedWxid.value) {
       const existing = await getInstances()
       const list = existing.data || []
       const found = list.find(i => i.wxid === selectedWxid.value)
-      let savedInstanceId = found?.id || null
 
       if (found) {
         await updateInstance(found.id, {
@@ -371,26 +326,16 @@ async function handleSave() {
         })
       } else {
         const inst = instances.value.find(i => i.wxid === selectedWxid.value)
-        const created = await createInstance({
+        await createInstance({
           wxid: selectedWxid.value,
           name: inst?.nickname || selectedWxid.value,
           api_base_url: apiBaseUrl.value,
           api_key: configForm.apiKey || null
         })
-        savedInstanceId = created.data?.id || null
       }
-
-      const instData = instances.value.find(i => i.wxid === selectedWxid.value)
-      const existingInst = list.find(i => i.wxid === selectedWxid.value)
-      boundId = existingInst?.id || found?.id || savedInstanceId
-      boundName = instData?.nickname || selectedWxid.value
-      savedInstance.value = { id: boundId, wxid: selectedWxid.value, name: boundName }
     }
 
-    await saveConfigToDb({
-      bound_instance_id: boundId,
-      bound_instance_name: boundName
-    })
+    await saveConfigToDb()
 
     ElMessage.success('配置已保存，消息接收已自动开启')
     handleFetchInstances()
@@ -435,63 +380,6 @@ function handleSelectInstance(inst) {
   selectedWxid.value = inst.wxid
 }
 
-function clearQrTimers() {
-  if (qrRefreshTimer) { clearInterval(qrRefreshTimer); qrRefreshTimer = null }
-  if (qrCountdownTimer) { clearInterval(qrCountdownTimer); qrCountdownTimer = null }
-}
-
-function resetLoginDialogState() {
-  qrError.value = ''
-  qrImageUrl.value = ''
-  qrWxid.value = ''
-  qrDisplayMode.value = 'qrcode'
-  screenshotPid.value = null
-}
-
-function startQrCountdown() {
-  qrCountdown.value = 60
-  if (qrCountdownTimer) clearInterval(qrCountdownTimer)
-  qrCountdownTimer = setInterval(() => {
-    qrCountdown.value--
-    if (qrCountdown.value <= 0) {
-      clearInterval(qrCountdownTimer)
-      qrCountdownTimer = null
-    }
-  }, 1000)
-}
-
-function startQrAutoRefresh() {
-  clearQrTimers()
-  startQrCountdown()
-  qrRefreshTimer = setInterval(async () => {
-    await doRefreshQr()
-    startQrCountdown()
-  }, 60000)
-}
-
-async function doRefreshQr() {
-  if (!qrWxid.value) return
-  try {
-    const res = await proxyRefreshQrcode({
-      api_base_url: apiBaseUrl.value,
-      api_key: configForm.apiKey || null,
-      wxid: qrWxid.value
-    })
-    const data = res.data || {}
-    if (data.qrcode) {
-      qrImageUrl.value = data.qrcode.startsWith('data:') ? data.qrcode : `data:image/png;base64,${data.qrcode}`
-      qrError.value = ''
-    } else if (data.qr_url) {
-      qrImageUrl.value = data.qr_url
-      qrError.value = ''
-    } else {
-      qrError.value = '未获取到二维码数据'
-    }
-  } catch (e) {
-    qrError.value = e?.response?.data?.message || '刷新二维码失败'
-  }
-}
-
 async function handleAddInstance() {
   if (!apiBaseUrl.value) {
     ElMessage.warning('请先配置 API 连接信息')
@@ -499,91 +387,93 @@ async function handleAddInstance() {
   }
 
   startingInstance.value = true
-  qrDialogVisible.value = true
-  qrLoading.value = true
-  resetLoginDialogState()
-  currentLoginInstance.value = null
-  currentLoginInstanceKey.value = ''
-  clearQrTimers()
 
   try {
+    // 1) 启动实例
     const startRes = await proxyStartWechat({
       api_base_url: apiBaseUrl.value,
       api_key: configForm.apiKey || null,
       force_new: true
     })
     const startData = startRes.data || {}
-    const wxid = startData.wxid || startData.client_id || startData.pid || ''
-    if (!wxid) {
-      qrError.value = '启动成功但未返回实例标识'
-      qrLoading.value = false
-      startingInstance.value = false
-      return
-    }
-    qrWxid.value = String(wxid)
-    qrDisplayMode.value = 'qrcode'
+    const pid = startData.pid || null
+    const wxid = startData.wxid || startData.client_id || ''
 
-    const loginRes = await proxyWaitLogin({
-      api_base_url: apiBaseUrl.value,
-      api_key: configForm.apiKey || null,
-      wxid: qrWxid.value
-    })
-    const loginData = loginRes.data || {}
-    if (loginData.qrcode) {
-      qrImageUrl.value = loginData.qrcode.startsWith('data:') ? loginData.qrcode : `data:image/png;base64,${loginData.qrcode}`
-    } else if (loginData.qr_url) {
-      qrImageUrl.value = loginData.qr_url
-    } else {
-      qrError.value = '未获取到登录二维码'
-      qrLoading.value = false
+    if (!pid && !wxid) {
+      ElMessage.error('启动成功但未返回实例标识')
       startingInstance.value = false
       return
     }
 
-    qrLoading.value = false
+    // 2) 刷新实例列表，检查登录状态
+    await handleFetchInstances()
+    const newInst = instances.value.find(i =>
+      (pid && i.pid === pid) || (wxid && i.wxid === wxid)
+    )
+
+    if (newInst && newInst.login_status) {
+      // 已登录 → 不弹窗，直接提示
+      ElMessage.success(`实例 ${newInst.nickname || newInst.wxid || pid} 已处于登录状态`)
+      startingInstance.value = false
+      return
+    }
+
+    // 3) 未登录 → 弹窗提示用户去客户端登录
     startingInstance.value = false
-    startQrAutoRefresh()
+    pendingLoginInst.value = newInst || { pid, wxid, client_id: startData.client_id }
+    loginPromptVisible.value = true
   } catch (e) {
-    qrError.value = e?.response?.data?.message || e.message || '启动企业微信失败'
-    qrLoading.value = false
+    ElMessage.error(e?.response?.data?.message || e.message || '启动企业微信失败')
     startingInstance.value = false
   }
 }
 
-async function fetchLoginWindowScreenshot(inst) {
-  if (!inst) return
-  const runtimeKey = getInstanceRuntimeKey(inst)
-  currentLoginInstanceKey.value = runtimeKey
-  currentLoginInstance.value = inst
-  screenshotLoading.value = true
-  qrDialogVisible.value = true
-  resetLoginDialogState()
-  qrDisplayMode.value = 'screenshot'
-  qrLoading.value = true
-  clearQrTimers()
-
+async function handleConfirmLoggedIn() {
+  loginPromptChecking.value = true
   try {
-    const res = await proxyLoginWindowScreenshot({
-      api_base_url: apiBaseUrl.value,
-      api_key: configForm.apiKey || null,
-      pid: inst.pid || null,
-      wxid: inst.wxid || null,
-      client_id: inst.client_id || null
-    })
-    const data = res.data || {}
-    if (!data.image) {
-      qrError.value = '未获取到窗口截图'
-      return
+    await handleFetchInstances()
+    const inst = pendingLoginInst.value
+    if (!inst) return
+
+    const found = instances.value.find(i =>
+      (inst.pid && i.pid === inst.pid) || (inst.wxid && i.wxid === inst.wxid)
+    )
+
+    if (found && found.login_status) {
+      // 确认已登录
+      loginPromptVisible.value = false
+      pendingLoginInst.value = null
+      ElMessage.success(`实例 ${found.nickname || found.wxid} 登录成功`)
+    } else {
+      // 仍未登录 → 提示用户，保持弹窗
+      ElMessage.warning('检测到实例尚未登录，请先在客户端完成登录后再点击确认')
     }
-    qrDisplayMode.value = 'screenshot'
-    qrImageUrl.value = data.image
-    screenshotPid.value = data.pid || inst.pid || null
-  } catch (error) {
-    qrError.value = error?.response?.data?.message || error.message || '获取登录窗口截图失败'
+  } catch (e) {
+    ElMessage.error('检查登录状态失败')
   } finally {
-    qrLoading.value = false
-    screenshotLoading.value = false
+    loginPromptChecking.value = false
   }
+}
+
+async function handleCancelLogin() {
+  const inst = pendingLoginInst.value
+  const pid = inst?.pid
+  loginPromptVisible.value = false
+  pendingLoginInst.value = null
+
+  if (pid) {
+    try {
+      await request({
+        url: '/api/wechat/proxy/kill_process',
+        method: 'post',
+        data: { pid }
+      })
+      ElMessage.info(`已结束实例进程 (PID: ${pid})`)
+    } catch (e) {
+      ElMessage.warning('结束进程失败：' + (e?.response?.data?.message || e.message))
+    }
+  }
+  handleFetchInstances()
 }
 
 async function handleLoginInstance(inst) {
@@ -595,45 +485,14 @@ async function handleLoginInstance(inst) {
     ElMessage.warning('当前实例不是可登录状态')
     return
   }
-  await fetchLoginWindowScreenshot(inst)
+  pendingLoginInst.value = inst
+  loginPromptVisible.value = true
 }
-
-async function handleRefreshLoginScreenshot() {
-  if (!currentLoginInstance.value) return
-  await fetchLoginWindowScreenshot(currentLoginInstance.value)
-}
-
-async function handleManualRefreshQr() {
-  qrRefreshing.value = true
-  await doRefreshQr()
-  startQrAutoRefresh()
-  qrRefreshing.value = false
-}
-
-function handleRetryQr() {
-  if (qrDisplayMode.value === 'screenshot' && currentLoginInstance.value) {
-    handleRefreshLoginScreenshot()
-    return
-  }
-  handleAddInstance()
-}
-
-function handleQrDialogClosed() {
-  clearQrTimers()
-  resetLoginDialogState()
-  currentLoginInstanceKey.value = ''
-  currentLoginInstance.value = null
-  handleFetchInstances()
-}
-
-onBeforeUnmount(() => {
-  clearQrTimers()
-})
 
 onMounted(async () => {
   await loadConfig()
   if (hasApiConfig.value) {
-    handleFetchInstances()
+    await handleFetchInstances()
   }
 })
 </script>
@@ -959,59 +818,18 @@ onMounted(async () => {
   color: var(--lark-text-primary);
 }
 
-.qr-dialog-body {
+.login-prompt-body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-height: 320px;
-  justify-content: center;
-}
-
-.qr-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 280px;
-  font-size: 14px;
-  color: var(--lark-text-secondary);
-}
-
-.qr-error {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-}
-
-.qr-error-text {
-  font-size: 14px;
-  color: var(--el-color-danger);
+  gap: 16px;
+  padding: 20px 0;
   text-align: center;
 }
 
-.qr-code-wrapper {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-}
-
-.qr-code-image {
-  width: 260px;
-  height: 260px;
-  border: 1px solid #eee;
-  border-radius: 8px;
-  object-fit: contain;
-}
-
-.qr-hint {
+.login-prompt-text {
   font-size: 14px;
   color: var(--lark-text-primary);
-  font-weight: 500;
-}
-
-.qr-countdown {
-  font-size: 12px;
-  color: var(--lark-text-secondary);
+  line-height: 1.8;
 }
 </style>

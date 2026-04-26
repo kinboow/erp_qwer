@@ -20,7 +20,7 @@
           />
         </div>
         <div class="toolbar-right">
-          <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步产品列表</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? '同步产品中...' : '同步产品列表' }}</el-button>
         </div>
       </div>
 
@@ -111,15 +111,16 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getProducts, syncProducts } from '@/api/products'
+import { useSyncStatus } from '@/composables/useSyncStatus'
 
 const route = useRoute()
+const router = useRouter()
 
 const loading = ref(false)
-const syncing = ref(false)
 const allProducts = ref([])
 const total = ref(0)
 const detailVisible = ref(false)
@@ -143,16 +144,20 @@ function debouncedSearch() {
   _searchTimer = setTimeout(() => handleSearch(), 350)
 }
 
+const { syncing } = useSyncStatus('products', () => fetchProducts())
+
 async function handleSync() {
+  if (syncing.value) return
   syncing.value = true
   try {
     const res = await syncProducts()
-    const d = res.data || {}
-    ElMessage.success(`同步完成：共 ${d.total_found || 0} 个，成功 ${d.synced || 0}，失败 ${d.failed || 0}`)
-    fetchProducts()
+    if (res.data?.already_syncing) {
+      ElMessage.info('产品同步进行中，完成后将自动刷新')
+    } else {
+      ElMessage.success('同步已启动，完成后将自动刷新')
+    }
   } catch {
     ElMessage.error('同步失败，请检查 ERP 配置')
-  } finally {
     syncing.value = false
   }
 }
@@ -184,7 +189,7 @@ function viewDetail(row) {
 }
 
 function viewInventory(row) {
-  ElMessage.warning('库存查询功能正在开发中')
+  router.push({ path: '/inventory', query: { product_no_exact: row.product_no } })
 }
 
 function copyText(text) {

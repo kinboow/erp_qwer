@@ -35,7 +35,7 @@
           </div>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步发货单</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? '同步发货单中...' : '同步发货单' }}</el-button>
         </div>
       </div>
 
@@ -110,11 +110,11 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getSalesShipments, syncShipments } from '@/api/salesShipments'
+import { useSyncStatus } from '@/composables/useSyncStatus'
 
 const router = useRouter()
 
 const loading = ref(false)
-const syncing = ref(false)
 const shipments = ref([])
 const total = ref(0)
 
@@ -200,16 +200,20 @@ function fallbackCopy(text) {
   document.body.removeChild(ta)
 }
 
+const { syncing } = useSyncStatus('shipments', () => fetchShipments())
+
 async function handleSync() {
+  if (syncing.value) return
   syncing.value = true
   try {
     const res = await syncShipments(90)
-    const d = res.data || {}
-    ElMessage.success(`同步完成：共 ${d.total_found || 0} 张，成功 ${d.synced || 0}，失败 ${d.failed || 0}`)
-    fetchShipments()
+    if (res.data?.already_syncing) {
+      ElMessage.info('发货单同步进行中，完成后将自动刷新')
+    } else {
+      ElMessage.success('同步已启动，完成后将自动刷新')
+    }
   } catch {
     ElMessage.error('同步失败，请检查 ERP 配置')
-  } finally {
     syncing.value = false
   }
 }

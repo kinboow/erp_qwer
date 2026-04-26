@@ -45,16 +45,18 @@ const routes = [
         meta: { title: '系统日志' }
       },
       {
+        path: 'system-center',
+        name: 'SystemCenter',
+        component: () => import('@/views/system/SystemCenter.vue'),
+        meta: { title: '系统消息', tab: 'messages' }
+      },
+      {
         path: 'system-messages',
-        name: 'SystemMessages',
-        component: () => import('@/views/system/SystemMessages.vue'),
-        meta: { title: '系统消息' }
+        redirect: '/system-center'
       },
       {
         path: 'system-activities',
-        name: 'SystemActivities',
-        component: () => import('@/views/system/SystemActivities.vue'),
-        meta: { title: '系统动态' }
+        redirect: '/system-center'
       },
       {
         path: 'external-config',
@@ -97,6 +99,12 @@ const routes = [
         name: 'ShipmentDetail',
         component: () => import('@/views/business/ShipmentDetail.vue'),
         meta: { title: '发货单详情', parent: { title: '销售发货单', path: '/shipments' } }
+      },
+      {
+        path: 'inventory',
+        name: 'Inventory',
+        component: () => import('@/views/business/Inventory.vue'),
+        meta: { title: '库存查询' }
       },
       {
         path: 'wechat-listeners/:instanceId',

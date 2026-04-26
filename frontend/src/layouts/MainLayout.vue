@@ -46,7 +46,7 @@
               <el-icon><ChatDotRound /></el-icon>
               <template #title>订单待审核</template>
             </el-menu-item>
-            <el-menu-item index="/inventory" @click="handleUndeveloped">
+            <el-menu-item index="/inventory">
               <el-icon><Search /></el-icon>
               <template #title>库存查询</template>
             </el-menu-item>
@@ -73,13 +73,9 @@
               <el-icon><Document /></el-icon>
               <template #title>系统日志</template>
             </el-menu-item>
-            <el-menu-item index="/system-messages">
+            <el-menu-item index="/system-center">
               <el-icon><Bell /></el-icon>
-              <template #title>系统消息</template>
-            </el-menu-item>
-            <el-menu-item index="/system-activities">
-              <el-icon><Monitor /></el-icon>
-              <template #title>系统动态</template>
+              <template #title>消息中心</template>
             </el-menu-item>
           </el-sub-menu>
 
@@ -183,7 +179,7 @@
                   <div v-else class="msg-popover-empty">暂无消息</div>
                 </div>
                 <div class="msg-popover-footer">
-                  <el-button type="primary" link @click="router.push('/system-messages')">查看全部 →</el-button>
+                  <el-button type="primary" link @click="router.push('/system-center')">查看全部 →</el-button>
                 </div>
               </div>
             </el-popover>
@@ -192,7 +188,7 @@
             </div>
           </div>
 
-          <el-dropdown @command="handleCommand" trigger="click" class="lark-user-dropdown">
+          <el-dropdown @command="handleCommand" trigger="hover" class="lark-user-dropdown">
             <div class="lark-avatar-wrapper">
                <el-avatar :size="32" src="https://cube.elemecdn.com/0/88/03b0d39583f48206768a7534e55bcpng.png" />
             </div>

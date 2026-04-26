@@ -58,52 +58,37 @@ class WechatWsService:
         db = SessionLocal()
         try:
             config_row = db.execute(
-                text("SELECT host, port, selected_wxid, bound_instance_id, ws_path FROM wechat_config WHERE id = 1")
+                text("SELECT host, port, api_key, selected_wxid, ws_path FROM wechat_config WHERE id = 1")
             ).mappings().first()
             if not config_row:
                 await self.disconnect_all()
                 return None
 
-            bound_instance_id = str(config_row.get("bound_instance_id") or "").strip()
             selected_wxid = str(config_row.get("selected_wxid") or "").strip()
-            instance_id = bound_instance_id or selected_wxid
-            if not instance_id:
+            if not selected_wxid:
                 await self.disconnect_all()
                 return None
 
-            api_base_url = ""
-            if bound_instance_id:
-                instance_row = db.execute(
-                    text("SELECT api_base_url FROM wechat_instances WHERE id = :id LIMIT 1"),
-                    {"id": int(bound_instance_id)},
-                ).mappings().first()
-                api_base_url = str((instance_row or {}).get("api_base_url") or "").strip()
+            host = str(config_row.get("host") or "").strip()
+            port = str(config_row.get("port") or "").strip()
+            if not host:
+                await self.disconnect_all()
+                return None
 
-            if not api_base_url and selected_wxid:
-                instance_row = db.execute(
-                    text("SELECT api_base_url FROM wechat_instances WHERE wxid = :wxid LIMIT 1"),
-                    {"wxid": selected_wxid},
-                ).mappings().first()
-                api_base_url = str((instance_row or {}).get("api_base_url") or "").strip()
+            if host.startswith(("http://", "https://", "ws://", "wss://")):
+                api_base_url = host.rstrip("/") if not port else f"{host.rstrip('/')}:{port}"
+            else:
+                api_base_url = f"http://{host}"
+                if port:
+                    api_base_url = f"{api_base_url}:{port}"
 
-            if not api_base_url:
-                host = str(config_row.get("host") or "").strip()
-                port = str(config_row.get("port") or "").strip()
-                if host:
-                    if host.startswith(("http://", "https://", "ws://", "wss://")):
-                        api_base_url = host.rstrip("/") if not port else f"{host.rstrip('/')}:{port}"
-                    else:
-                        api_base_url = f"http://{host}"
-                        if port:
-                            api_base_url = f"{api_base_url}:{port}"
-
-            ws_url = self._build_ws_url(api_base_url, str(config_row.get("ws_path") or ""), instance_id)
+            ws_url = self._build_ws_url(api_base_url, str(config_row.get("ws_path") or ""), selected_wxid)
             if not ws_url:
                 await self.disconnect_all()
                 return None
 
-            await self.disconnect_all(keep_instance_id=instance_id)
-            return await self.connect(instance_id, ws_url)
+            await self.disconnect_all(keep_instance_id=selected_wxid)
+            return await self.connect(selected_wxid, ws_url)
         except Exception:
             return None
         finally:

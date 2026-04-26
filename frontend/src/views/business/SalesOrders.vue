@@ -35,7 +35,7 @@
           </div>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步销售订单</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? '同步订单中...' : '同步销售订单' }}</el-button>
         </div>
       </div>
 
@@ -104,11 +104,11 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import { getSalesOrders, syncOrders } from '@/api/salesOrders'
+import { useSyncStatus } from '@/composables/useSyncStatus'
 
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
-const syncing = ref(false)
 const orders = ref([])
 const total = ref(0)
 
@@ -164,16 +164,20 @@ async function fetchOrders() {
   }
 }
 
+const { syncing } = useSyncStatus('orders', () => fetchOrders())
+
 async function handleSync() {
+  if (syncing.value) return
   syncing.value = true
   try {
     const res = await syncOrders(90)
-    const d = res.data || {}
-    ElMessage.success(`同步完成：共 ${d.total_found || 0} 张，成功 ${d.synced || 0}，失败 ${d.failed || 0}`)
-    fetchOrders()
+    if (res.data?.already_syncing) {
+      ElMessage.info('订单同步进行中，完成后将自动刷新')
+    } else {
+      ElMessage.success('同步已启动，完成后将自动刷新')
+    }
   } catch {
     ElMessage.error('同步失败，请检查 ERP 配置')
-  } finally {
     syncing.value = false
   }
 }

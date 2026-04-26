@@ -16,7 +16,7 @@ from app.database import SessionLocal
 _DDL = """
 CREATE TABLE IF NOT EXISTS system_activities (
     id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    type        VARCHAR(50)  NOT NULL DEFAULT 'info'      COMMENT '类型: info / warning / error / success',
+    type        VARCHAR(50)  NOT NULL DEFAULT 'normal'     COMMENT '类型: urgent(紧急) / important(重要) / normal(普通)',
     title       VARCHAR(255) NOT NULL DEFAULT ''           COMMENT '标题',
     content     TEXT         NULL                          COMMENT '详细内容（含错误信息）',
     source      VARCHAR(50)  NOT NULL DEFAULT 'system'     COMMENT '来源: erp_sync / system / wechat',

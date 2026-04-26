@@ -154,7 +154,7 @@
         <div class="lark-panel">
           <div class="panel-header">
             <h3 class="panel-title">系统动态</h3>
-            <el-button type="primary" link size="small" @click="router.push('/system-activities')">查看全部 →</el-button>
+            <el-button type="primary" link size="small" @click="router.push('/system-center')">查看全部 →</el-button>
           </div>
           <div class="panel-body">
             <div v-if="activities.length === 0" class="empty-activity">暂无动态</div>
@@ -874,11 +874,9 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   flex-shrink: 0;
 }
 
-.timeline-dot.primary { background-color: var(--lark-primary); box-shadow: 0 0 0 3px var(--lark-primary-light); }
-.timeline-dot.success { background-color: #00B365; }
-.timeline-dot.warning { background-color: #FF8800; }
-.timeline-dot.danger { background-color: #F56C6C; box-shadow: 0 0 0 3px #fde2e2; }
-.timeline-dot.info { background-color: #909399; }
+.timeline-dot.urgent { background-color: #F56C6C; box-shadow: 0 0 0 3px #fde2e2; }
+.timeline-dot.important { background-color: #E6A23C; box-shadow: 0 0 0 3px #faecd8; }
+.timeline-dot.normal { background-color: #00B365; }
 
 .timeline-content {
   flex: 1;

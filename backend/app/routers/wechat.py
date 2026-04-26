@@ -810,6 +810,26 @@ async def proxy_overview(
     except Exception as e:
         return json_response(code=-1, message=f"获取实例列表失败: {str(e)}")
 
+class ProxyKillProcessReq(BaseModel):
+    pid: int
+
+@router.post("/proxy/kill_process", summary="强制结束指定 PID 的进程")
+async def proxy_kill_process(
+    data: ProxyKillProcessReq,
+    current_user: User = Depends(get_current_user)
+):
+    import os
+    import signal
+    try:
+        os.kill(data.pid, signal.SIGTERM)
+        return json_response(data={"pid": data.pid, "killed": True})
+    except ProcessLookupError:
+        return json_response(data={"pid": data.pid, "killed": False}, message="进程不存在")
+    except PermissionError:
+        return json_response(code=-1, message="没有权限结束该进程")
+    except Exception as e:
+        return json_response(code=-1, message=f"结束进程失败: {str(e)}")
+
 @router.post("/proxy/login_window_screenshot", summary="代理获取实例登录窗口截图")
 async def proxy_login_window_screenshot(
     data: ProxyInstanceScreenshotReq,

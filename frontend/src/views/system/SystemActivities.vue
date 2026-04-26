@@ -1,32 +1,15 @@
 <template>
   <div class="lark-sys-activities">
-    <div class="lark-page-header">
-      <div class="header-title">系统动态</div>
-      <div class="header-desc">查看 ERP 同步失败等系统级事件详情</div>
-    </div>
-
-    <div class="lark-table-panel">
+    <div class="lark-panel">
       <!-- 工具栏 -->
       <div class="lark-toolbar">
         <div class="toolbar-left">
-          <el-select v-model="filter.type" placeholder="事件类型" clearable style="width: 120px;" @change="fetchList">
-            <el-option label="全部" value="" />
-            <el-option label="错误" value="error" />
-            <el-option label="警告" value="warning" />
-            <el-option label="信息" value="info" />
-            <el-option label="成功" value="success" />
-          </el-select>
-          <el-select v-model="filter.source" placeholder="来源" clearable style="width: 140px;" @change="fetchList">
-            <el-option label="全部" value="" />
-            <el-option label="ERP 同步" value="erp_sync" />
-            <el-option label="系统" value="system" />
-          </el-select>
           <div class="lark-search-input-wrap">
             <el-icon class="search-icon"><Search /></el-icon>
             <input
-              v-model="filter.keyword"
+              v-model="keyword"
               class="lark-input"
-              placeholder="搜索标题或内容"
+              placeholder="搜索动态内容"
               @keyup.enter="fetchList"
             />
           </div>
@@ -36,34 +19,21 @@
         </div>
       </div>
 
-      <!-- 表格 -->
-      <el-table :data="items" v-loading="loading" stripe class="lark-table">
-        <el-table-column label="类型" prop="type" width="80" align="center">
-          <template #default="{ row }">
-            <el-tag :type="typeTagType(row.type)" size="small" effect="light">
-              {{ typeLabel(row.type) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="来源" prop="source" width="110" align="center">
-          <template #default="{ row }">
-            {{ sourceLabel(row.source) }}
-          </template>
-        </el-table-column>
-        <el-table-column label="标题" prop="title" min-width="180" />
-        <el-table-column label="详细内容" prop="content" min-width="360">
-          <template #default="{ row }">
-            <span class="activity-content">{{ row.content }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="时间" prop="created_at" width="180">
-          <template #default="{ row }">
-            <span class="log-time">{{ row.created_at }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
+      <!-- 时间轴 -->
+      <div v-loading="loading">
+        <div v-if="items.length === 0" class="empty-activity">暂无动态</div>
+        <div v-else class="lark-timeline">
+          <div class="timeline-item" v-for="(item, index) in items" :key="index">
+            <div class="timeline-dot" :class="item.type"></div>
+            <div class="timeline-content">
+              <div class="timeline-text">{{ item.content }}</div>
+              <div class="timeline-time">{{ item.time }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
 
-      <div class="lark-pagination">
+      <div class="lark-pagination" v-if="pagination.total > pagination.pageSize">
         <el-pagination
           v-model:current-page="pagination.page"
           :page-size="pagination.pageSize"
@@ -83,16 +53,14 @@ import request from '@/utils/request'
 
 const loading = ref(false)
 const items = ref([])
-const filter = reactive({ type: '', source: '', keyword: '' })
-const pagination = reactive({ page: 1, pageSize: 20, total: 0 })
+const keyword = ref('')
+const pagination = reactive({ page: 1, pageSize: 30, total: 0 })
 
 async function fetchList() {
   loading.value = true
   try {
     const params = { page: pagination.page, page_size: pagination.pageSize }
-    if (filter.type) params.type = filter.type
-    if (filter.source) params.source = filter.source
-    if (filter.keyword) params.keyword = filter.keyword
+    if (keyword.value) params.keyword = keyword.value
     const res = await request({ url: '/api/system-activities', method: 'get', params })
     items.value = res.data?.items || []
     pagination.total = res.data?.total || 0
@@ -102,16 +70,6 @@ async function fetchList() {
   } finally {
     loading.value = false
   }
-}
-
-function typeTagType(type) {
-  return { error: 'danger', warning: 'warning', info: 'info', success: 'success' }[type] || ''
-}
-function typeLabel(type) {
-  return { error: '错误', warning: '警告', info: '信息', success: '成功' }[type] || type
-}
-function sourceLabel(source) {
-  return { erp_sync: 'ERP 同步', system: '系统', wechat: '企业微信' }[source] || source || '-'
 }
 
 onMounted(() => {
@@ -140,7 +98,7 @@ onMounted(() => {
   color: var(--lark-text-secondary);
 }
 
-.lark-table-panel {
+.lark-panel {
   background: var(--lark-bg-base);
   border-radius: var(--lark-radius-lg);
   padding: 20px 24px;
@@ -150,7 +108,7 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
   gap: 12px;
 }
 
@@ -158,7 +116,6 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
 }
 
 .toolbar-right {
@@ -191,7 +148,7 @@ onMounted(() => {
   font-size: 13px;
   color: var(--lark-text-primary);
   outline: none;
-  width: 200px;
+  width: 280px;
   transition: border-color 0.2s;
 }
 
@@ -199,31 +156,77 @@ onMounted(() => {
   border-color: var(--lark-primary);
 }
 
-.log-time {
-  font-size: 13px;
-  color: var(--lark-text-secondary);
-  font-family: monospace;
+.empty-activity {
+  text-align: center;
+  color: var(--lark-text-disabled);
+  padding: 48px 0;
+  font-size: 14px;
 }
 
-.activity-content {
-  color: var(--lark-text-secondary);
+/* 时间轴 */
+.lark-timeline {
+  position: relative;
+  padding-left: 20px;
+}
+
+.lark-timeline::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  background-color: var(--lark-border-light);
+}
+
+.timeline-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding-bottom: 24px;
+  position: relative;
+}
+
+.timeline-item:last-child {
+  padding-bottom: 0;
+}
+
+.timeline-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--lark-border);
+  margin-top: 6px;
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+}
+
+.timeline-dot.urgent { background-color: #F56C6C; box-shadow: 0 0 0 3px #fde2e2; }
+.timeline-dot.important { background-color: #E6A23C; box-shadow: 0 0 0 3px #faecd8; }
+.timeline-dot.normal { background-color: #00B365; }
+
+.timeline-content {
+  flex: 1;
+}
+
+.timeline-text {
+  font-size: 14px;
+  color: var(--lark-text-primary);
+  margin-bottom: 4px;
+  line-height: 1.5;
   word-break: break-word;
+}
+
+.timeline-time {
+  font-size: 12px;
+  color: var(--lark-text-disabled);
+  font-family: monospace;
 }
 
 .lark-pagination {
   display: flex;
   justify-content: flex-end;
-  margin-top: 16px;
-}
-
-:deep(.el-table) {
-  --el-table-border-color: var(--lark-border-light);
-  --el-table-header-bg-color: var(--lark-bg-subtle);
-  font-size: 13px;
-}
-
-:deep(.el-table th.el-table__cell) {
-  font-weight: 600;
-  color: var(--lark-text-primary);
+  margin-top: 20px;
 }
 </style>

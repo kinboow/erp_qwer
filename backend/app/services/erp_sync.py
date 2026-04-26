@@ -18,6 +18,7 @@ from app.config import settings
 from app.database import SessionLocal
 from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.services.base import list_products as erp_list_products
+from app.ncloud.services.inventory import query_inventory as erp_query_inventory
 from app.ncloud.services.sales_orders import get_order_detail, list_orders
 from app.ncloud.services.shipments import get_shipment_detail, list_shipments
 from app.services.system_activities import create_activity_background
@@ -188,6 +189,34 @@ CREATE TABLE IF NOT EXISTS erp_products (
 """
 
 
+_DDL_INVENTORY = """
+CREATE TABLE IF NOT EXISTS erp_inventory (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    warehouse       VARCHAR(100) NOT NULL DEFAULT '',
+    product_type    VARCHAR(100) DEFAULT '',
+    product_no      VARCHAR(200) NOT NULL DEFAULT '',
+    product_name    VARCHAR(255) DEFAULT '',
+    material        VARCHAR(200) DEFAULT '',
+    image_url       VARCHAR(500) DEFAULT '',
+    color           VARCHAR(200) DEFAULT '',
+    unit            VARCHAR(50)  DEFAULT '',
+    qty             DECIMAL(14,2) DEFAULT 0,
+    sale_price      DECIMAL(12,2) DEFAULT 0,
+    cost_price      DECIMAL(12,2) DEFAULT 0,
+    amount          DECIMAL(14,2) DEFAULT 0,
+    in_transit_qty  DECIMAL(14,2) DEFAULT 0,
+    sizes_json      TEXT NULL,
+    synced_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_wh_pno_color (warehouse, product_no, color),
+    INDEX idx_product_no (product_no),
+    INDEX idx_warehouse (warehouse),
+    INDEX idx_synced_at (synced_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
 _DDL_SYNC_CONFIG = """
 CREATE TABLE IF NOT EXISTS erp_sync_config (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -215,6 +244,7 @@ def ensure_tables(db: Session) -> None:
     db.execute(text(_DDL_SHIPMENTS))
     db.execute(text(_DDL_SHIPMENT_ITEMS))
     db.execute(text(_DDL_PRODUCTS))
+    db.execute(text(_DDL_INVENTORY))
     db.execute(text(_DDL_SYNC_CONFIG))
     # 补加字段（已有表结构升级）
     _alter_cmds = [
@@ -818,6 +848,104 @@ def _upsert_product(db: Session, item: Any, synced_at: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 库存同步
+# ---------------------------------------------------------------------------
+
+async def sync_inventory(erp_client: ERPClient) -> dict[str, Any]:
+    """分页拉取 ERP 库存数据，写入本地 erp_inventory 表。"""
+    db: Session = SessionLocal()
+    try:
+        ensure_tables(db)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        synced = 0
+        failed = 0
+        page = 1
+        rows_per_page = 500
+
+        while True:
+            inv_resp = await erp_query_inventory(
+                erp_client,
+                warehouse=None,
+                product_type=None,
+                product_no=None,
+                product_name=None,
+                show_zero=False,
+                show_negative=True,
+                page=page,
+                rows=rows_per_page,
+            )
+            for item in inv_resp.rows:
+                try:
+                    _upsert_inventory_item(db, item, now_str)
+                    synced += 1
+                except Exception as exc:
+                    logger.warning("[ERP Sync] 同步库存 %s/%s 失败: %s", item.warehouse, item.product_no, exc)
+                    failed += 1
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
+            if page * rows_per_page >= inv_resp.total:
+                break
+            page += 1
+
+        result = {
+            "total_found": synced + failed,
+            "synced": synced,
+            "failed": failed,
+            "synced_at": now_str,
+        }
+        logger.info("[ERP Sync] 库存同步完成: %s", result)
+        return result
+
+    except Exception:
+        logger.exception("[ERP Sync] 库存同步异常")
+        raise
+    finally:
+        db.close()
+
+
+def _upsert_inventory_item(db: Session, item: Any, synced_at: str) -> None:
+    """插入或更新一条库存记录，唯一键为 (warehouse, product_no, color)"""
+    sizes_list = [{"size": s.size, "qty": s.qty} for s in item.sizes] if item.sizes else []
+
+    data = {
+        "warehouse": item.warehouse or "",
+        "product_type": item.product_type or "",
+        "product_no": item.product_no or "",
+        "product_name": item.product_name or "",
+        "material": item.material or "",
+        "image_url": item.image_url or "",
+        "color": item.color or "",
+        "unit": item.unit or "",
+        "qty": item.qty or 0,
+        "sale_price": item.sale_price or 0,
+        "cost_price": item.cost_price or 0,
+        "amount": item.amount or 0,
+        "in_transit_qty": item.in_transit_qty or 0,
+        "sizes_json": json.dumps(sizes_list, ensure_ascii=False) if sizes_list else "[]",
+        "synced_at": synced_at,
+    }
+
+    existing = db.execute(
+        text("SELECT id FROM erp_inventory WHERE warehouse = :warehouse AND product_no = :product_no AND color = :color"),
+        {"warehouse": data["warehouse"], "product_no": data["product_no"], "color": data["color"]},
+    ).mappings().first()
+
+    if existing:
+        sets = ", ".join(f"{k} = :{k}" for k in data if k not in ("warehouse", "product_no", "color"))
+        data["_id"] = existing["id"]
+        db.execute(text(f"UPDATE erp_inventory SET {sets} WHERE id = :_id"), data)
+    else:
+        cols = ", ".join(data.keys())
+        vals = ", ".join(f":{k}" for k in data.keys())
+        db.execute(text(f"INSERT INTO erp_inventory ({cols}) VALUES ({vals})"), data)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
 # 定时调度器
 # ---------------------------------------------------------------------------
 
@@ -826,6 +954,42 @@ _last_sync_result: dict[str, Any] = {}
 _is_syncing: bool = False
 _FAILURE_MESSAGE_DEDUP_SECONDS = 600
 _last_failure_message_at: dict[str, datetime] = {}
+
+# ---------------------------------------------------------------------------
+# 模块级同步锁 — 跨用户互斥
+# ---------------------------------------------------------------------------
+_module_syncing: dict[str, bool] = {
+    "orders": False,
+    "shipments": False,
+    "products": False,
+    "inventory": False,
+}
+
+
+def is_module_syncing(module: str) -> bool:
+    return _module_syncing.get(module, False)
+
+
+def get_all_module_sync_status() -> dict[str, bool]:
+    return dict(_module_syncing)
+
+
+async def _sync_module(module: str, coro):
+    """带模块锁的同步包装器，完成后广播通知前端"""
+    from app.services import ws_notify
+
+    if _module_syncing.get(module, False):
+        return None  # 已在同步中
+    _module_syncing[module] = True
+    try:
+        result = await coro
+        await ws_notify.broadcast("sync_complete", {"module": module, "success": True})
+        return result
+    except Exception:
+        await ws_notify.broadcast("sync_complete", {"module": module, "success": False})
+        raise
+    finally:
+        _module_syncing[module] = False
 
 
 def _record_sync_failure_message(module_name: str, exc: Exception) -> None:
@@ -848,7 +1012,7 @@ def _record_sync_failure_message(module_name: str, exc: Exception) -> None:
         create_activity_background(
             title=f"{module_name}同步失败",
             content=f"{module_name}同步失败：{error_text}",
-            type="error",
+            type="urgent",
             source="erp_sync",
         )
         # 系统消息：仅简要通知
@@ -875,28 +1039,36 @@ async def _sync_loop(erp_client: ERPClient) -> None:
         try:
             _is_syncing = True
             try:
-                orders_result = await sync_sales_orders(erp_client)
-                cycle_result["orders"] = orders_result
+                orders_result = await _sync_module("orders", sync_sales_orders(erp_client))
+                cycle_result["orders"] = orders_result or {"skipped": True}
             except Exception as exc:
                 logger.exception("[ERP Sync] 销售订单同步异常")
                 cycle_result["orders"] = {"error": str(exc)}
                 _record_sync_failure_message("销售订单", exc)
 
             try:
-                shipments_result = await sync_sales_shipments(erp_client)
-                cycle_result["shipments"] = shipments_result
+                shipments_result = await _sync_module("shipments", sync_sales_shipments(erp_client))
+                cycle_result["shipments"] = shipments_result or {"skipped": True}
             except Exception as exc:
                 logger.exception("[ERP Sync] 发货单同步异常")
                 cycle_result["shipments"] = {"error": str(exc)}
                 _record_sync_failure_message("销售发货单", exc)
 
             try:
-                products_result = await sync_products(erp_client)
-                cycle_result["products"] = products_result
+                products_result = await _sync_module("products", sync_products(erp_client))
+                cycle_result["products"] = products_result or {"skipped": True}
             except Exception as exc:
                 logger.exception("[ERP Sync] 产品同步异常")
                 cycle_result["products"] = {"error": str(exc)}
                 _record_sync_failure_message("产品", exc)
+
+            try:
+                inventory_result = await _sync_module("inventory", sync_inventory(erp_client))
+                cycle_result["inventory"] = inventory_result or {"skipped": True}
+            except Exception as exc:
+                logger.exception("[ERP Sync] 库存同步异常")
+                cycle_result["inventory"] = {"error": str(exc)}
+                _record_sync_failure_message("库存", exc)
 
             cycle_result["synced_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _last_sync_result = cycle_result

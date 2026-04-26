@@ -17,6 +17,7 @@ _status: dict[str, Any] = {
     "last_checked_at": None,
     "last_error": "尚未检测",
 }
+_prev_online: bool | None = None  # 用于检测状态变化
 
 
 async def _check_once() -> None:
@@ -70,8 +71,26 @@ async def _check_once() -> None:
 
 async def refresh_erp_health_status() -> dict[str, Any]:
     """立即执行一次 ERP 状态检查并返回最新状态"""
+    global _prev_online
     async with _check_lock:
         await _check_once()
+        current_online = _status.get("online", False)
+
+        # 状态由在线变为离线时，写入紧急系统动态
+        if _prev_online is not None and _prev_online and not current_online:
+            error_msg = _status.get("last_error") or "未知原因"
+            try:
+                from app.services.system_activities import create_activity_background
+                create_activity_background(
+                    title="ERP 连接服务离线",
+                    content=f"ERP 连接检测失败：{error_msg}",
+                    type="urgent",
+                    source="erp_health",
+                )
+            except Exception:
+                pass
+
+        _prev_online = current_online
         return get_erp_health_status()
 
 
@@ -81,7 +100,7 @@ async def _poll_loop(interval_seconds: int) -> None:
         await asyncio.sleep(interval_seconds)
 
 
-def start_erp_health_checker(interval_seconds: int = 30) -> None:
+def start_erp_health_checker(interval_seconds: int = 20) -> None:
     global _poll_task
     if _poll_task and not _poll_task.done():
         return

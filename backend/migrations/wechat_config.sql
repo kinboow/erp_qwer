@@ -5,8 +5,6 @@ CREATE TABLE IF NOT EXISTS `wechat_config` (
   `port` VARCHAR(10) NOT NULL DEFAULT '' COMMENT 'API 端口',
   `api_key` VARCHAR(255) DEFAULT '' COMMENT 'API 密钥 (X-API-Key)',
   `selected_wxid` VARCHAR(100) DEFAULT '' COMMENT '当前选中的实例 wxid',
-  `bound_instance_id` INT DEFAULT NULL COMMENT '绑定的实例数据库 ID',
-  `bound_instance_name` VARCHAR(200) DEFAULT '' COMMENT '绑定的实例名称',
   `ws_path` VARCHAR(255) DEFAULT '/ws/wechat/messages' COMMENT 'WS 回调路径',
   `http_path` VARCHAR(255) DEFAULT '/api/wechat/callback/http' COMMENT 'HTTP 回调路径',
   `callback_timeout` INT DEFAULT 5 COMMENT '回调超时(秒)',

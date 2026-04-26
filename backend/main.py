@@ -7,11 +7,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard, system_messages, system_activities
+from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard, system_messages, system_activities, inventory
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
 from app.services.wechat_health import start_wechat_health_checker, stop_wechat_health_checker
+from app.services import ws_notify
 
 # ncloud2 ERP API 子模块
 from app.ncloud.client.erp_client import ERPClient
@@ -54,6 +55,7 @@ app.include_router(erp_sync.router, prefix="/api/erp/sync", tags=["ERP-同步"])
 app.include_router(sales_orders.router, prefix="/api/sales-orders", tags=["销售订单"])
 app.include_router(sales_shipments.router, prefix="/api/sales-shipments", tags=["销售发货单"])
 app.include_router(products.router, prefix="/api/products", tags=["产品列表"])
+app.include_router(inventory.router, prefix="/api", tags=["库存查询"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["数据看板"])
 app.include_router(system_messages.router, prefix="/api/system-messages", tags=["系统消息"])
 app.include_router(system_activities.router, prefix="/api/system-activities", tags=["系统动态"])
@@ -113,11 +115,11 @@ async def startup_event():
     from app.services.erp_sync import start_sync_scheduler
     start_sync_scheduler(erp_client)
 
-    # 启动 ERP 健康检查轮询（每5分钟）
-    start_erp_health_checker(interval_seconds=300)
+    # 启动 ERP 健康检查轮询（每20秒）
+    start_erp_health_checker(interval_seconds=20)
 
-    # 启动企微健康检查轮询（每5分钟）
-    start_wechat_health_checker(interval_seconds=300)
+    # 启动企微健康检查轮询（每20秒）
+    start_wechat_health_checker(interval_seconds=20)
 
 
 @app.on_event("shutdown")
@@ -153,6 +155,7 @@ async def root_sync_callback(request: Request):
             instance_id=instance_id or None,
             wxid=wxid or None,
         )
+        await ws_notify.broadcast("new_message_log")
         return {"code": 200, "message": "回调接收成功", "data": result}
     except Exception as exc:
         logger.exception("[/sync] 处理回调异常")
@@ -188,10 +191,24 @@ async def root_ws_callback(websocket: WebSocket):
                 wxid=wxid or None,
             )
             await websocket.send_json({"code": 200, "message": "received"})
+            await ws_notify.broadcast("new_message_log")
     except WebSocketDisconnect:
         return
     finally:
         db.close()
+
+
+@app.websocket("/ws/notify")
+async def ws_notify_endpoint(websocket: WebSocket):
+    """前端订阅实时事件通知"""
+    await ws_notify.register(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        ws_notify.unregister(websocket)
 
 
 @app.get("/", summary="根路径", tags=["系统"])

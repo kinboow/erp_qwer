@@ -1,9 +1,5 @@
 <template>
   <div class="lark-sys-messages">
-    <div class="lark-page-header">
-      <div class="header-title">系统消息</div>
-      <div class="header-desc">查看 ERP 同步失败等系统级通知</div>
-    </div>
 
     <div class="lark-table-panel">
       <!-- 工具栏 -->

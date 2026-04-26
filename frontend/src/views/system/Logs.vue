@@ -217,14 +217,10 @@
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="群聊" prop="room_name" min-width="180" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span>{{ row.room_name || row.room_id || '-' }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="发送人" prop="sender_name" width="140" show-overflow-tooltip>
+            <el-table-column label="发送人/群" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
                 <span>{{ row.sender_name || row.sender_id || '-' }}</span>
+                <span v-if="row.room_name || row.room_id" style="color:var(--lark-text-secondary);margin-left:4px;">/ {{ row.room_name || row.room_id }}</span>
               </template>
             </el-table-column>
             <el-table-column label="内容" prop="content_preview" min-width="320" show-overflow-tooltip />
@@ -249,7 +245,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import request from '@/utils/request'
 
@@ -396,8 +392,47 @@ function handleTabChange(tab) {
   else fetchMessageLogs()
 }
 
+// ========== 实时通知 WebSocket ==========
+let notifyWs = null
+let reconnectTimer = null
+
+function connectNotifyWs() {
+  if (notifyWs && notifyWs.readyState <= 1) return
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  notifyWs = new WebSocket(`${proto}://${location.host}/ws/notify`)
+  notifyWs.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data)
+      if (msg.event === 'new_message_log' && activeTab.value === 'message') {
+        fetchMessageLogs()
+      }
+    } catch {}
+  }
+  notifyWs.onclose = () => {
+    reconnectTimer = setTimeout(connectNotifyWs, 3000)
+  }
+  notifyWs.onerror = () => {
+    notifyWs?.close()
+  }
+}
+
+function disconnectNotifyWs() {
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  reconnectTimer = null
+  if (notifyWs) {
+    notifyWs.onclose = null
+    notifyWs.close()
+    notifyWs = null
+  }
+}
+
 onMounted(() => {
   fetchSystemLogs()
+  connectNotifyWs()
+})
+
+onUnmounted(() => {
+  disconnectNotifyWs()
 })
 </script>
 

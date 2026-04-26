@@ -151,7 +151,7 @@ def dashboard_stats(
         recent_activities.append({
             "content": f"销售订单 {r['order_no']}（{r.get('customer_name', '')}）{state_text}，金额 ¥{amt:,.2f}",
             "time": r.get("order_date", ""),
-            "type": "success" if r.get("state") == 1 else "primary",
+            "type": "important" if r.get("state") != 1 else "normal",
         })
 
     recent_ships = _safe_rows(db, """
@@ -165,7 +165,7 @@ def dashboard_stats(
         recent_activities.append({
             "content": f"发货单 {r['order_no']}（{r.get('customer_name', '')}）{state_text}",
             "time": r.get("order_date", ""),
-            "type": "success" if r.get("state") == 1 else "warning",
+            "type": "important" if r.get("state") != 1 else "normal",
         })
 
     # 系统动态（同步失败等）
@@ -175,10 +175,12 @@ def dashboard_stats(
         for a in sys_acts:
             created = a.get("created_at")
             time_str = created.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created, "strftime") else str(created or "")
+            raw_type = a.get("type", "")
+            mapped = "urgent" if raw_type in ("error", "urgent") else "important" if raw_type in ("warning", "important") else "normal"
             recent_activities.append({
                 "content": a.get("content") or a.get("title", ""),
                 "time": time_str,
-                "type": "danger" if a.get("type") == "error" else "warning" if a.get("type") == "warning" else "info",
+                "type": mapped,
             })
     except Exception:
         pass

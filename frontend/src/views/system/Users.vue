@@ -372,7 +372,9 @@
             placeholder="请选择要关联的企微群"
             style="width: 100%"
             :loading="wechatRoomLoading"
-            :disabled="!hasBoundWechatInstance || wechatRoomLoading"
+            loading-text="正在加载群聊列表…"
+            no-data-text="暂无群聊数据"
+            :disabled="!hasBoundWechatInstance"
           >
             <el-option
               v-for="room in wechatRoomOptions"
@@ -705,14 +707,21 @@ const loadBoundWechatInstance = async () => {
   try {
     const res = await getWechatGlobalConfig()
     const cfg = res.data || {}
-    if (cfg.bound_instance_id) {
-      wechatBoundInstance.value = {
-        id: cfg.bound_instance_id,
-        wxid: cfg.selected_wxid || '',
-        name: cfg.bound_instance_name || ''
-      }
-      return wechatBoundInstance.value
+    const wxid = (cfg.selected_wxid || '').trim()
+    if (!wxid) {
+      wechatBoundInstance.value = null
+      return null
     }
+    // 通过 wxid 查找 DB 中的实例记录以获取 id
+    const instRes = await getInstances()
+    const list = Array.isArray(instRes.data) ? instRes.data : []
+    const matched = list.find(item => item.wxid === wxid)
+    wechatBoundInstance.value = {
+      id: matched?.id || null,
+      wxid,
+      name: matched?.name || wxid
+    }
+    return wechatBoundInstance.value
   } catch { /* ignore */ }
   wechatBoundInstance.value = null
   return null
@@ -747,25 +756,7 @@ const fetchSyncedWechatRooms = async (instanceId) => {
 }
 
 const fetchWechatRoomsForCustomer = async () => {
-  let bound = await loadBoundWechatInstance()
-
-  if (bound?.wxid && !bound?.id) {
-    try {
-      const res = await getInstances()
-      const list = Array.isArray(res.data) ? res.data : []
-      const matched = list.find(item => item.wxid === bound.wxid)
-      if (matched) {
-        bound = {
-          id: matched.id,
-          wxid: matched.wxid,
-          name: bound.name || matched.name || matched.wxid
-        }
-        wechatBoundInstance.value = bound
-      }
-    } catch (error) {
-      console.error('反查企微实例失败:', error)
-    }
-  }
+  const bound = await loadBoundWechatInstance()
 
   if (!bound?.id) {
     wechatRoomOptions.value = []
@@ -850,8 +841,8 @@ const handleCustomerAdd = async () => {
   customerDialogTitle.value = '新增客户'
   customerIsEdit.value = false
   resetCustomerForm()
-  await fetchWechatRoomsForCustomer()
   customerDialogVisible.value = true
+  fetchWechatRoomsForCustomer()
 }
 
 const handleEdit = (row) => {
@@ -947,7 +938,6 @@ const handleDelete = (row) => {
 const handleCustomerEdit = async (row) => {
   customerDialogTitle.value = '编辑客户'
   customerIsEdit.value = true
-  await fetchWechatRoomsForCustomer()
   customerFormData.id = row.id
   customerFormData.customer_name = row.customer_name
   customerFormData.contact_person = row.contact_person
@@ -960,6 +950,7 @@ const handleCustomerEdit = async (row) => {
   customerFormData.status = row.status
   customerFormData.wechat_room_ids = (row.wechat_rooms || []).map(item => item.room_id)
   customerDialogVisible.value = true
+  fetchWechatRoomsForCustomer()
 }
 
 const handleCustomerBind = async (row) => {
@@ -967,8 +958,8 @@ const handleCustomerBind = async (row) => {
   bindTarget.customer_name = row.customer_name
   bindTarget.erp_customer_id = row.erp_customer_id || ''
   bindRoomIds.value = (row.wechat_rooms || []).map(r => r.room_id)
-  await fetchWechatRoomsForCustomer()
   bindDialogVisible.value = true
+  fetchWechatRoomsForCustomer()
 }
 
 const handleBindSubmit = async () => {

@@ -14,9 +14,13 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.services.erp_health import refresh_erp_health_status
 from app.services.erp_sync import (
+    _sync_module,
+    get_all_module_sync_status,
     get_erp_sync_config,
     get_sync_status,
+    is_module_syncing,
     save_erp_sync_config,
+    sync_inventory,
     sync_products,
     sync_sales_orders,
     sync_sales_shipments,
@@ -244,17 +248,24 @@ def api_sync_status() -> dict[str, Any]:
     return {"code": 200, "data": get_sync_status()}
 
 
+@router.get("/module-status", summary="查询各模块同步锁状态")
+def api_module_sync_status() -> dict[str, Any]:
+    return {"code": 200, "data": get_all_module_sync_status()}
+
+
 @router.post("/trigger", summary="手动触发全量同步")
 async def api_sync_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
     try:
         erp_client = request.app.state.erp_client
-        orders_result = await sync_sales_orders(erp_client, days_back=days_back)
-        shipments_result = await sync_sales_shipments(erp_client, days_back=days_back)
-        products_result = await sync_products(erp_client)
+        orders_result = await _sync_module("orders", sync_sales_orders(erp_client, days_back=days_back))
+        shipments_result = await _sync_module("shipments", sync_sales_shipments(erp_client, days_back=days_back))
+        products_result = await _sync_module("products", sync_products(erp_client))
+        inventory_result = await _sync_module("inventory", sync_inventory(erp_client))
         return {"code": 200, "message": "同步完成", "data": {
             "orders": orders_result,
             "shipments": shipments_result,
             "products": products_result,
+            "inventory": inventory_result,
         }}
     finally:
         _refresh_erp_status_background()
@@ -262,29 +273,80 @@ async def api_sync_trigger(request: Request, days_back: int = 90) -> dict[str, A
 
 @router.post("/trigger-orders", summary="手动触发销售订单同步")
 async def api_sync_orders_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
-    try:
-        erp_client = request.app.state.erp_client
-        result = await sync_sales_orders(erp_client, days_back=days_back)
-        return {"code": 200, "message": "订单同步完成", "data": result}
-    finally:
-        _refresh_erp_status_background()
+    if is_module_syncing("orders"):
+        return {"code": 200, "message": "销售订单正在同步中，请稍候", "data": {"already_syncing": True}}
+    import asyncio
+    erp_client = request.app.state.erp_client
+    asyncio.create_task(_background_sync_module("orders", sync_sales_orders(erp_client, days_back=days_back), "销售订单"))
+    return {"code": 200, "message": "同步已启动"}
 
 
 @router.post("/trigger-shipments", summary="手动触发发货单同步")
 async def api_sync_shipments_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
-    try:
-        erp_client = request.app.state.erp_client
-        result = await sync_sales_shipments(erp_client, days_back=days_back)
-        return {"code": 200, "message": "发货单同步完成", "data": result}
-    finally:
-        _refresh_erp_status_background()
+    if is_module_syncing("shipments"):
+        return {"code": 200, "message": "发货单正在同步中，请稍候", "data": {"already_syncing": True}}
+    import asyncio
+    erp_client = request.app.state.erp_client
+    asyncio.create_task(_background_sync_module("shipments", sync_sales_shipments(erp_client, days_back=days_back), "发货单"))
+    return {"code": 200, "message": "同步已启动"}
 
 
 @router.post("/trigger-products", summary="手动触发产品同步")
 async def api_sync_products_trigger(request: Request) -> dict[str, Any]:
+    if is_module_syncing("products"):
+        return {"code": 200, "message": "产品正在同步中，请稍候", "data": {"already_syncing": True}}
+    import asyncio
+    erp_client = request.app.state.erp_client
+    asyncio.create_task(_background_sync_module("products", sync_products(erp_client), "产品"))
+    return {"code": 200, "message": "同步已启动"}
+
+
+@router.post("/trigger-inventory", summary="手动触发库存同步")
+async def api_sync_inventory_trigger(request: Request) -> dict[str, Any]:
+    if is_module_syncing("inventory"):
+        return {"code": 200, "message": "库存正在同步中，请稍候", "data": {"already_syncing": True}}
+    import asyncio
+    erp_client = request.app.state.erp_client
+    asyncio.create_task(_background_sync_module("inventory", sync_inventory(erp_client), "库存"))
+    return {"code": 200, "message": "同步已启动"}
+
+
+async def _background_sync_module(module: str, coro, label: str) -> None:
+    """后台执行单模块同步（fire-and-forget），完成后刷新健康状态并写入系统消息"""
+    from app.services.system_messages import create_system_message_background
+    from app.services.system_activities import create_activity_background
     try:
-        erp_client = request.app.state.erp_client
-        result = await sync_products(erp_client)
-        return {"code": 200, "message": "产品同步完成", "data": result}
+        result = await _sync_module(module, coro)
+        if result is not None:
+            synced = result.get("synced", 0) if isinstance(result, dict) else 0
+            create_system_message_background(
+                title=f"手动同步{label}成功",
+                content=f"手动同步{label}完成，共同步 {synced} 条数据",
+                level="info",
+                source="erp_sync",
+            )
+            create_activity_background(
+                title=f"手动同步{label}成功",
+                content=f"手动同步{label}完成，共同步 {synced} 条数据",
+                type="info",
+                source="erp_sync",
+            )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).exception("[ERP Sync] %s 同步异常", label)
+        from app.services.erp_sync import _record_sync_failure_message
+        _record_sync_failure_message(label, exc)
+        create_system_message_background(
+            title=f"手动同步{label}失败",
+            content=f"手动同步{label}时发生错误：{str(exc)[:200]}",
+            level="error",
+            source="erp_sync",
+        )
+        create_activity_background(
+            title=f"手动同步{label}失败",
+            content=f"手动同步{label}时发生错误：{str(exc)[:200]}",
+            type="urgent",
+            source="erp_sync",
+        )
     finally:
         _refresh_erp_status_background()
