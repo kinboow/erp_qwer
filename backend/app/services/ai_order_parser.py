@@ -19,7 +19,32 @@ class AIOrderParserError(Exception):
     pass
 
 
-ORDER_PARSE_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客户通过企微发送的文本、图片、表格内容解析成结构化订单 JSON。
+# ==========================================================================
+# 智能体 1 — 报货验证 Agent（判断是否为报货 + 信息是否完整）
+# ==========================================================================
+ORDER_VALIDATOR_SYSTEM_PROMPT = """你是一个服装行业报货信息验证助手。
+你的唯一任务是判断客户发来的内容（文字、图片、表格）是否属于报货/下单信息。
+
+判断规则：
+1. 报货信息必须包含以下要素才算"完整"：款号（货号）、颜色、尺码、对应数量。
+2. 如果内容明确是报货/下单意图，但缺少部分要素，则 is_order=true 但 is_complete=false，并在 missing_fields 中列出缺少的要素。
+3. 如果内容完全不是报货（日常聊天、打招呼、问候、讨论非订单话题、闲聊图片、表情包等），则 is_order=false。
+4. 图片中如果能看到类似订单表格、报货清单、含有款号和数量的截图等，也算报货信息。
+5. Excel 表格摘要中如果能看到款号、颜色、尺码、数量列，也算报货信息。
+
+严格只返回 JSON，不要返回 markdown：
+{
+  "is_order": true/false,
+  "is_complete": true/false,
+  "missing_fields": ["颜色", "尺码"],
+  "reason": "简短说明判断依据"
+}
+"""
+
+# ==========================================================================
+# 智能体 2 — 订单解析 Agent（将报货内容解析为结构化 JSON）
+# ==========================================================================
+ORDER_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客户通过企微发送的文本、图片、表格内容解析成结构化订单 JSON。
 要求：
 1. 尽可能识别客户名、联系人、备注、下单日期。
 2. items 中每个款号单独成行，并识别颜色、尺码数量。
@@ -27,26 +52,26 @@ ORDER_PARSE_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客�
 4. 严格返回 JSON，不要返回 markdown。
 返回结构：
 {
-  \"customer_name\": \"\",
-  \"contact_person\": \"\",
-  \"order_date\": \"YYYY-MM-DD\",
-  \"remark\": \"\",
-  \"items\": [
+  "customer_name": "",
+  "contact_person": "",
+  "order_date": "YYYY-MM-DD",
+  "remark": "",
+  "items": [
     {
-      \"product_no\": \"\",
-      \"product_name\": \"\",
-      \"color\": \"\",
-      \"brand\": \"\",
-      \"unit\": \"件\",
-      \"price\": 0,
-      \"discount\": 1,
-      \"sizes\": [
-        {\"size\": \"S\", \"qty\": 1}
+      "product_no": "",
+      "product_name": "",
+      "color": "",
+      "brand": "",
+      "unit": "件",
+      "price": 0,
+      "discount": 1,
+      "sizes": [
+        {"size": "S", "qty": 1}
       ],
-      \"remark\": \"\"
+      "remark": ""
     }
   ],
-  \"uncertainties\": []
+  "uncertainties": []
 }
 """
 
@@ -249,12 +274,94 @@ class AIOrderParser:
                 parts.append(f"[{role}] {combined}{suffix}")
         return "\n".join(parts)[:2000]
 
+    # ------------------------------------------------------------------
+    # 智能体 1：报货验证 — 判断内容是否为报货 + 信息完整性
+    # ------------------------------------------------------------------
+    def _build_multimodal_parts(
+        self, context_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """将统一消息列表转为 OpenAI 多模态 content parts"""
+        parts: list[dict[str, Any]] = []
+        for idx, msg in enumerate(context_messages, 1):
+            msg_type = msg.get("type", "text")
+            if msg_type == "text":
+                parts.append({"type": "text", "text": f"[消息{idx}] {msg.get('content', '')}"})
+            elif msg_type == "image":
+                if msg.get("oss_url"):
+                    parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
+                    parts.append({"type": "image_url", "image_url": {"url": msg["oss_url"]}})
+                elif msg.get("base64"):
+                    mime = msg.get("mime") or "image/png"
+                    parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
+                    parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
+            elif msg_type == "file":
+                summary = msg.get("excel_summary") or msg.get("content") or ""
+                fname = msg.get("file_name") or "附件"
+                parts.append({"type": "text", "text": f"[消息{idx}] 文件 {fname}:\n{summary}"})
+        return parts
+
+    async def validate_order(
+        self,
+        context_messages: list[dict[str, Any]],
+        db: Optional[Session] = None,
+    ) -> dict[str, Any]:
+        """智能体1: 验证消息是否为报货信息及完整性。
+
+        返回:
+            {
+                "is_order": bool,
+                "is_complete": bool,
+                "missing_fields": ["颜色", ...],
+                "reason": "..."
+            }
+        """
+        cfg = self._load_config(db)
+        has_image = any(m.get("type") == "image" for m in context_messages)
+        model = cfg["vision_model"] if has_image else cfg["model"]
+
+        user_parts = self._build_multimodal_parts(context_messages)
+        if not user_parts:
+            return {"is_order": False, "is_complete": False, "missing_fields": [], "reason": "无内容"}
+
+        user_content: Any = user_parts if len(user_parts) > 1 else user_parts[0].get("text", "")
+
+        try:
+            result = await self._chat(
+                model,
+                [
+                    {"role": "system", "content": ORDER_VALIDATOR_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                db=db,
+                caller="validate_order",
+            )
+            return {
+                "is_order": bool(result.get("is_order", False)),
+                "is_complete": bool(result.get("is_complete", False)),
+                "missing_fields": list(result.get("missing_fields") or []),
+                "reason": str(result.get("reason", "")),
+            }
+        except Exception as exc:
+            logger.warning("智能体1(验证)失败: %s", exc)
+            return {"is_order": False, "is_complete": False, "missing_fields": [], "reason": f"验证异常: {exc}"}
+
+    # 向后兼容：pre_judge → validate_order
+    async def pre_judge(
+        self,
+        context_messages: list[dict[str, Any]],
+        db: Optional[Session] = None,
+    ) -> dict[str, Any]:
+        return await self.validate_order(context_messages, db=db)
+
+    # ------------------------------------------------------------------
+    # 智能体 2：订单解析 — 将内容解析为结构化 JSON
+    # ------------------------------------------------------------------
     async def parse_text(self, text: str, customer_hint: str = "", db: Optional[Session] = None) -> dict[str, Any]:
         cfg = self._load_config(db)
         return await self._chat(
             cfg["model"],
             [
-                {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
+                {"role": "system", "content": ORDER_PARSER_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": f"客户提示: {customer_hint or '无'}\n原始文本:\n{text}",
@@ -269,7 +376,7 @@ class AIOrderParser:
         return await self._chat(
             cfg["vision_model"],
             [
-                {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
+                {"role": "system", "content": ORDER_PARSER_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": [
@@ -287,7 +394,7 @@ class AIOrderParser:
         return await self._chat(
             cfg["model"],
             [
-                {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
+                {"role": "system", "content": ORDER_PARSER_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": f"文件名: {file_name}\n客户提示: {customer_hint or '无'}\n表格摘要:\n{text_summary}",
@@ -303,23 +410,23 @@ class AIOrderParser:
         customer_hint: str = "",
         db: Optional[Session] = None,
     ) -> dict[str, Any]:
-        """批量解析多条上下文消息（文字+图片混合），用于 @机器人 场景。
+        """智能体2: 批量解析多条消息为结构化订单 JSON。
 
         context_messages 每项结构:
         {
             "type": "text" | "image" | "file",
-            "content": "文字内容",               # type=text 时
-            "base64": "...",                     # type=image 时
-            "mime": "image/png",                  # type=image 时
-            "file_name": "订单.xlsx",             # type=file 时
-            "excel_summary": "表格摘要文本",       # type=file 时（已预处理）
+            "content": "文字内容",
+            "base64": "...",
+            "mime": "image/png",
+            "oss_url": "oss://...",
+            "file_name": "订单.xlsx",
+            "excel_summary": "表格摘要文本",
         }
         """
         cfg = self._load_config(db)
         has_image = any(m.get("type") == "image" for m in context_messages)
         model = cfg["vision_model"] if has_image else cfg["model"]
 
-        # 构造多模态 user content
         user_parts: list[dict[str, Any]] = []
         user_parts.append({"type": "text", "text": f"客户提示: {customer_hint or '无'}\n以下是客户在群聊中发的下单相关消息，请合并解析为一个完整订单："})
 
@@ -345,7 +452,7 @@ class AIOrderParser:
         return await self._chat(
             model,
             [
-                {"role": "system", "content": ORDER_PARSE_SYSTEM_PROMPT},
+                {"role": "system", "content": ORDER_PARSER_SYSTEM_PROMPT},
                 {"role": "user", "content": user_parts},
             ],
             db=db,

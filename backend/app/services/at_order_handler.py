@@ -1,10 +1,7 @@
 """
-群聊 @机器人 自动接单处理器
-- 检测 @机器人（at_list 中的 user_id 匹配当前实例 wxid）
-- 等待 2 分钟后采集同群前后文字消息和最近的图片/文件
-- 调用 AI 批量解析
-- 写入审核队列
-- 群内自动回复
+群聊自动接单处理器
+触发方式一: @机器人消息 → AI 预判是否含报货信息 → 含则解析
+触发方式二: 图片/文件消息（客户群内） → CDN 下载 → AI 预判 → 含则解析
 """
 
 from __future__ import annotations
@@ -36,23 +33,10 @@ from app.services.wechat_reply import send_room_at
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 配置常量（可从 ai_config 表或 .env 覆盖）
+# 配置常量
 # ---------------------------------------------------------------------------
-AT_ORDER_MAX_WAIT = 120           # 防重复触发的窗口（秒）
-
-# 报单关键词列表——消息必须包含其中之一才触发接单流程
-ORDER_KEYWORDS = [
-    "报单", "我要报单", "报货", "我要报货", "下单", "我要下单",
-    "订货", "我要订货", "补单", "补货", "加单",
-]
-
-
-def contains_order_keyword(text: str) -> bool:
-    """检测文本是否包含报单关键词"""
-    if not text:
-        return False
-    text_lower = text.strip()
-    return any(kw in text_lower for kw in ORDER_KEYWORDS)
+AT_ORDER_DEDUP_WINDOW = 30        # 同一 room+sender 防重复触发窗口（秒）
+MEDIA_DEDUP_WINDOW = 15           # 同一条媒体消息防重复窗口（秒）
 
 
 # 正在采集中的 (room_id, sender_id) → 启动时间，防重复触发
@@ -171,94 +155,9 @@ def extract_trigger_info(payload: dict[str, Any], instance_id: Optional[str] = N
 
 
 # ---------------------------------------------------------------------------
-# 上下文消息采集（等待 2 分钟后获取前后消息）
+# 媒体消息防重复：记录已处理的 message_log id
 # ---------------------------------------------------------------------------
-AT_ORDER_WAIT_SECONDS = 120   # 等待 2 分钟后再采集
-AT_ORDER_TEXT_COUNT = 4       # 前后各取 4 条文字消息
-AT_ORDER_MEDIA_COUNT = 1      # 图片/文件取离触发消息最近的 1 条
-
-
-def _query_text_before(db: Session, room_id: str, trigger_id: int, limit: int) -> list[dict[str, Any]]:
-    """查询触发消息之前的 N 条文字消息（同一群聊，不限发送人）"""
-    rows = db.execute(
-        text(
-            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
-            "FROM message_logs "
-            "WHERE room_id = :room_id AND id < :trigger_id AND message_type = 'text' "
-            "ORDER BY id DESC LIMIT :limit"
-        ),
-        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
-    ).mappings().all()
-    return [dict(r) for r in reversed(rows)]
-
-
-def _query_text_after(db: Session, room_id: str, trigger_id: int, limit: int) -> list[dict[str, Any]]:
-    """查询触发消息之后的 N 条文字消息（同一群聊，不限发送人）"""
-    rows = db.execute(
-        text(
-            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
-            "FROM message_logs "
-            "WHERE room_id = :room_id AND id > :trigger_id AND message_type = 'text' "
-            "ORDER BY id ASC LIMIT :limit"
-        ),
-        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
-    ).mappings().all()
-    return [dict(r) for r in rows]
-
-
-def _query_nearest_media(db: Session, room_id: str, trigger_id: int, limit: int) -> list[dict[str, Any]]:
-    """查询前后消息中离触发消息最近的图片/文件消息"""
-    # 向前找
-    before = db.execute(
-        text(
-            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
-            "FROM message_logs "
-            "WHERE room_id = :room_id AND id < :trigger_id AND message_type IN ('image', 'file') "
-            "ORDER BY id DESC LIMIT :limit"
-        ),
-        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
-    ).mappings().all()
-    # 向后找
-    after = db.execute(
-        text(
-            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
-            "FROM message_logs "
-            "WHERE room_id = :room_id AND id > :trigger_id AND message_type IN ('image', 'file') "
-            "ORDER BY id ASC LIMIT :limit"
-        ),
-        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
-    ).mappings().all()
-
-    # 合并后按距离触发消息 id 的远近排序，取最近的 limit 条
-    candidates = [dict(r) for r in before] + [dict(r) for r in after]
-    candidates.sort(key=lambda m: abs(m["id"] - trigger_id))
-    return candidates[:limit]
-
-
-async def _collect_context(
-    room_id: str, sender_id: str, trigger_msg_id: int
-) -> list[dict[str, Any]]:
-    """等待 2 分钟后，获取触发消息前后的文字消息和最近的图片/文件消息"""
-    logger.info("@采集: 等待 %d 秒后采集上下文 room=%s", AT_ORDER_WAIT_SECONDS, room_id)
-    await asyncio.sleep(AT_ORDER_WAIT_SECONDS)
-
-    db = SessionLocal()
-    try:
-        text_before = _query_text_before(db, room_id, trigger_msg_id, AT_ORDER_TEXT_COUNT)
-        text_after = _query_text_after(db, room_id, trigger_msg_id, AT_ORDER_TEXT_COUNT)
-        media_msgs = _query_nearest_media(db, room_id, trigger_msg_id, AT_ORDER_MEDIA_COUNT)
-
-        # 合并去重，按 id 排序
-        all_msgs: dict[int, dict[str, Any]] = {}
-        for msg in text_before + text_after + media_msgs:
-            all_msgs[msg["id"]] = msg
-
-        collected = sorted(all_msgs.values(), key=lambda m: m["id"])
-        logger.info("@采集: 采集到 %d 条消息（前%d文字 + 后%d文字 + %d媒体）room=%s",
-                     len(collected), len(text_before), len(text_after), len(media_msgs), room_id)
-        return collected
-    finally:
-        db.close()
+_processed_media: dict[int, float] = {}   # msg_log_id → monotonic timestamp
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +668,122 @@ def _write_review(
 
 
 # ---------------------------------------------------------------------------
-# 主入口
+# 共享：解析 + 校验 + 写审核 + 群回复
+# ---------------------------------------------------------------------------
+async def _process_order(
+    ai_inputs: list[dict[str, Any]],
+    customer: dict[str, Any],
+    room_id: str,
+    sender_id: str,
+    instance_id: str,
+    trigger_msg_id: int,
+    source_label: str = "接单",
+) -> None:
+    """AI 解析 → 库存校验 → 写审核 → 群回复。@接单和媒体接单共用。"""
+    context_summary = _build_context_summary(ai_inputs)
+    customer_hint = customer.get("customer_name") or ""
+
+    db = SessionLocal()
+    try:
+        mapping_hint = _build_name_mapping_hints(db)
+        full_hint = f"{customer_hint}\n{mapping_hint}" if mapping_hint else customer_hint
+
+        parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=full_hint, db=db)
+        normalized = _normalize_order(parsed, customer_hint)
+        logger.info("%s: 第一次解析完成 room=%s items=%d", source_label, room_id, len(normalized.get("items") or []))
+
+        from app.services.erp_sync import ensure_tables
+        ensure_tables(db)
+        validation = validate_order_against_inventory(db, normalized)
+
+        final_order = normalized
+        if not validation["all_valid"]:
+            logger.info("%s: 库存校验未通过，启动二次解析 room=%s", source_label, room_id)
+            try:
+                reparsed = await reparse_with_product_hints(
+                    ai_inputs, normalized, validation, customer_hint=customer_hint, db=db,
+                )
+                final_order = _normalize_order(reparsed, customer_hint)
+            except Exception as reparse_exc:
+                logger.warning("%s: 二次解析失败 room=%s: %s", source_label, room_id, reparse_exc)
+
+        review_id = _write_review(
+            db, final_order, customer, room_id, sender_id, instance_id, context_summary,
+            parse_status="success",
+        )
+
+        ensure_at_order_tables(db)
+        db.execute(
+            text(
+                "INSERT INTO at_order_contexts ("
+                "room_id, sender_id, customer_id, customer_name, instance_id, "
+                "trigger_message_id, context_message_ids, context_summary, review_id, status"
+                ") VALUES ("
+                ":room_id, :sender_id, :customer_id, :customer_name, :instance_id, "
+                ":trigger_message_id, :context_message_ids, :context_summary, :review_id, 'success'"
+                ")"
+            ),
+            {
+                "room_id": room_id,
+                "sender_id": sender_id,
+                "customer_id": customer.get("id"),
+                "customer_name": customer.get("customer_name") or "",
+                "instance_id": instance_id,
+                "trigger_message_id": trigger_msg_id,
+                "context_message_ids": json.dumps([trigger_msg_id]),
+                "context_summary": context_summary[:2000],
+                "review_id": review_id,
+            },
+        )
+        db.commit()
+
+        items = final_order.get("items") or []
+        total_qty = sum(sum(s.get("qty", 0) for s in it.get("sizes", [])) for it in items)
+        product_list = ", ".join(it.get("product_no", "?") for it in items[:5])
+        if len(items) > 5:
+            product_list += f"...等{len(items)}款"
+        reply = f"✅ 订单已识别：{product_list} 共{total_qty}件，已提交审核，请等待确认"
+        await send_room_at(db, room_id, reply, at_list=[sender_id])
+
+    except (AIOrderParserError, Exception) as exc:
+        logger.error("%s: AI 解析失败 room=%s sender=%s: %s", source_label, room_id, sender_id, exc)
+        try:
+            _write_review(
+                db, {}, customer, room_id, sender_id, instance_id, context_summary,
+                parse_status="failed", ai_error=str(exc),
+            )
+            ensure_at_order_tables(db)
+            db.execute(
+                text(
+                    "INSERT INTO at_order_contexts ("
+                    "room_id, sender_id, customer_id, customer_name, instance_id, "
+                    "trigger_message_id, context_summary, status, error_message"
+                    ") VALUES ("
+                    ":room_id, :sender_id, :customer_id, :customer_name, :instance_id, "
+                    ":trigger_message_id, :context_summary, 'failed', :error_message"
+                    ")"
+                ),
+                {
+                    "room_id": room_id,
+                    "sender_id": sender_id,
+                    "customer_id": customer.get("id"),
+                    "customer_name": customer.get("customer_name") or "",
+                    "instance_id": instance_id,
+                    "trigger_message_id": trigger_msg_id,
+                    "context_summary": context_summary[:2000],
+                    "error_message": str(exc)[:2000],
+                },
+            )
+            db.commit()
+        except Exception:
+            pass
+        await send_room_at(db, room_id, "⚠️ 无法识别订单内容，请重新发送或联系客服", at_list=[sender_id])
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 主入口 1：@机器人 触发
 # ---------------------------------------------------------------------------
 async def handle_at_order(
     room_id: str,
@@ -777,196 +791,186 @@ async def handle_at_order(
     customer: dict[str, Any],
     trigger_msg_id: int,
     instance_id: str = "",
+    trigger_content: str = "",
 ) -> None:
-    """@机器人 触发后的完整处理流程（异步任务）"""
+    """@机器人消息 → AI 预判 → 含报货信息则解析"""
     session_key = (room_id, sender_id)
 
-    # 防重复
     now = time.monotonic()
     if session_key in _active_sessions:
-        if now - _active_sessions[session_key] < AT_ORDER_MAX_WAIT:
-            logger.info("@接单: 已有活跃采集会话 room=%s sender=%s，跳过", room_id, sender_id)
+        if now - _active_sessions[session_key] < AT_ORDER_DEDUP_WINDOW:
+            logger.info("@接单: 防重复跳过 room=%s sender=%s", room_id, sender_id)
             return
     _active_sessions[session_key] = now
 
     try:
-        logger.info("@接单: 开始处理 room=%s sender=%s customer=%s", room_id, sender_id, customer.get("customer_name"))
+        logger.info("@接单: 收到 @消息 room=%s sender=%s content=%s",
+                     room_id, sender_id, (trigger_content or "")[:80])
 
-        # 1. 群内回复「已收到」
-        db = SessionLocal()
-        try:
-            await send_room_at(db, room_id, "📋 已收到下单消息，正在采集上下文并解析...", at_list=[sender_id])
-        finally:
-            db.close()
-
-        # 2. 等待 2 分钟后采集触发消息前后的上下文
-        collected_msgs = await _collect_context(room_id, sender_id, trigger_msg_id)
-        if not collected_msgs:
-            logger.warning("@接单: 未采集到任何消息 room=%s sender=%s", room_id, sender_id)
+        if not trigger_content or not trigger_content.strip():
+            logger.info("@接单: @消息无文字内容，跳过 room=%s", room_id)
             return
 
-        logger.info("@接单: 采集到 %d 条消息 room=%s sender=%s", len(collected_msgs), room_id, sender_id)
-
-        # 3. 转换为 AI 输入格式
-        ai_inputs = [_msg_to_ai_input(msg) for msg in collected_msgs]
-
-        # 4. 下载需要的附件（图片/文件）
+        # 1. 智能体1：验证这条 @消息是否包含报货信息
+        ai_input_for_judge = [{"type": "text", "content": trigger_content}]
         db = SessionLocal()
         try:
-            for inp in ai_inputs:
-                if inp.get("type") in ("image", "file") and not inp.get("base64"):
-                    await _download_attachment_for_msg(db, inp, room_id, instance_id)
+            validation = await ai_order_parser.validate_order(ai_input_for_judge, db=db)
         finally:
             db.close()
 
-        # 4.5 上传图片到千问 OSS，获取 oss:// URL（避免 base64 过大）
-        db = SessionLocal()
-        try:
-            cfg = ai_order_parser._load_config(db)
-            vision_model = cfg.get("vision_model") or cfg.get("model") or "qwen3.5-flash"
-            for inp in ai_inputs:
-                if inp.get("type") == "image" and inp.get("base64") and not inp.get("oss_url"):
-                    try:
-                        img_bytes = base64.b64decode(inp["base64"])
-                        ext = (inp.get("mime") or "image/png").split("/")[-1]
-                        fname = f"order_img_{id(inp)}.{ext}"
-                        oss_url = await ai_order_parser.upload_file(img_bytes, fname, vision_model, db=db)
-                        inp["oss_url"] = oss_url
-                        logger.info("@接单: 图片已上传 OSS: %s", oss_url)
-                    except Exception as upload_exc:
-                        logger.warning("@接单: 图片上传 OSS 失败，回退 base64: %s", upload_exc)
-        finally:
-            db.close()
-
-        # 清理内部字段
-        for inp in ai_inputs:
-            inp.pop("_payload", None)
-            inp.pop("_msg_id", None)
-
-        # 过滤无内容的消息
-        valid_inputs = [
-            inp for inp in ai_inputs
-            if inp.get("content") or inp.get("base64") or inp.get("oss_url") or inp.get("excel_summary")
-        ]
-        if not valid_inputs:
-            logger.warning("@接单: 无有效消息内容 room=%s sender=%s", room_id, sender_id)
+        if not validation.get("is_order"):
+            logger.info("@接单: 智能体1判定非报单 room=%s reason=%s", room_id, validation.get("reason"))
             return
 
-        # 5. AI 第一次解析
-        context_summary = _build_context_summary(valid_inputs)
-        customer_hint = customer.get("customer_name") or ""
+        logger.info("@接单: 智能体1判定为报单 room=%s complete=%s missing=%s reason=%s",
+                     room_id, validation.get("is_complete"), validation.get("missing_fields"), validation.get("reason"))
 
-        db = SessionLocal()
-        try:
-            # 加载名称映射提示给 AI
-            mapping_hint = _build_name_mapping_hints(db)
-            full_hint = customer_hint
-            if mapping_hint:
-                full_hint = f"{customer_hint}\n{mapping_hint}" if customer_hint else mapping_hint
+        # 信息不完整时提醒客户补充
+        if not validation.get("is_complete"):
+            missing = validation.get("missing_fields") or []
+            missing_str = "、".join(missing) if missing else "部分信息"
+            db = SessionLocal()
+            try:
+                await send_room_at(db, room_id,
+                    f"📋 检测到报货信息，但缺少：{missing_str}，请补充完整后重新发送",
+                    at_list=[sender_id])
+            finally:
+                db.close()
+            return
 
-            parsed = await ai_order_parser.parse_batch(valid_inputs, customer_hint=full_hint, db=db)
-            normalized = _normalize_order(parsed, customer_hint)
-            logger.info("@接单: 第一次解析完成 room=%s items=%d", room_id, len(normalized.get("items") or []))
-
-            # 6. 库存校验：货号+颜色+尺码
-            from app.services.erp_sync import ensure_tables
-            ensure_tables(db)
-            validation = validate_order_against_inventory(db, normalized)
-
-            final_order = normalized
-            if not validation["all_valid"]:
-                logger.info("@接单: 库存校验未通过，启动二次解析 room=%s", room_id)
-                try:
-                    reparsed = await reparse_with_product_hints(
-                        valid_inputs, normalized, validation,
-                        customer_hint=customer_hint, db=db,
-                    )
-                    final_order = _normalize_order(reparsed, customer_hint)
-                    logger.info("@接单: 二次解析完成 room=%s items=%d", room_id, len(final_order.get("items") or []))
-                except Exception as reparse_exc:
-                    logger.warning("@接单: 二次解析失败，使用第一次结果 room=%s: %s", room_id, reparse_exc)
-            else:
-                logger.info("@接单: 库存校验全部通过 room=%s", room_id)
-
-            # 7. 写入审核队列
-            review_id = _write_review(
-                db, final_order, customer, room_id, sender_id, instance_id, context_summary,
-                parse_status="success",
-            )
-
-            # 8. 写入 at_order_contexts
-            ensure_at_order_tables(db)
-            collected_ids = [msg["id"] for msg in collected_msgs]
-            db.execute(
-                text(
-                    "INSERT INTO at_order_contexts ("
-                    "room_id, sender_id, customer_id, customer_name, instance_id, "
-                    "trigger_message_id, context_message_ids, context_summary, review_id, status"
-                    ") VALUES ("
-                    ":room_id, :sender_id, :customer_id, :customer_name, :instance_id, "
-                    ":trigger_message_id, :context_message_ids, :context_summary, :review_id, 'success'"
-                    ")"
-                ),
-                {
-                    "room_id": room_id,
-                    "sender_id": sender_id,
-                    "customer_id": customer.get("id"),
-                    "customer_name": customer.get("customer_name") or "",
-                    "instance_id": instance_id,
-                    "trigger_message_id": trigger_msg_id,
-                    "context_message_ids": json.dumps(collected_ids),
-                    "context_summary": context_summary[:2000],
-                    "review_id": review_id,
-                },
-            )
-            db.commit()
-
-            # 9. 群内回复解析结果
-            items = final_order.get("items") or []
-            total_qty = sum(sum(s.get("qty", 0) for s in it.get("sizes", [])) for it in items)
-            product_list = ", ".join(it.get("product_no", "?") for it in items[:5])
-            if len(items) > 5:
-                product_list += f"...等{len(items)}款"
-            reply = f"✅ 订单已识别：{product_list} 共{total_qty}件，已提交审核，请等待确认"
-            await send_room_at(db, room_id, reply, at_list=[sender_id])
-
-        except (AIOrderParserError, Exception) as exc:
-            logger.error("@接单: AI 解析失败 room=%s sender=%s: %s", room_id, sender_id, exc)
-            # 写入失败记录
-            _write_review(
-                db, {}, customer, room_id, sender_id, instance_id, context_summary,
-                parse_status="failed", ai_error=str(exc),
-            )
-            ensure_at_order_tables(db)
-            collected_ids = [msg["id"] for msg in collected_msgs]
-            db.execute(
-                text(
-                    "INSERT INTO at_order_contexts ("
-                    "room_id, sender_id, customer_id, customer_name, instance_id, "
-                    "trigger_message_id, context_message_ids, context_summary, status, error_message"
-                    ") VALUES ("
-                    ":room_id, :sender_id, :customer_id, :customer_name, :instance_id, "
-                    ":trigger_message_id, :context_message_ids, :context_summary, 'failed', :error_message"
-                    ")"
-                ),
-                {
-                    "room_id": room_id,
-                    "sender_id": sender_id,
-                    "customer_id": customer.get("id"),
-                    "customer_name": customer.get("customer_name") or "",
-                    "instance_id": instance_id,
-                    "trigger_message_id": trigger_msg_id,
-                    "context_message_ids": json.dumps(collected_ids),
-                    "context_summary": context_summary[:2000],
-                    "error_message": str(exc)[:2000],
-                },
-            )
-            db.commit()
-            await send_room_at(db, room_id, "⚠️ 无法识别订单内容，请重新发送或联系客服", at_list=[sender_id])
-        finally:
-            db.close()
+        # 2. 智能体2：完整解析
+        valid_inputs = [{"type": "text", "content": trigger_content}]
+        await _process_order(
+            valid_inputs, customer, room_id, sender_id, instance_id, trigger_msg_id,
+            source_label="@接单",
+        )
 
     except Exception as exc:
         logger.exception("@接单: 未知错误 room=%s sender=%s: %s", room_id, sender_id, exc)
     finally:
         _active_sessions.pop(session_key, None)
+
+
+# ---------------------------------------------------------------------------
+# 主入口 2：图片/文件消息自动触发
+# ---------------------------------------------------------------------------
+async def handle_media_order(
+    room_id: str,
+    sender_id: str,
+    customer: dict[str, Any],
+    msg_log_id: int,
+    instance_id: str = "",
+    payload: dict[str, Any] | None = None,
+    message_type: str = "image",
+) -> None:
+    """客户群内收到图片/文件 → CDN 下载 → AI 预判 → 含报货信息则解析"""
+    if not payload:
+        return
+
+    # 防重复
+    now = time.monotonic()
+    if msg_log_id in _processed_media:
+        if now - _processed_media[msg_log_id] < MEDIA_DEDUP_WINDOW:
+            return
+    _processed_media[msg_log_id] = now
+    # 清理过期记录
+    cutoff = now - 300
+    for k in [k for k, v in _processed_media.items() if v < cutoff]:
+        _processed_media.pop(k, None)
+
+    try:
+        logger.info("媒体接单: 收到 %s room=%s sender=%s log_id=%d",
+                     message_type, room_id, sender_id, msg_log_id)
+
+        # 1. 构造 ai_input 并下载附件
+        ai_input: dict[str, Any] = {
+            "type": message_type,
+            "_payload": payload,
+            "_msg_id": msg_log_id,
+        }
+        if message_type == "image":
+            ai_input["mime"] = "image/png"
+        else:
+            # 提取文件名，仅处理 Excel 文件
+            msg_data = (payload.get("message") or {}).get("data") or payload.get("data") or {}
+            if isinstance(msg_data, str):
+                msg_data = {}
+            fname = str(
+                msg_data.get("file_name") or payload.get("file_name") or payload.get("filename") or ""
+            )
+            if not fname.lower().endswith((".xlsx", ".xls")):
+                logger.info("媒体接单: 非 Excel 文件，跳过 room=%s file=%s", room_id, fname)
+                return
+            ai_input["file_name"] = fname
+            ai_input["content"] = fname
+
+        db = SessionLocal()
+        try:
+            await _download_attachment_for_msg(db, ai_input, room_id, instance_id)
+        finally:
+            db.close()
+
+        if not ai_input.get("base64") and not ai_input.get("excel_summary"):
+            logger.info("媒体接单: 下载失败或无内容 room=%s log_id=%d", room_id, msg_log_id)
+            return
+
+        # 2. 图片上传 OSS
+        if message_type == "image" and ai_input.get("base64"):
+            db = SessionLocal()
+            try:
+                cfg = ai_order_parser._load_config(db)
+                vision_model = cfg.get("vision_model") or cfg.get("model") or "qwen3.5-flash"
+                img_bytes = base64.b64decode(ai_input["base64"])
+                ext = (ai_input.get("mime") or "image/png").split("/")[-1]
+                fname = f"media_order_{msg_log_id}.{ext}"
+                oss_url = await ai_order_parser.upload_file(img_bytes, fname, vision_model, db=db)
+                ai_input["oss_url"] = oss_url
+                logger.info("媒体接单: 图片已上传 OSS: %s", oss_url)
+            except Exception as upload_exc:
+                logger.warning("媒体接单: 图片上传 OSS 失败，回退 base64: %s", upload_exc)
+            finally:
+                db.close()
+
+        # 清理内部字段
+        ai_input.pop("_payload", None)
+        ai_input.pop("_msg_id", None)
+
+        # 3. 智能体1：验证是否为报货信息
+        ai_input_for_judge = [ai_input]
+        db = SessionLocal()
+        try:
+            validation = await ai_order_parser.validate_order(ai_input_for_judge, db=db)
+        finally:
+            db.close()
+
+        if not validation.get("is_order"):
+            logger.info("媒体接单: 智能体1判定非报单 room=%s log_id=%d reason=%s",
+                         room_id, msg_log_id, validation.get("reason"))
+            return
+
+        logger.info("媒体接单: 智能体1判定为报单 room=%s log_id=%d complete=%s missing=%s reason=%s",
+                     room_id, msg_log_id, validation.get("is_complete"),
+                     validation.get("missing_fields"), validation.get("reason"))
+
+        # 信息不完整时提醒客户补充
+        if not validation.get("is_complete"):
+            missing = validation.get("missing_fields") or []
+            missing_str = "、".join(missing) if missing else "部分信息"
+            db = SessionLocal()
+            try:
+                await send_room_at(db, room_id,
+                    f"📋 检测到报货信息，但缺少：{missing_str}，请补充完整后重新发送",
+                    at_list=[sender_id])
+            finally:
+                db.close()
+            return
+
+        # 4. 智能体2：完整解析
+        await _process_order(
+            [ai_input], customer, room_id, sender_id, instance_id, msg_log_id,
+            source_label="媒体接单",
+        )
+
+    except Exception as exc:
+        logger.exception("媒体接单: 未知错误 room=%s log_id=%d: %s", room_id, msg_log_id, exc)

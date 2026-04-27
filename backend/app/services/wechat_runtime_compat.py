@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.services.downstream_orders import create_review_from_callback, resolve_customer_by_room
 from app.services.message_logs import record_message_log
-from app.services.at_order_handler import contains_order_keyword, extract_trigger_info, handle_at_order, is_at_bot
+from app.services.at_order_handler import extract_trigger_info, handle_at_order, handle_media_order, is_at_bot
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,7 @@ async def ingest_runtime_message(
 
     # 检查发送者是否为员工账号——如果是则跳过订单处理，仅保留日志
     sender_is_employee = False
+    _sender_id = ""
     try:
         _sender_id = _safe_text(
             (normalized_payload.get("message") or {}).get("data", {}).get("sender")
@@ -132,8 +133,9 @@ async def ingest_runtime_message(
             except Exception:
                 pass
 
-    # @机器人 自动接单检测（员工消息也跳过）
+    # @机器人 自动接单检测（员工消息跳过，不再要求关键词，AI 预判）
     at_order_triggered = False
+    media_order_triggered = False
     try:
         bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
         if not sender_is_employee and bot_wxid and is_at_bot(normalized_payload, bot_wxid):
@@ -141,7 +143,7 @@ async def ingest_runtime_message(
             trigger_room_id = trigger_info.get("room_id") or ""
             trigger_sender_id = trigger_info.get("sender_id") or ""
             trigger_content = trigger_info.get("content") or ""
-            if trigger_room_id and trigger_sender_id and contains_order_keyword(trigger_content):
+            if trigger_room_id and trigger_sender_id:
                 customer = resolve_customer_by_room(db, trigger_room_id, resolved_instance_id)
                 if customer:
                     trigger_msg_id = (log_result or {}).get("id") or 0
@@ -151,12 +153,63 @@ async def ingest_runtime_message(
                         customer=dict(customer),
                         trigger_msg_id=trigger_msg_id,
                         instance_id=trigger_info.get("instance_id") or "",
+                        trigger_content=trigger_content,
                     ))
                     at_order_triggered = True
-                    logger.info("@接单: 已触发 room=%s sender=%s customer=%s",
-                                trigger_room_id, trigger_sender_id, customer.get("customer_name"))
+                    logger.info("@接单: 已触发（AI将预判）room=%s sender=%s",
+                                trigger_room_id, trigger_sender_id)
     except Exception as exc:
         logger.warning("@接单检测异常: %s", exc)
+
+    # 图片/文件自动接单检测（客户群内非员工消息）
+    # 图片：直接触发；文件：仅 Excel（.xlsx/.xls）触发，其余忽略
+    if not sender_is_employee and not at_order_triggered:
+        try:
+            log_msg_type = str((log_result or {}).get("message_type") or "").lower()
+            is_image = log_msg_type in ("image", "img", "picture")
+            is_file = log_msg_type == "file"
+
+            should_trigger = False
+            media_type = "image"
+            if is_image:
+                should_trigger = True
+                media_type = "image"
+            elif is_file:
+                # 仅 Excel 文件触发，提取文件名判断扩展名
+                _content_preview = str((log_result or {}).get("content_preview") or "").lower()
+                _msg_data = (normalized_payload.get("message") or {}).get("data") or normalized_payload.get("data") or {}
+                if isinstance(_msg_data, str):
+                    _msg_data = {}
+                _file_name = str(
+                    _msg_data.get("file_name") or _msg_data.get("filename")
+                    or normalized_payload.get("file_name") or normalized_payload.get("filename")
+                    or _content_preview or ""
+                ).lower()
+                if _file_name.endswith((".xlsx", ".xls")):
+                    should_trigger = True
+                    media_type = "file"
+
+            if should_trigger:
+                log_room_id = str((log_result or {}).get("room_id") or "").strip()
+                log_sender_id = str((log_result or {}).get("sender_id") or _sender_id or "").strip()
+                if log_room_id:
+                    customer = resolve_customer_by_room(db, log_room_id, resolved_instance_id)
+                    if customer:
+                        log_id = (log_result or {}).get("id") or 0
+                        asyncio.create_task(handle_media_order(
+                            room_id=log_room_id,
+                            sender_id=log_sender_id,
+                            customer=dict(customer),
+                            msg_log_id=log_id,
+                            instance_id=resolved_instance_id,
+                            payload=normalized_payload,
+                            message_type=media_type,
+                        ))
+                        media_order_triggered = True
+                        logger.info("媒体接单: 已触发（AI将预判）room=%s type=%s",
+                                    log_room_id, media_type)
+        except Exception as exc:
+            logger.warning("媒体接单检测异常: %s", exc)
 
     return {
         "instanceId": resolved_instance_id,
@@ -165,4 +218,5 @@ async def ingest_runtime_message(
         "log": log_result,
         "review": review_result,
         "at_order_triggered": at_order_triggered,
+        "media_order_triggered": media_order_triggered,
     }
