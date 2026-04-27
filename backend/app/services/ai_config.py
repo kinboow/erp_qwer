@@ -23,11 +23,31 @@ CREATE TABLE IF NOT EXISTS ai_config (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
+_DDL_AI_CALL_LOGS = """
+CREATE TABLE IF NOT EXISTS ai_call_logs (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    called_at       DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '调用时间',
+    model           VARCHAR(200) NOT NULL DEFAULT '' COMMENT '模型名称',
+    caller          VARCHAR(200) NOT NULL DEFAULT '' COMMENT '调用来源',
+    prompt_tokens   INT UNSIGNED DEFAULT 0 COMMENT 'prompt token 数',
+    completion_tokens INT UNSIGNED DEFAULT 0 COMMENT 'completion token 数',
+    total_tokens    INT UNSIGNED DEFAULT 0 COMMENT '总 token 数',
+    duration_ms     INT UNSIGNED DEFAULT 0 COMMENT '耗时(毫秒)',
+    status          VARCHAR(20) NOT NULL DEFAULT 'success' COMMENT 'success/error',
+    error_message   TEXT NULL COMMENT '错误信息',
+    request_summary TEXT NULL COMMENT '请求摘要',
+    response_summary TEXT NULL COMMENT '响应摘要',
+    INDEX idx_called_at (called_at),
+    INDEX idx_caller (caller),
+    INDEX idx_status (status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
 _AI_CONFIG_DEFAULTS: dict[str, str] = {
-    "ai_base_url": "https://open.bigmodel.cn/api/paas/v4",
+    "ai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "ai_api_key": "",
-    "ai_model": "glm-4.6v-flash",
-    "ai_vision_model": "glm-4.6v-flash",
+    "ai_model": "qwen3.5-flash",
+    "ai_vision_model": "qwen3.5-flash",
     "ai_temperature": "0.1",
     "ai_enabled": "true",
 }
@@ -35,7 +55,45 @@ _AI_CONFIG_DEFAULTS: dict[str, str] = {
 
 def ensure_ai_config_table(db: Session) -> None:
     db.execute(text(_DDL_AI_CONFIG))
+    db.execute(text(_DDL_AI_CALL_LOGS))
     db.commit()
+
+
+def log_ai_call(
+    db: Session,
+    *,
+    model: str = "",
+    caller: str = "",
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    duration_ms: int = 0,
+    status: str = "success",
+    error_message: str = "",
+    request_summary: str = "",
+    response_summary: str = "",
+) -> None:
+    """记录一次 AI 调用日志到数据库"""
+    try:
+        db.execute(text(
+            "INSERT INTO ai_call_logs "
+            "(model, caller, prompt_tokens, completion_tokens, total_tokens, duration_ms, status, error_message, request_summary, response_summary) "
+            "VALUES (:model, :caller, :pt, :ct, :tt, :dur, :status, :err, :req, :resp)"
+        ), {
+            "model": model[:200],
+            "caller": caller[:200],
+            "pt": prompt_tokens,
+            "ct": completion_tokens,
+            "tt": total_tokens,
+            "dur": duration_ms,
+            "status": status[:20],
+            "err": error_message[:2000] if error_message else None,
+            "req": request_summary[:2000] if request_summary else None,
+            "resp": response_summary[:2000] if response_summary else None,
+        })
+        db.commit()
+    except Exception as exc:
+        logger.warning("写入 AI 调用日志失败: %s", exc)
 
 
 def get_ai_config(db: Session) -> dict[str, Any]:

@@ -52,10 +52,13 @@
         </el-table-column>
         <el-table-column label="尺码" prop="spec" min-width="120" show-overflow-tooltip />
         <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
-        <el-table-column label="操作" width="180" fixed="right" align="center">
+        <el-table-column label="操作" width="250" fixed="right" align="center">
           <template #default="{ row }">
             <el-button type="primary" link size="small" @click="viewDetail(row)">查看详情</el-button>
             <el-button type="primary" link size="small" @click="viewInventory(row)">查看库存</el-button>
+            <el-button type="warning" link size="small" @click="openMappingDialog(row)">
+              名称映射<el-badge v-if="row.mapping_count" :value="row.mapping_count" :max="99" class="mapping-badge" />
+            </el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -73,6 +76,37 @@
         />
       </div>
     </div>
+
+    <!-- 名称映射弹窗 -->
+    <el-dialog v-model="mappingVisible" :title="`名称映射 — ${mappingProductNo}`" width="560px" destroy-on-close>
+      <div class="mapping-add-row">
+        <el-input
+          v-model="newAliasName"
+          placeholder="输入映射名称后回车添加"
+          clearable
+          style="flex: 1"
+          @keyup.enter="handleAddMapping"
+        />
+        <el-button type="primary" :loading="addingMapping" @click="handleAddMapping">添加</el-button>
+      </div>
+      <el-table :data="mappingList" v-loading="mappingLoading" stripe class="lark-table" style="margin-top: 12px" empty-text="暂无映射名称">
+        <el-table-column type="index" label="#" width="50" align="center" />
+        <el-table-column label="映射名称" prop="alias_name" min-width="200" />
+        <el-table-column label="添加时间" prop="created_at" width="170" />
+        <el-table-column label="操作" width="80" align="center">
+          <template #default="{ row }">
+            <el-popconfirm title="确定删除此映射？" @confirm="handleDeleteMapping(row.id)">
+              <template #reference>
+                <el-button type="danger" link size="small">删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="mappingVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 产品详情弹窗 -->
     <el-dialog v-model="detailVisible" title="产品详情" width="640px" destroy-on-close>
@@ -114,7 +148,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Search, Refresh } from '@element-plus/icons-vue'
-import { getProducts, syncProducts } from '@/api/products'
+import { getProducts, syncProducts, getNameMappings, addNameMapping, deleteNameMapping } from '@/api/products'
 import { useSyncStatus } from '@/composables/useSyncStatus'
 
 const route = useRoute()
@@ -125,6 +159,13 @@ const allProducts = ref([])
 const total = ref(0)
 const detailVisible = ref(false)
 const detailData = ref({})
+
+const mappingVisible = ref(false)
+const mappingProductNo = ref('')
+const mappingList = ref([])
+const mappingLoading = ref(false)
+const newAliasName = ref('')
+const addingMapping = ref(false)
 
 const filter = reactive({
   keyword: '',
@@ -186,6 +227,57 @@ async function fetchProducts() {
 function viewDetail(row) {
   detailData.value = { ...row }
   detailVisible.value = true
+}
+
+async function openMappingDialog(row) {
+  mappingProductNo.value = row.product_no
+  mappingVisible.value = true
+  newAliasName.value = ''
+  await fetchMappings()
+}
+
+async function fetchMappings() {
+  mappingLoading.value = true
+  try {
+    const res = await getNameMappings(mappingProductNo.value)
+    mappingList.value = res.data || []
+  } catch {
+    mappingList.value = []
+  } finally {
+    mappingLoading.value = false
+  }
+}
+
+async function handleAddMapping() {
+  const name = newAliasName.value.trim()
+  if (!name) return
+  addingMapping.value = true
+  try {
+    const res = await addNameMapping(mappingProductNo.value, name)
+    if (res.code === 200) {
+      ElMessage.success('添加成功')
+      newAliasName.value = ''
+      await fetchMappings()
+      fetchProducts()
+    } else {
+      ElMessage.warning(res.message || '添加失败')
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '添加失败')
+  } finally {
+    addingMapping.value = false
+  }
+}
+
+async function handleDeleteMapping(id) {
+  try {
+    await deleteNameMapping(id)
+    ElMessage.success('已删除')
+    await fetchMappings()
+    fetchProducts()
+  } catch {
+    ElMessage.error('删除失败')
+  }
 }
 
 function viewInventory(row) {
@@ -320,5 +412,23 @@ onMounted(() => {
 .price-text {
   color: #f56c6c;
   font-weight: 600;
+}
+
+.mapping-add-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.mapping-badge {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+:deep(.mapping-badge .el-badge__content) {
+  font-size: 10px;
+  height: 16px;
+  line-height: 16px;
+  padding: 0 4px;
 }
 </style>

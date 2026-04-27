@@ -156,3 +156,29 @@ export const saveWechatGlobalConfig = (data) => {
     data
   })
 }
+
+// 获取所有客户群去重成员
+export const getCustomerRoomMembers = () => {
+  return request({
+    url: '/api/wechat/customer-room-members',
+    method: 'get',
+    timeout: 60000
+  })
+}
+
+// 获取已标记的员工企微账号
+export const getEmployeeAccounts = () => {
+  return request({
+    url: '/api/wechat/employee-accounts',
+    method: 'get'
+  })
+}
+
+// 保存员工企微账号
+export const saveEmployeeAccounts = (accounts) => {
+  return request({
+    url: '/api/wechat/employee-accounts',
+    method: 'post',
+    data: { accounts }
+  })
+}

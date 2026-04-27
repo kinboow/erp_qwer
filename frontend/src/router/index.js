@@ -66,9 +66,25 @@ const routes = [
       },
       {
         path: 'external-config',
-        name: 'ExternalConfig',
+        redirect: '/config-wechat',
+      },
+      {
+        path: 'config-wechat',
+        name: 'ConfigWechat',
         component: () => import('@/views/system/ExternalConfig.vue'),
-        meta: { title: '外部服务配置' }
+        meta: { title: '外部服务配置', tab: 'wechat' }
+      },
+      {
+        path: 'config-erp',
+        name: 'ConfigErp',
+        component: () => import('@/views/system/ExternalConfig.vue'),
+        meta: { title: '外部服务配置', tab: 'erp' }
+      },
+      {
+        path: 'config-ai',
+        name: 'ConfigAi',
+        component: () => import('@/views/system/ExternalConfig.vue'),
+        meta: { title: '外部服务配置', tab: 'ai' }
       },
       {
         path: 'downstream-order-reviews',

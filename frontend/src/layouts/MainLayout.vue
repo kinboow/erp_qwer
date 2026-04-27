@@ -72,7 +72,7 @@
               <el-icon><Stamp /></el-icon>
               <template #title>权限管理</template>
             </el-menu-item>
-            <el-menu-item index="/external-config">
+            <el-menu-item index="/config-wechat">
               <el-icon><Link /></el-icon>
               <template #title>外部配置</template>
             </el-menu-item>
@@ -532,6 +532,7 @@ const activeMenu = computed(() => {
   if (p === '/customers') return '/users'
   if (p.startsWith('/sales/')) return '/sales'
   if (p.startsWith('/shipments/')) return '/shipments'
+  if (p.startsWith('/config-')) return '/config-wechat'
   return p
 })
 

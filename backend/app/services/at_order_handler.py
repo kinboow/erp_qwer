@@ -1,7 +1,7 @@
 """
 群聊 @机器人 自动接单处理器
-- 检测 @机器人
-- 滑动窗口采集同一 sender 的上下文消息
+- 检测 @机器人（at_list 中的 user_id 匹配当前实例 wxid）
+- 等待 2 分钟后采集同群前后文字消息和最近的图片/文件
 - 调用 AI 批量解析
 - 写入审核队列
 - 群内自动回复
@@ -38,11 +38,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # 配置常量（可从 ai_config 表或 .env 覆盖）
 # ---------------------------------------------------------------------------
-AT_ORDER_LOOKBACK_SECONDS = 300   # 向上回溯 5 分钟
-AT_ORDER_LOOKBACK_MAX = 20        # 最多回溯 20 条
-AT_ORDER_IDLE_TIMEOUT = 15        # 滑动窗口空闲 15 秒
-AT_ORDER_MAX_WAIT = 120           # 最长等待 2 分钟
-AT_ORDER_POLL_INTERVAL = 2        # 轮询间隔 2 秒
+AT_ORDER_MAX_WAIT = 120           # 防重复触发的窗口（秒）
 
 # 报单关键词列表——消息必须包含其中之一才触发接单流程
 ORDER_KEYWORDS = [
@@ -112,8 +108,13 @@ def is_at_bot(payload: dict[str, Any], bot_wxid: str) -> bool:
             at_list = json.loads(at_list)
         except Exception:
             at_list = [at_list]
-    if isinstance(at_list, list) and bot_wxid in at_list:
-        return True
+    if isinstance(at_list, list):
+        for item in at_list:
+            if isinstance(item, dict):
+                if str(item.get("user_id", "")).strip() == bot_wxid:
+                    return True
+            elif isinstance(item, str) and item == bot_wxid:
+                return True
 
     # 方式 2: is_at_me 标识
     if message_data.get("is_at_me") is True or payload.get("is_at_me") is True:
@@ -170,93 +171,94 @@ def extract_trigger_info(payload: dict[str, Any], instance_id: Optional[str] = N
 
 
 # ---------------------------------------------------------------------------
-# 滑动窗口采集
+# 上下文消息采集（等待 2 分钟后获取前后消息）
 # ---------------------------------------------------------------------------
-def _query_history_messages(
-    db: Session, room_id: str, sender_id: str, lookback_seconds: int, limit: int
-) -> list[dict[str, Any]]:
-    """向上回溯 message_logs，同一 room_id + sender_id"""
-    since = (datetime.now() - timedelta(seconds=lookback_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+AT_ORDER_WAIT_SECONDS = 120   # 等待 2 分钟后再采集
+AT_ORDER_TEXT_COUNT = 4       # 前后各取 4 条文字消息
+AT_ORDER_MEDIA_COUNT = 1      # 图片/文件取离触发消息最近的 1 条
+
+
+def _query_text_before(db: Session, room_id: str, trigger_id: int, limit: int) -> list[dict[str, Any]]:
+    """查询触发消息之前的 N 条文字消息（同一群聊，不限发送人）"""
     rows = db.execute(
         text(
-            "SELECT id, message_type, content_preview, payload_json, created_at "
+            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
             "FROM message_logs "
-            "WHERE room_id = :room_id AND sender_id = :sender_id AND created_at >= :since "
-            "ORDER BY created_at ASC LIMIT :limit"
+            "WHERE room_id = :room_id AND id < :trigger_id AND message_type = 'text' "
+            "ORDER BY id DESC LIMIT :limit"
         ),
-        {"room_id": room_id, "sender_id": sender_id, "since": since, "limit": limit},
+        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
+    ).mappings().all()
+    return [dict(r) for r in reversed(rows)]
+
+
+def _query_text_after(db: Session, room_id: str, trigger_id: int, limit: int) -> list[dict[str, Any]]:
+    """查询触发消息之后的 N 条文字消息（同一群聊，不限发送人）"""
+    rows = db.execute(
+        text(
+            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
+            "FROM message_logs "
+            "WHERE room_id = :room_id AND id > :trigger_id AND message_type = 'text' "
+            "ORDER BY id ASC LIMIT :limit"
+        ),
+        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
     ).mappings().all()
     return [dict(r) for r in rows]
 
 
-def _query_new_messages(
-    db: Session, room_id: str, sender_id: str, after_id: int, exclude_ids: set[int]
-) -> list[dict[str, Any]]:
-    """查询 message_logs 中 id > after_id 的新消息（同一 sender）"""
-    rows = db.execute(
+def _query_nearest_media(db: Session, room_id: str, trigger_id: int, limit: int) -> list[dict[str, Any]]:
+    """查询前后消息中离触发消息最近的图片/文件消息"""
+    # 向前找
+    before = db.execute(
         text(
-            "SELECT id, message_type, content_preview, payload_json, created_at "
+            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
             "FROM message_logs "
-            "WHERE room_id = :room_id AND sender_id = :sender_id AND id > :after_id "
-            "ORDER BY created_at ASC LIMIT 50"
+            "WHERE room_id = :room_id AND id < :trigger_id AND message_type IN ('image', 'file') "
+            "ORDER BY id DESC LIMIT :limit"
         ),
-        {"room_id": room_id, "sender_id": sender_id, "after_id": after_id},
+        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
     ).mappings().all()
-    return [dict(r) for r in rows if r["id"] not in exclude_ids]
+    # 向后找
+    after = db.execute(
+        text(
+            "SELECT id, sender_id, sender_name, message_type, content_preview, payload_json, created_at "
+            "FROM message_logs "
+            "WHERE room_id = :room_id AND id > :trigger_id AND message_type IN ('image', 'file') "
+            "ORDER BY id ASC LIMIT :limit"
+        ),
+        {"room_id": room_id, "trigger_id": trigger_id, "limit": limit},
+    ).mappings().all()
+
+    # 合并后按距离触发消息 id 的远近排序，取最近的 limit 条
+    candidates = [dict(r) for r in before] + [dict(r) for r in after]
+    candidates.sort(key=lambda m: abs(m["id"] - trigger_id))
+    return candidates[:limit]
 
 
 async def _collect_context(
     room_id: str, sender_id: str, trigger_msg_id: int
 ) -> list[dict[str, Any]]:
-    """滑动窗口采集同一 sender 的上下文消息"""
-    collected: list[dict[str, Any]] = []
-    collected_ids: set[int] = set()
+    """等待 2 分钟后，获取触发消息前后的文字消息和最近的图片/文件消息"""
+    logger.info("@采集: 等待 %d 秒后采集上下文 room=%s", AT_ORDER_WAIT_SECONDS, room_id)
+    await asyncio.sleep(AT_ORDER_WAIT_SECONDS)
 
     db = SessionLocal()
     try:
-        # 1. 向上回溯
-        history = _query_history_messages(db, room_id, sender_id, AT_ORDER_LOOKBACK_SECONDS, AT_ORDER_LOOKBACK_MAX)
-        for msg in history:
-            if msg["id"] not in collected_ids:
-                collected.append(msg)
-                collected_ids.add(msg["id"])
+        text_before = _query_text_before(db, room_id, trigger_msg_id, AT_ORDER_TEXT_COUNT)
+        text_after = _query_text_after(db, room_id, trigger_msg_id, AT_ORDER_TEXT_COUNT)
+        media_msgs = _query_nearest_media(db, room_id, trigger_msg_id, AT_ORDER_MEDIA_COUNT)
+
+        # 合并去重，按 id 排序
+        all_msgs: dict[int, dict[str, Any]] = {}
+        for msg in text_before + text_after + media_msgs:
+            all_msgs[msg["id"]] = msg
+
+        collected = sorted(all_msgs.values(), key=lambda m: m["id"])
+        logger.info("@采集: 采集到 %d 条消息（前%d文字 + 后%d文字 + %d媒体）room=%s",
+                     len(collected), len(text_before), len(text_after), len(media_msgs), room_id)
+        return collected
     finally:
         db.close()
-
-    # 2. 滑动窗口向下等待
-    start_time = time.monotonic()
-    last_msg_time = time.monotonic()
-    max_seen_id = trigger_msg_id
-
-    while True:
-        elapsed = time.monotonic() - start_time
-        idle = time.monotonic() - last_msg_time
-
-        if elapsed > AT_ORDER_MAX_WAIT:
-            logger.info("@采集窗口: 达到总时限 %ds，room=%s sender=%s", AT_ORDER_MAX_WAIT, room_id, sender_id)
-            break
-        if idle > AT_ORDER_IDLE_TIMEOUT:
-            logger.info("@采集窗口: 空闲超时 %ds，room=%s sender=%s", AT_ORDER_IDLE_TIMEOUT, room_id, sender_id)
-            break
-
-        await asyncio.sleep(AT_ORDER_POLL_INTERVAL)
-
-        db = SessionLocal()
-        try:
-            new_msgs = _query_new_messages(db, room_id, sender_id, max_seen_id, collected_ids)
-        finally:
-            db.close()
-
-        if new_msgs:
-            for msg in new_msgs:
-                collected.append(msg)
-                collected_ids.add(msg["id"])
-                if msg["id"] > max_seen_id:
-                    max_seen_id = msg["id"]
-            last_msg_time = time.monotonic()
-            logger.info("@采集窗口: 新增 %d 条消息，room=%s sender=%s", len(new_msgs), room_id, sender_id)
-
-    return collected
 
 
 # ---------------------------------------------------------------------------
@@ -278,9 +280,10 @@ def _msg_to_ai_input(msg: dict[str, Any]) -> dict[str, Any]:
     msg_type = str(msg.get("message_type") or "text").lower()
     content = str(msg.get("content_preview") or "")
     payload = _safe_json_loads(msg.get("payload_json"), {})
+    sender_name = str(msg.get("sender_name") or "").strip()
 
     if msg_type in ("text",):
-        return {"type": "text", "content": content}
+        return {"type": "text", "content": content, "sender_name": sender_name}
 
     if msg_type in ("image", "img", "picture"):
         # 图片 base64 需要从 payload 提取或后续下载
@@ -297,7 +300,7 @@ def _msg_to_ai_input(msg: dict[str, Any]) -> dict[str, Any]:
             or ""
         )
         mime = "image/png"
-        return {"type": "image", "base64": img_b64, "mime": mime, "content": content, "_payload": payload, "_msg_id": msg.get("id")}
+        return {"type": "image", "base64": img_b64, "mime": mime, "content": content, "sender_name": sender_name, "_payload": payload, "_msg_id": msg.get("id")}
 
     if msg_type in ("file",):
         file_name = ""
@@ -310,9 +313,9 @@ def _msg_to_ai_input(msg: dict[str, Any]) -> dict[str, Any]:
                 or payload.get("filename")
                 or ""
             )
-        return {"type": "file", "file_name": file_name, "content": content, "_payload": payload, "_msg_id": msg.get("id")}
+        return {"type": "file", "file_name": file_name, "content": content, "sender_name": sender_name, "_payload": payload, "_msg_id": msg.get("id")}
 
-    return {"type": "text", "content": content}
+    return {"type": "text", "content": content, "sender_name": sender_name}
 
 
 def _resolve_wechat_runtime_for_download(db: Session, instance_id: str) -> dict[str, Any]:
@@ -443,6 +446,49 @@ async def _download_attachment_for_msg(db: Session, ai_input: dict[str, Any], ro
 # ---------------------------------------------------------------------------
 # 库存校验 & 二次解析
 # ---------------------------------------------------------------------------
+def _build_name_mapping_hints(db: Session) -> str:
+    """构建名称映射提示文本，告诉 AI 哪些别名对应哪个货号"""
+    try:
+        rows = db.execute(
+            text("SELECT product_no, alias_name FROM product_name_mappings ORDER BY product_no, alias_name"),
+        ).mappings().all()
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    # 按货号分组
+    mapping: dict[str, list[str]] = {}
+    for r in rows:
+        pno = r["product_no"]
+        mapping.setdefault(pno, []).append(r["alias_name"])
+    lines = ["产品名称映射（客户可能用别名代替货号）："]
+    for pno, aliases in mapping.items():
+        lines.append(f"  货号 {pno} = {', '.join(aliases)}")
+    return "\n".join(lines)
+
+
+def _resolve_product_no(db: Session, name: str) -> str:
+    """通过映射表解析名称 → 货号。先精确匹配货号，再查别名映射。"""
+    name = name.strip()
+    if not name:
+        return name
+    # 1. 直接在库存/产品表匹配货号
+    direct = db.execute(
+        text("SELECT product_no FROM erp_products WHERE product_no = :name LIMIT 1"),
+        {"name": name},
+    ).mappings().first()
+    if direct:
+        return direct["product_no"]
+    # 2. 查映射表
+    alias = db.execute(
+        text("SELECT product_no FROM product_name_mappings WHERE alias_name = :name LIMIT 1"),
+        {"name": name},
+    ).mappings().first()
+    if alias:
+        return alias["product_no"]
+    return name
+
+
 def _query_product_colors_sizes(db: Session, product_no: str) -> dict[str, Any]:
     """查询指定货号在 erp_inventory 中的所有颜色及对应尺码"""
     rows = db.execute(
@@ -511,6 +557,13 @@ def validate_order_against_inventory(db: Session, parsed_order: dict[str, Any]) 
             all_valid = False
             items_result.append(result)
             continue
+
+        # 通过名称映射解析真实货号
+        resolved_no = _resolve_product_no(db, product_no)
+        if resolved_no != product_no:
+            logger.info("名称映射: %s -> %s", product_no, resolved_no)
+            item["product_no"] = resolved_no
+            product_no = resolved_no
 
         # 查库存
         available = _query_product_colors_sizes(db, product_no)
@@ -634,10 +687,14 @@ async def reparse_with_product_hints(
         msg_type = msg.get("type", "text")
         if msg_type == "text":
             user_parts.append({"type": "text", "text": f"[消息{idx}] {msg.get('content', '')}"})
-        elif msg_type == "image" and msg.get("base64"):
-            mime = msg.get("mime") or "image/png"
-            user_parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
-            user_parts.append({"type": "image_url", "image_url": {"url": msg['base64']}})
+        elif msg_type == "image":
+            if msg.get("oss_url"):
+                user_parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
+                user_parts.append({"type": "image_url", "image_url": {"url": msg["oss_url"]}})
+            elif msg.get("base64"):
+                mime = msg.get("mime") or "image/png"
+                user_parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
+                user_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
         elif msg_type == "file":
             summary = msg.get("excel_summary") or msg.get("content") or ""
             fname = msg.get("file_name") or "附件"
@@ -650,6 +707,7 @@ async def reparse_with_product_hints(
             {"role": "user", "content": user_parts},
         ],
         db=db,
+        caller="reparse_with_hints",
     )
 
 
@@ -737,11 +795,11 @@ async def handle_at_order(
         # 1. 群内回复「已收到」
         db = SessionLocal()
         try:
-            await send_room_at(db, room_id, "📋 已收到下单消息，正在解析中...", at_list=[sender_id])
+            await send_room_at(db, room_id, "📋 已收到下单消息，正在采集上下文并解析...", at_list=[sender_id])
         finally:
             db.close()
 
-        # 2. 滑动窗口采集上下文
+        # 2. 等待 2 分钟后采集触发消息前后的上下文
         collected_msgs = await _collect_context(room_id, sender_id, trigger_msg_id)
         if not collected_msgs:
             logger.warning("@接单: 未采集到任何消息 room=%s sender=%s", room_id, sender_id)
@@ -761,6 +819,25 @@ async def handle_at_order(
         finally:
             db.close()
 
+        # 4.5 上传图片到千问 OSS，获取 oss:// URL（避免 base64 过大）
+        db = SessionLocal()
+        try:
+            cfg = ai_order_parser._load_config(db)
+            vision_model = cfg.get("vision_model") or cfg.get("model") or "qwen3.5-flash"
+            for inp in ai_inputs:
+                if inp.get("type") == "image" and inp.get("base64") and not inp.get("oss_url"):
+                    try:
+                        img_bytes = base64.b64decode(inp["base64"])
+                        ext = (inp.get("mime") or "image/png").split("/")[-1]
+                        fname = f"order_img_{id(inp)}.{ext}"
+                        oss_url = await ai_order_parser.upload_file(img_bytes, fname, vision_model, db=db)
+                        inp["oss_url"] = oss_url
+                        logger.info("@接单: 图片已上传 OSS: %s", oss_url)
+                    except Exception as upload_exc:
+                        logger.warning("@接单: 图片上传 OSS 失败，回退 base64: %s", upload_exc)
+        finally:
+            db.close()
+
         # 清理内部字段
         for inp in ai_inputs:
             inp.pop("_payload", None)
@@ -769,7 +846,7 @@ async def handle_at_order(
         # 过滤无内容的消息
         valid_inputs = [
             inp for inp in ai_inputs
-            if inp.get("content") or inp.get("base64") or inp.get("excel_summary")
+            if inp.get("content") or inp.get("base64") or inp.get("oss_url") or inp.get("excel_summary")
         ]
         if not valid_inputs:
             logger.warning("@接单: 无有效消息内容 room=%s sender=%s", room_id, sender_id)
@@ -781,7 +858,13 @@ async def handle_at_order(
 
         db = SessionLocal()
         try:
-            parsed = await ai_order_parser.parse_batch(valid_inputs, customer_hint=customer_hint, db=db)
+            # 加载名称映射提示给 AI
+            mapping_hint = _build_name_mapping_hints(db)
+            full_hint = customer_hint
+            if mapping_hint:
+                full_hint = f"{customer_hint}\n{mapping_hint}" if customer_hint else mapping_hint
+
+            parsed = await ai_order_parser.parse_batch(valid_inputs, customer_hint=full_hint, db=db)
             normalized = _normalize_order(parsed, customer_hint)
             logger.info("@接单: 第一次解析完成 room=%s items=%d", room_id, len(normalized.get("items") or []))
 

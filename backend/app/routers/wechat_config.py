@@ -154,6 +154,71 @@ def _ensure_internal_rooms_table(db: Session):
     ensure_downstream_support_tables(db)
 
 
+async def sync_room_names_to_customers(db: Session) -> int:
+    """从企微 API 拉取最新群列表，更新 downstream_customer_wechat_rooms 中的 room_name。
+    返回更新的记录数。可从任意需要刷新群名的地方调用。"""
+    try:
+        api_base, wxid, headers = _get_wechat_cfg(db)
+    except (ValueError, Exception):
+        return 0
+
+    # 1) 拉取所有群聊
+    all_rooms: list[dict] = []
+    page = 1
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            while True:
+                resp = await client.post(
+                    f"{api_base}/api/{wxid}/rooms/get",
+                    json={"page_num": page, "page_size": 200},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                inner = (result.get("data") or {}) if isinstance(result, dict) else {}
+                room_list = []
+                if isinstance(inner, dict):
+                    room_list = inner.get("room_list") or inner.get("rooms") or inner.get("list") or []
+                elif isinstance(inner, list):
+                    room_list = inner
+                all_rooms.extend(room_list)
+                total = inner.get("total", 0) if isinstance(inner, dict) else 0
+                if not room_list or len(all_rooms) >= total:
+                    break
+                page += 1
+                if page > 50:
+                    break
+    except Exception:
+        return 0
+
+    # 2) 构建 room_id -> room_name 映射
+    name_map: dict[str, str] = {}
+    for room in all_rooms:
+        rid = room.get("conversation_id") or room.get("room_id") or ""
+        rid_clean = rid[2:] if rid.startswith("R:") else rid
+        room_name = room.get("nickname") or room.get("room_name") or room.get("name") or ""
+        if rid_clean and room_name:
+            name_map[rid_clean] = room_name
+
+    # 3) 批量更新
+    updated = 0
+    try:
+        for room_id, room_name in name_map.items():
+            r = db.execute(
+                text(
+                    "UPDATE downstream_customer_wechat_rooms "
+                    "SET room_name = :room_name WHERE room_id = :room_id AND room_name != :room_name"
+                ),
+                {"room_id": room_id, "room_name": room_name},
+            )
+            updated += r.rowcount
+        if updated:
+            db.commit()
+    except Exception:
+        db.rollback()
+    return updated
+
+
 # ---- 获取全部群聊 (从企微 API) ----
 
 @router.get("/proxy/rooms", summary="代理获取全部群聊列表")
@@ -277,16 +342,18 @@ async def get_rooms_all_status(
 
     # 4) 合并
     merged = []
+    name_map: dict[str, str] = {}
     for room in all_rooms:
         rid = room.get("conversation_id") or room.get("room_id") or ""
         # 去掉 R: 前缀用于 DB 匹配
         rid_clean = rid[2:] if rid.startswith("R:") else rid
         cust = customer_map.get(rid_clean) or customer_map.get(rid)
         intern = internal_map.get(rid_clean) or internal_map.get(rid)
+        room_name = room.get("nickname") or room.get("room_name") or room.get("name") or ""
         merged.append({
             "conversation_id": rid,
             "room_id": rid_clean,
-            "room_name": room.get("nickname") or room.get("room_name") or room.get("name") or "",
+            "room_name": room_name,
             "member_count": room.get("member_count") or room.get("total") or 0,
             "owner": room.get("owner") or "",
             "is_customer": cust is not None,
@@ -294,6 +361,22 @@ async def get_rooms_all_status(
             "is_internal": intern is not None,
             "internal": intern,
         })
+        if rid_clean and room_name:
+            name_map[rid_clean] = room_name
+
+    # 5) 批量更新客户关联群聊的 room_name
+    try:
+        for room_id, room_name in name_map.items():
+            db.execute(
+                text(
+                    "UPDATE downstream_customer_wechat_rooms "
+                    "SET room_name = :room_name WHERE room_id = :room_id AND room_name != :room_name"
+                ),
+                {"room_id": room_id, "room_name": room_name},
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
 
     return json_response(data=merged)
 
@@ -398,3 +481,117 @@ async def proxy_room_members(
         return json_response(data=members)
     except Exception as exc:
         return json_response(code=502, message=f"获取群成员失败: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# 员工企微账号管理（排除监听）
+# ---------------------------------------------------------------------------
+
+_DDL_EMPLOYEE_ACCOUNTS = """
+CREATE TABLE IF NOT EXISTS wechat_employee_accounts (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    wxid VARCHAR(100) NOT NULL,
+    nickname VARCHAR(200) DEFAULT '',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_wxid (wxid)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
+def _ensure_employee_accounts_table(db: Session):
+    db.execute(text(_DDL_EMPLOYEE_ACCOUNTS))
+    db.commit()
+
+
+@router.get("/customer-room-members", summary="获取所有客户群去重成员列表")
+async def get_customer_room_members(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """遍历所有客户群，拉取群成员并去重返回"""
+    try:
+        api_base, wxid, headers = _get_wechat_cfg(db)
+    except ValueError as e:
+        return json_response(code=400, message=str(e))
+
+    # 查出所有客户群 room_id
+    room_rows = db.execute(text(
+        "SELECT DISTINCT r.room_id, r.room_name "
+        "FROM downstream_customer_wechat_rooms r "
+        "INNER JOIN downstream_customers c ON c.id = r.customer_id "
+        "WHERE c.deleted_at IS NULL AND c.status = 1"
+    )).mappings().all()
+    if not room_rows:
+        return json_response(data=[])
+
+    # 并发拉取各群成员
+    seen: dict[str, dict] = {}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for row in room_rows:
+            rid = row["room_id"]
+            conversation_id = rid if rid.startswith("R:") else f"R:{rid}"
+            try:
+                resp = await client.post(
+                    f"{api_base}/api/{wxid}/rooms/members",
+                    json={"conversation_id": conversation_id, "page_num": 1, "page_size": 500},
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                result = resp.json()
+                inner = (result.get("data") or {}) if isinstance(result, dict) else {}
+                members = []
+                if isinstance(inner, dict):
+                    members = inner.get("member_list") or inner.get("members") or []
+                elif isinstance(inner, list):
+                    members = inner
+                for m in members:
+                    uid = m.get("user_id") or m.get("acctid") or m.get("wxid") or ""
+                    if uid and uid not in seen:
+                        seen[uid] = {
+                            "wxid": uid,
+                            "nickname": m.get("realname") or m.get("nickname") or m.get("room_nickname") or m.get("username") or "",
+                            "avatar": m.get("avatar") or m.get("small_avatar") or "",
+                        }
+            except Exception as exc:
+                _room_logger.warning("拉取群 %s 成员失败: %s", rid, exc)
+
+    return json_response(data=list(seen.values()))
+
+
+@router.get("/employee-accounts", summary="获取已标记的员工企微账号")
+async def get_employee_accounts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_employee_accounts_table(db)
+    rows = db.execute(text(
+        "SELECT wxid, nickname, created_at FROM wechat_employee_accounts ORDER BY id ASC"
+    )).mappings().all()
+    return json_response(data=[dict(r) for r in rows])
+
+
+class SaveEmployeeAccountsReq(BaseModel):
+    accounts: list[dict]
+
+
+@router.post("/employee-accounts", summary="保存员工企微账号列表")
+async def save_employee_accounts(
+    data: SaveEmployeeAccountsReq,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    _ensure_employee_accounts_table(db)
+    try:
+        db.execute(text("DELETE FROM wechat_employee_accounts"))
+        for acc in data.accounts:
+            wxid = (acc.get("wxid") or "").strip()
+            if not wxid:
+                continue
+            db.execute(text(
+                "INSERT IGNORE INTO wechat_employee_accounts (wxid, nickname) VALUES (:wxid, :nickname)"
+            ), {"wxid": wxid, "nickname": acc.get("nickname") or ""})
+        db.commit()
+        return json_response(message="保存成功")
+    except Exception as exc:
+        db.rollback()
+        return json_response(code=500, message=f"保存失败: {exc}")

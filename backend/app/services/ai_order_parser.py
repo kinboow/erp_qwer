@@ -2,12 +2,15 @@ import base64
 import json
 import logging
 import re
+import time
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.ai_config import log_ai_call
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +109,61 @@ class AIOrderParser:
                 pass
         raise AIOrderParserError(f"AI 返回内容不是有效 JSON: {text_content[:300]}")
 
-    async def _chat(self, model: str, messages: list[dict[str, Any]], db: Optional[Session] = None) -> dict[str, Any]:
+    async def upload_file(self, file_bytes: bytes, filename: str, model: str, db: Optional[Session] = None) -> str:
+        """上传文件到千问临时存储，返回 oss:// URL（有48小时有效期）"""
+        cfg = self._load_config(db)
+        self._ensure_enabled(cfg)
+        api_key = cfg["api_key"]
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            # 步骤1: 获取上传凭证
+            policy_resp = await client.get(
+                "https://dashscope.aliyuncs.com/api/v1/uploads",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                params={"action": "getPolicy", "model": model},
+            )
+            policy_resp.raise_for_status()
+            policy_data = policy_resp.json()["data"]
+
+            # 步骤2: 上传文件到 OSS
+            key = f"{policy_data['upload_dir']}/{filename}"
+            upload_resp = await client.post(
+                policy_data["upload_host"],
+                data={
+                    "OSSAccessKeyId": policy_data["oss_access_key_id"],
+                    "Signature": policy_data["signature"],
+                    "policy": policy_data["policy"],
+                    "x-oss-object-acl": policy_data["x_oss_object_acl"],
+                    "x-oss-forbid-overwrite": policy_data["x_oss_forbid_overwrite"],
+                    "key": key,
+                    "success_action_status": "200",
+                },
+                files={"file": (filename, file_bytes)},
+            )
+            upload_resp.raise_for_status()
+
+        oss_url = f"oss://{key}"
+        logger.info("文件上传成功: %s -> %s", filename, oss_url)
+        return oss_url
+
+    @staticmethod
+    def _messages_contain_oss(messages: list[dict[str, Any]]) -> bool:
+        """检测 messages 中是否包含 oss:// URL"""
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, str) and "oss://" in content:
+                return True
+            if isinstance(content, list):
+                for part in content:
+                    url = (part.get("image_url") or {}).get("url") or ""
+                    if url.startswith("oss://"):
+                        return True
+        return False
+
+    async def _chat(self, model: str, messages: list[dict[str, Any]], db: Optional[Session] = None, caller: str = "") -> dict[str, Any]:
         cfg = self._load_config(db)
         self._ensure_enabled(cfg)
         base_url = cfg["base_url"].rstrip("/")
@@ -116,22 +173,81 @@ class AIOrderParser:
         request_body: dict[str, Any] = {
             "model": model,
             "temperature": temperature,
+            "response_format": {"type": "json_object"},
             "messages": messages,
         }
 
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=request_body,
-            )
-        response.raise_for_status()
-        payload = response.json()
-        content = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}").strip()
-        return self._extract_json(content)
+        headers: dict[str, str] = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        if self._messages_contain_oss(messages):
+            headers["X-DashScope-OssResourceResolve"] = "enable"
+
+        # 构建请求摘要
+        req_summary = self._build_request_summary(messages)
+
+        t0 = time.time()
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"{base_url}/chat/completions",
+                    headers=headers,
+                    json=request_body,
+                )
+            response.raise_for_status()
+            payload = response.json()
+            duration_ms = int((time.time() - t0) * 1000)
+
+            usage = payload.get("usage") or {}
+            content = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}").strip()
+
+            # 记录日志
+            if db is not None:
+                log_ai_call(
+                    db,
+                    model=model,
+                    caller=caller or "ai_order_parser",
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    total_tokens=usage.get("total_tokens", 0),
+                    duration_ms=duration_ms,
+                    status="success",
+                    request_summary=req_summary,
+                    response_summary=content[:2000],
+                )
+
+            return self._extract_json(content)
+        except Exception as exc:
+            duration_ms = int((time.time() - t0) * 1000)
+            if db is not None:
+                log_ai_call(
+                    db,
+                    model=model,
+                    caller=caller or "ai_order_parser",
+                    duration_ms=duration_ms,
+                    status="error",
+                    error_message=str(exc)[:2000],
+                    request_summary=req_summary,
+                )
+            raise
+
+    @staticmethod
+    def _build_request_summary(messages: list[dict[str, Any]]) -> str:
+        """构建请求摘要（仅提取文本部分，忽略 base64/图片）"""
+        parts = []
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content")
+            if isinstance(content, str):
+                parts.append(f"[{role}] {content[:300]}")
+            elif isinstance(content, list):
+                texts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                combined = " ".join(texts)[:300]
+                has_img = any(p.get("type") == "image_url" for p in content)
+                suffix = " [+图片]" if has_img else ""
+                parts.append(f"[{role}] {combined}{suffix}")
+        return "\n".join(parts)[:2000]
 
     async def parse_text(self, text: str, customer_hint: str = "", db: Optional[Session] = None) -> dict[str, Any]:
         cfg = self._load_config(db)
@@ -145,6 +261,7 @@ class AIOrderParser:
                 },
             ],
             db=db,
+            caller="parse_text",
         )
 
     async def parse_image_base64(self, image_base64: str, mime_type: str = "image/png", extra_text: str = "", db: Optional[Session] = None) -> dict[str, Any]:
@@ -157,11 +274,12 @@ class AIOrderParser:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": f"请解析图片中的下单信息。补充说明: {extra_text or '无'}"},
-                        {"type": "image_url", "image_url": {"url": image_base64}},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}},
                     ],
                 },
             ],
             db=db,
+            caller="parse_image",
         )
 
     async def parse_excel_summary(self, file_name: str, text_summary: str, customer_hint: str = "", db: Optional[Session] = None) -> dict[str, Any]:
@@ -176,6 +294,7 @@ class AIOrderParser:
                 },
             ],
             db=db,
+            caller="parse_excel",
         )
 
     async def parse_batch(
@@ -206,16 +325,22 @@ class AIOrderParser:
 
         for idx, msg in enumerate(context_messages, 1):
             msg_type = msg.get("type", "text")
+            sender = msg.get("sender_name") or ""
+            sender_tag = f"({sender})" if sender else ""
             if msg_type == "text":
-                user_parts.append({"type": "text", "text": f"[消息{idx}] {msg.get('content', '')}"})
-            elif msg_type == "image" and msg.get("base64"):
-                mime = msg.get("mime") or "image/png"
-                user_parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
-                user_parts.append({"type": "image_url", "image_url": {"url": msg['base64']}})
+                user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} {msg.get('content', '')}"})
+            elif msg_type == "image":
+                if msg.get("oss_url"):
+                    user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 图片:"})
+                    user_parts.append({"type": "image_url", "image_url": {"url": msg["oss_url"]}})
+                elif msg.get("base64"):
+                    mime = msg.get("mime") or "image/png"
+                    user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 图片:"})
+                    user_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
             elif msg_type == "file":
                 summary = msg.get("excel_summary") or msg.get("content") or ""
                 fname = msg.get("file_name") or "附件"
-                user_parts.append({"type": "text", "text": f"[消息{idx}] 文件 {fname}:\n{summary}"})
+                user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 文件 {fname}:\n{summary}"})
 
         return await self._chat(
             model,
@@ -224,25 +349,9 @@ class AIOrderParser:
                 {"role": "user", "content": user_parts},
             ],
             db=db,
+            caller="parse_batch",
         )
 
-
-    async def upload_file(self, file_bytes: bytes, filename: str, purpose: str = "agent", db: Optional[Session] = None) -> dict[str, Any]:
-        """上传文件到智谱 /files API，返回 FileObject"""
-        cfg = self._load_config(db)
-        self._ensure_enabled(cfg)
-        base_url = cfg["base_url"].rstrip("/")
-        api_key = cfg["api_key"]
-
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(
-                f"{base_url}/files",
-                headers={"Authorization": f"Bearer {api_key}"},
-                files={"file": (filename, file_bytes)},
-                data={"purpose": purpose},
-            )
-        response.raise_for_status()
-        return response.json()
 
 
 ai_order_parser = AIOrderParser()

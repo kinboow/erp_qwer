@@ -8,16 +8,16 @@
 
       <el-form :model="form" label-position="top" class="config-form">
         <el-form-item label="API 基地址">
-          <el-input v-model="form.ai_base_url" placeholder="如：https://open.bigmodel.cn/api/paas/v4" />
+          <el-input v-model="form.ai_base_url" placeholder="如：https://dashscope.aliyuncs.com/compatible-mode/v1" />
         </el-form-item>
 
         <el-form-item label="API Key">
-          <el-input v-model="form.ai_api_key" :placeholder="maskedApiKey || '请输入智谱 API Key'" show-password />
+          <el-input v-model="form.ai_api_key" :placeholder="maskedApiKey || '请输入通义千问 API Key'" show-password />
         </el-form-item>
 
         <div class="form-row">
           <el-form-item label="默认模型" class="form-col">
-            <el-input v-model="form.ai_model" placeholder="如：GLM-4.6V" />
+            <el-input v-model="form.ai_model" placeholder="如：qwen3.5-flash" />
           </el-form-item>
           <el-form-item label="多模态模型" class="form-col">
             <el-input v-model="form.ai_vision_model" placeholder="默认同上" />
@@ -48,41 +48,25 @@
           <el-icon><Connection /></el-icon>
           测试连接
         </el-button>
-        <el-button type="success" @click="handleSave" :loading="saving">
+        <el-button type="success" @click="handleSave" :loading="saving" :disabled="!connectionTested">
           <el-icon><Check /></el-icon>
           保存配置
         </el-button>
       </div>
     </div>
 
-    <div v-if="testResult" class="config-card">
-      <div class="card-title">
-        <el-icon><DataAnalysis /></el-icon>
-        <span>测试结果</span>
-      </div>
-      <div class="test-result">
-        <div class="test-item">
-          <span class="test-label">模型</span>
-          <span class="test-value">{{ testResult.model }}</span>
-        </div>
-        <div class="test-item">
-          <span class="test-label">回复</span>
-          <span class="test-value">{{ testResult.reply }}</span>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, watch, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Cpu, Setting, Connection, Check, DataAnalysis } from '@element-plus/icons-vue'
+import { Cpu, Setting, Connection, Check } from '@element-plus/icons-vue'
 import { getAiConfig, saveAiConfig, testAiConnection } from '@/api/aiConfig'
 
 const saving = ref(false)
 const testing = ref(false)
-const testResult = ref(null)
+const connectionTested = ref(false)
 
 const form = reactive({
   ai_base_url: '',
@@ -110,6 +94,10 @@ async function loadConfig() {
 }
 
 async function handleSave() {
+  if (!connectionTested.value) {
+    ElMessage.warning('请先测试连接成功后再保存配置')
+    return
+  }
   saving.value = true
   try {
     const payload = {
@@ -122,9 +110,13 @@ async function handleSave() {
     if (form.ai_api_key) {
       payload.ai_api_key = form.ai_api_key
     }
+    const enteredKey = form.ai_api_key
     await saveAiConfig(payload)
     ElMessage.success('AI 配置已保存')
     await loadConfig()
+    if (enteredKey) {
+      form.ai_api_key = enteredKey
+    }
   } catch (e) {
     ElMessage.error(e?.response?.data?.message || '保存失败')
   } finally {
@@ -134,7 +126,6 @@ async function handleSave() {
 
 async function handleTest() {
   testing.value = true
-  testResult.value = null
   try {
     const testPayload = {
       ai_base_url: form.ai_base_url,
@@ -144,9 +135,10 @@ async function handleTest() {
       testPayload.ai_api_key = form.ai_api_key
     }
     const res = await testAiConnection(testPayload)
-    testResult.value = res.data || {}
+    connectionTested.value = true
     ElMessage.success('AI 连接测试成功')
   } catch (e) {
+    connectionTested.value = false
     const msg = e?.message || e?.response?.data?.message || '连接测试失败'
     ElMessage.error(msg)
   } finally {
@@ -155,6 +147,13 @@ async function handleTest() {
 }
 
 onMounted(loadConfig)
+
+watch(
+  () => [form.ai_base_url, form.ai_api_key, form.ai_model],
+  () => {
+    connectionTested.value = false
+  }
+)
 </script>
 
 <style scoped>
@@ -234,27 +233,4 @@ onMounted(loadConfig)
   gap: 12px;
 }
 
-.test-result {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.test-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.test-label {
-  font-size: 13px;
-  color: var(--lark-text-secondary, #8f959e);
-  min-width: 50px;
-  font-weight: 500;
-}
-
-.test-value {
-  font-size: 14px;
-  color: var(--lark-text-primary, #1f2329);
-}
 </style>

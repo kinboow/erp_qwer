@@ -102,21 +102,41 @@ async def ingest_runtime_message(
         except Exception:
             pass
 
-    review_result = None
+    # 检查发送者是否为员工账号——如果是则跳过订单处理，仅保留日志
+    sender_is_employee = False
     try:
-        review_result = await create_review_from_callback(db, normalized_payload, resolved_instance_id or None)
-    except Exception as exc:
-        logger.warning("create_review_from_callback failed: %s", exc)
-        try:
-            db.rollback()
-        except Exception:
-            pass
+        _sender_id = _safe_text(
+            (normalized_payload.get("message") or {}).get("data", {}).get("sender")
+            or (normalized_payload.get("data") or {}).get("sender")
+            or normalized_payload.get("sender_id")
+            or normalized_payload.get("from_wxid")
+            or (normalized_payload.get("message") or {}).get("data", {}).get("from_wxid")
+        )
+        if _sender_id:
+            _emp_row = db.execute(
+                text("SELECT 1 FROM wechat_employee_accounts WHERE wxid = :wxid LIMIT 1"),
+                {"wxid": _sender_id},
+            ).first()
+            sender_is_employee = _emp_row is not None
+    except Exception:
+        pass
 
-    # @机器人 自动接单检测
+    review_result = None
+    if not sender_is_employee:
+        try:
+            review_result = await create_review_from_callback(db, normalized_payload, resolved_instance_id or None)
+        except Exception as exc:
+            logger.warning("create_review_from_callback failed: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    # @机器人 自动接单检测（员工消息也跳过）
     at_order_triggered = False
     try:
         bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
-        if bot_wxid and is_at_bot(normalized_payload, bot_wxid):
+        if not sender_is_employee and bot_wxid and is_at_bot(normalized_payload, bot_wxid):
             trigger_info = extract_trigger_info(normalized_payload, resolved_instance_id)
             trigger_room_id = trigger_info.get("room_id") or ""
             trigger_sender_id = trigger_info.get("sender_id") or ""

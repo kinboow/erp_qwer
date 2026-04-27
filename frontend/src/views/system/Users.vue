@@ -24,7 +24,7 @@
             </div>
 
             <div class="toolbar-right">
-              <el-button class="lark-btn-secondary" :icon="Download">导出记录</el-button>
+              <el-button class="lark-btn-secondary" :icon="Setting" @click="openEmployeeSettings">企微设定</el-button>
               <el-button type="primary" :icon="Plus" @click="handleAdd">添加成员</el-button>
             </div>
           </div>
@@ -451,6 +451,59 @@
         <el-button type="primary" @click="handleViewOrders(detailData)">查看关联订单</el-button>
       </template>
     </el-dialog>
+
+    <!-- 企微设定：员工账号弹窗 -->
+    <el-dialog
+      v-model="empSettingVisible"
+      title="企微设定 — 标记员工账号"
+      width="640px"
+      destroy-on-close
+    >
+      <div style="margin-bottom:12px;color:var(--lark-text-secondary);font-size:13px;">
+        以下为所有客户群中的成员（已去重）。勾选的账号将被标记为员工，其在监听群聊中发送的消息将不被系统处理（日志仍保留）。
+      </div>
+      <div v-if="empMembersLoading" v-loading="true" style="min-height:120px;"></div>
+      <template v-else>
+        <div style="margin-bottom:8px;">
+          <div class="lark-search-input-wrap" style="width:100%;">
+            <el-icon class="search-icon"><Search /></el-icon>
+            <input v-model="empSearchKw" class="lark-input" placeholder="搜索昵称或ID" />
+            <el-icon v-if="empSearchKw" class="clear-icon" @click="empSearchKw = ''"><CircleClose /></el-icon>
+          </div>
+        </div>
+        <el-table
+          :data="filteredEmpMembers"
+          max-height="400"
+          class="lark-table"
+          @selection-change="onEmpSelectionChange"
+          ref="empTableRef"
+          row-key="wxid"
+          size="small"
+        >
+          <el-table-column type="selection" width="45" reserve-selection />
+          <el-table-column label="头像" width="60">
+            <template #default="{ row }">
+              <el-avatar :size="28" :src="row.avatar || undefined">
+                <el-icon :size="14"><User /></el-icon>
+              </el-avatar>
+            </template>
+          </el-table-column>
+          <el-table-column prop="nickname" label="昵称" min-width="140" />
+          <el-table-column prop="wxid" label="企微ID" min-width="180">
+            <template #default="{ row }">
+              <span style="font-size:11px;font-family:monospace;color:var(--lark-text-secondary);">{{ row.wxid }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div style="margin-top:8px;font-size:12px;color:var(--lark-text-secondary);">
+          已选 {{ empSelectedWxids.length }} / {{ empAllMembers.length }} 人
+        </div>
+      </template>
+      <template #footer>
+        <el-button @click="empSettingVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleSaveEmployees" :loading="empSaving">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -460,12 +513,12 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Search, Plus, Delete, Key, CircleClose,
-  Message, Phone, Download, ArrowDown, Switch, Refresh, Setting
+  Message, Phone, ArrowDown, Switch, Refresh, Setting, User
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { getUserList, createUser, updateUser, deleteUser, getUserRoleOptions } from '@/api/user'
 import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp, getPreference, savePreference } from '@/api/customer'
-import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig } from '@/api/wechat'
+import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig, getCustomerRoomMembers, getEmployeeAccounts, saveEmployeeAccounts } from '@/api/wechat'
 import MonitoredRooms from './MonitoredRooms.vue'
 
 const router = useRouter()
@@ -1146,6 +1199,78 @@ const formatDate = (dateStr) => {
   return date.toLocaleString('zh-CN', {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
   })
+}
+
+// ---------------------------------------------------------------------------
+// 企微设定：员工账号管理
+// ---------------------------------------------------------------------------
+const empSettingVisible = ref(false)
+const empMembersLoading = ref(false)
+const empSaving = ref(false)
+const empAllMembers = ref([])
+const empSelectedWxids = ref([])
+const empSearchKw = ref('')
+const empTableRef = ref(null)
+
+const filteredEmpMembers = computed(() => {
+  if (!empSearchKw.value) return empAllMembers.value
+  const kw = empSearchKw.value.toLowerCase()
+  return empAllMembers.value.filter(m =>
+    (m.nickname || '').toLowerCase().includes(kw) ||
+    (m.wxid || '').toLowerCase().includes(kw)
+  )
+})
+
+function onEmpSelectionChange(rows) {
+  empSelectedWxids.value = rows.map(r => r.wxid)
+}
+
+async function openEmployeeSettings() {
+  empSettingVisible.value = true
+  empMembersLoading.value = true
+  empSearchKw.value = ''
+  empAllMembers.value = []
+  empSelectedWxids.value = []
+
+  try {
+    // 同时拉取所有客户群成员 + 已保存的员工列表
+    const [membersRes, savedRes] = await Promise.all([
+      getCustomerRoomMembers(),
+      getEmployeeAccounts()
+    ])
+    empAllMembers.value = membersRes.data || []
+    const savedWxids = new Set((savedRes.data || []).map(a => a.wxid))
+
+    // 等 nextTick 让表格渲染后再设置选中
+    await new Promise(r => setTimeout(r, 100))
+    if (empTableRef.value) {
+      empAllMembers.value.forEach(m => {
+        if (savedWxids.has(m.wxid)) {
+          empTableRef.value.toggleRowSelection(m, true)
+        }
+      })
+    }
+  } catch (e) {
+    ElMessage.error('加载成员列表失败: ' + (e?.response?.data?.message || e.message))
+  } finally {
+    empMembersLoading.value = false
+  }
+}
+
+async function handleSaveEmployees() {
+  empSaving.value = true
+  try {
+    const accounts = empAllMembers.value
+      .filter(m => empSelectedWxids.value.includes(m.wxid))
+      .map(m => ({ wxid: m.wxid, nickname: m.nickname }))
+    await saveEmployeeAccounts(accounts)
+    ElMessage.success(`已保存 ${accounts.length} 个员工账号`)
+    empSettingVisible.value = false
+  } catch (e) {
+    ElMessage.error('保存失败: ' + (e?.response?.data?.message || e.message))
+  } finally {
+    empSaving.value = false
+  }
 }
 
 onMounted(async () => {

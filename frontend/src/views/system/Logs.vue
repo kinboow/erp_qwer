@@ -258,6 +258,10 @@
             />
           </div>
         </el-tab-pane>
+
+        <el-tab-pane label="AI调用日志" name="ai">
+          <AiCallLogs v-if="activeTab === 'ai'" />
+        </el-tab-pane>
       </el-tabs>
     </div>
   </div>
@@ -267,6 +271,7 @@
 import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import request from '@/utils/request'
+import AiCallLogs from './AiCallLogs.vue'
 
 const activeTab = ref('system')
 
@@ -408,7 +413,8 @@ function formatPayload(payload) {
 function handleTabChange(tab) {
   if (tab === 'system') fetchSystemLogs()
   else if (tab === 'operation') fetchOpLogs()
-  else fetchMessageLogs()
+  else if (tab === 'message') fetchMessageLogs()
+  // ai tab 由 AiCallLogs 组件自己 onMounted 加载
 }
 
 // ========== 实时通知 WebSocket ==========

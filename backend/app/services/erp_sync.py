@@ -217,6 +217,18 @@ CREATE TABLE IF NOT EXISTS erp_inventory (
 """
 
 
+_DDL_PRODUCT_NAME_MAPPINGS = """
+CREATE TABLE IF NOT EXISTS product_name_mappings (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    product_no      VARCHAR(200) NOT NULL COMMENT '货号',
+    alias_name      VARCHAR(255) NOT NULL COMMENT '映射名称',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_alias_name (alias_name),
+    INDEX idx_product_no (product_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
 _DDL_SYNC_CONFIG = """
 CREATE TABLE IF NOT EXISTS erp_sync_config (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -246,6 +258,7 @@ def ensure_tables(db: Session) -> None:
     db.execute(text(_DDL_PRODUCTS))
     db.execute(text(_DDL_INVENTORY))
     db.execute(text(_DDL_SYNC_CONFIG))
+    db.execute(text(_DDL_PRODUCT_NAME_MAPPINGS))
     # 补加字段（已有表结构升级）
     _alter_cmds = [
         ("erp_sales_orders", "print_count", "INT DEFAULT 0"),

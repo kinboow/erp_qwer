@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -123,6 +125,22 @@ async def get_customer_list(
     current_user: User = Depends(get_current_user)
 ):
     ensure_downstream_support_tables(db)
+
+    # 后台刷新关联群聊的 room_name（不阻塞响应）
+    async def _bg_sync_room_names():
+        from app.database import SessionLocal
+        from app.routers.wechat_config import sync_room_names_to_customers
+        bg_db = SessionLocal()
+        try:
+            await sync_room_names_to_customers(bg_db)
+        except Exception:
+            pass
+        finally:
+            bg_db.close()
+    try:
+        asyncio.create_task(_bg_sync_room_names())
+    except Exception:
+        pass
     params = {}
     where_sql = "WHERE deleted_at IS NULL"
     if keyword:

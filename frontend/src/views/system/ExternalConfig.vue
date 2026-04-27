@@ -6,24 +6,24 @@
     </div>
 
     <div class="lark-table-panel">
-      <el-tabs v-model="activeTab" class="config-tabs">
+      <el-tabs v-model="activeTab" class="config-tabs" @tab-change="handleTabChange">
         <el-tab-pane name="wechat">
           <template #label>
             <span class="tab-label"><el-icon><ChatDotRound /></el-icon>企微配置</span>
           </template>
-          <WechatConfig />
+          <WechatConfig v-if="activeTab === 'wechat'" />
         </el-tab-pane>
         <el-tab-pane name="erp">
           <template #label>
             <span class="tab-label"><el-icon><DataLine /></el-icon>ERP 同步配置</span>
           </template>
-          <ErpSyncConfig />
+          <ErpSyncConfig v-if="activeTab === 'erp'" />
         </el-tab-pane>
         <el-tab-pane name="ai">
           <template #label>
             <span class="tab-label"><el-icon><Cpu /></el-icon>AI 模型配置</span>
           </template>
-          <AiModelConfig />
+          <AiModelConfig v-if="activeTab === 'ai'" />
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -32,12 +32,24 @@
 
 <script setup>
 import { ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ChatDotRound, DataLine, Cpu } from '@element-plus/icons-vue'
 import WechatConfig from './WechatConfig.vue'
 import ErpSyncConfig from './ErpSyncConfig.vue'
 import AiModelConfig from './AiModelConfig.vue'
 
-const activeTab = ref('wechat')
+const route = useRoute()
+const router = useRouter()
+const activeTab = ref(route.meta.tab || 'wechat')
+
+const TAB_ROUTES = { wechat: '/config-wechat', erp: '/config-erp', ai: '/config-ai' }
+
+function handleTabChange(tab) {
+  const target = TAB_ROUTES[tab]
+  if (target && route.path !== target) {
+    router.push(target)
+  }
+}
 </script>
 
 <style scoped>
