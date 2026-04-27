@@ -6,6 +6,18 @@
       <el-tag v-if="order.state != null" :type="order.state === 1 ? 'success' : 'warning'" size="default">
         {{ order.state === 1 ? '已审核' : '未审核' }}
       </el-tag>
+      <div style="flex: 1"></div>
+      <el-dropdown trigger="click" @command="handlePrintCommand">
+        <el-button type="primary" :loading="printing">
+          <el-icon style="margin-right: 4px"><Printer /></el-icon>
+          打印 <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="picking">打印拣货单</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
     <div class="detail-body" v-loading="loading">
@@ -89,14 +101,16 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft } from '@element-plus/icons-vue'
-import { getOrderDetail } from '@/api/salesOrders'
+import { ArrowLeft, Printer, ArrowDown } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { getOrderDetail, printPicking } from '@/api/salesOrders'
 
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
 const order = ref({})
 const items = ref([])
+const printing = ref(false)
 
 const formatDateTime = (val) => {
   if (!val) return '-'
@@ -145,6 +159,35 @@ function summaryMethod({ columns }) {
     sums[index] = ''
   })
   return sums
+}
+
+async function handlePrintCommand(command) {
+  if (command === 'picking') {
+    await handlePrintPicking()
+  }
+}
+
+async function handlePrintPicking() {
+  const orderNo = order.value.order_no
+  if (!orderNo) {
+    ElMessage.warning('订单信息未加载')
+    return
+  }
+  printing.value = true
+  try {
+    const res = await printPicking(orderNo)
+    if (res.code === 200 && res.data?.oss_url) {
+      window.open(res.data.oss_url, '_blank')
+      ElMessage.success(`拣货单已生成（${res.data.page_count} 页${res.data.is_cached ? '，使用缓存' : ''}）`)
+    } else {
+      ElMessage.error(res.message || '生成拣货单失败')
+    }
+  } catch (e) {
+    console.error('打印拣货单失败:', e)
+    ElMessage.error('打印拣货单失败，请重试')
+  } finally {
+    printing.value = false
+  }
 }
 
 onMounted(fetchDetail)

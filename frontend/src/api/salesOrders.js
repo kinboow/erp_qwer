@@ -15,3 +15,7 @@ export const getOrderItems = (orderNo) => {
 export const syncOrders = (daysBack = 90) => {
   return request({ url: '/api/erp/sync/trigger-orders', method: 'post', params: { days_back: daysBack }, timeout: 300000 })
 }
+
+export const printPicking = (orderNo) => {
+  return request({ url: `/api/sales-orders/${encodeURIComponent(orderNo)}/print-picking`, method: 'post', timeout: 120000 })
+}
