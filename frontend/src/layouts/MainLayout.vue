@@ -42,13 +42,20 @@
               <el-icon><Box /></el-icon>
               <template #title>销售发货单</template>
             </el-menu-item>
-            <el-menu-item index="/downstream-order-reviews">
-              <el-icon><ChatDotRound /></el-icon>
-              <template #title>订单待审核</template>
-            </el-menu-item>
             <el-menu-item index="/inventory">
               <el-icon><Search /></el-icon>
               <template #title>库存查询</template>
+            </el-menu-item>
+          </el-sub-menu>
+
+          <el-sub-menu index="review">
+            <template #title>
+              <el-icon><DocumentChecked /></el-icon>
+              <span>审核管理</span>
+            </template>
+            <el-menu-item index="/downstream-order-reviews">
+              <el-icon><ChatDotRound /></el-icon>
+              <template #title>销售订单</template>
             </el-menu-item>
           </el-sub-menu>
 
@@ -236,7 +243,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   DataLine, User, Setting, Fold, Expand, Box, UserFilled,
   Search, Bell, SwitchButton, Stamp, Management, Goods, List, QuestionFilled,
-  ChatDotRound, Monitor, Link, Document
+  ChatDotRound, Monitor, Link, Document, DocumentChecked
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import request from '@/utils/request'

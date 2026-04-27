@@ -44,6 +44,21 @@ AT_ORDER_IDLE_TIMEOUT = 15        # 滑动窗口空闲 15 秒
 AT_ORDER_MAX_WAIT = 120           # 最长等待 2 分钟
 AT_ORDER_POLL_INTERVAL = 2        # 轮询间隔 2 秒
 
+# 报单关键词列表——消息必须包含其中之一才触发接单流程
+ORDER_KEYWORDS = [
+    "报单", "我要报单", "报货", "我要报货", "下单", "我要下单",
+    "订货", "我要订货", "补单", "补货", "加单",
+]
+
+
+def contains_order_keyword(text: str) -> bool:
+    """检测文本是否包含报单关键词"""
+    if not text:
+        return False
+    text_lower = text.strip()
+    return any(kw in text_lower for kw in ORDER_KEYWORDS)
+
+
 # 正在采集中的 (room_id, sender_id) → 启动时间，防重复触发
 _active_sessions: dict[tuple[str, str], float] = {}
 
@@ -426,6 +441,219 @@ async def _download_attachment_for_msg(db: Session, ai_input: dict[str, Any], ro
 
 
 # ---------------------------------------------------------------------------
+# 库存校验 & 二次解析
+# ---------------------------------------------------------------------------
+def _query_product_colors_sizes(db: Session, product_no: str) -> dict[str, Any]:
+    """查询指定货号在 erp_inventory 中的所有颜色及对应尺码"""
+    rows = db.execute(
+        text(
+            "SELECT color, sizes_json FROM erp_inventory "
+            "WHERE product_no = :pno AND qty > 0"
+        ),
+        {"pno": product_no},
+    ).mappings().all()
+    colors: dict[str, list[str]] = {}
+    for r in rows:
+        color = r["color"] or ""
+        sizes_raw = r["sizes_json"] or "[]"
+        try:
+            sizes = json.loads(sizes_raw)
+        except Exception:
+            sizes = []
+        size_names = [s["size"] for s in sizes if s.get("size")]
+        if color in colors:
+            for s in size_names:
+                if s not in colors[color]:
+                    colors[color].append(s)
+        else:
+            colors[color] = size_names
+    return colors
+
+
+def validate_order_against_inventory(db: Session, parsed_order: dict[str, Any]) -> dict[str, Any]:
+    """校验 AI 解析结果中的每个 item 的货号、颜色、尺码是否在库存中。
+
+    返回:
+        {
+            "all_valid": bool,
+            "items_result": [
+                {
+                    "item": <原item>,
+                    "valid": bool,
+                    "product_found": bool,
+                    "color_found": bool,
+                    "sizes_issues": ["XS 不存在"],
+                    "available_colors_sizes": {颜色: [尺码]}  # 仅 product_found 时
+                }
+            ]
+        }
+    """
+    items = parsed_order.get("items") or []
+    items_result = []
+    all_valid = True
+
+    for item in items:
+        product_no = (item.get("product_no") or "").strip()
+        color = (item.get("color") or "").strip()
+        sizes = item.get("sizes") or []
+
+        result = {
+            "item": item,
+            "valid": True,
+            "product_found": False,
+            "color_found": False,
+            "sizes_issues": [],
+            "available_colors_sizes": {},
+        }
+
+        if not product_no:
+            result["valid"] = False
+            all_valid = False
+            items_result.append(result)
+            continue
+
+        # 查库存
+        available = _query_product_colors_sizes(db, product_no)
+        result["available_colors_sizes"] = available
+
+        if not available:
+            result["valid"] = False
+            result["product_found"] = False
+            all_valid = False
+            items_result.append(result)
+            continue
+
+        result["product_found"] = True
+
+        # 检查颜色
+        if color and color in available:
+            result["color_found"] = True
+        elif color:
+            result["color_found"] = False
+            result["valid"] = False
+            all_valid = False
+        else:
+            result["color_found"] = False
+            result["valid"] = False
+            all_valid = False
+
+        # 检查尺码
+        if result["color_found"] and available.get(color):
+            available_sizes = available[color]
+            for s in sizes:
+                size_name = s.get("size", "")
+                if size_name and size_name not in available_sizes:
+                    result["sizes_issues"].append(f"{size_name} 不存在")
+                    result["valid"] = False
+                    all_valid = False
+
+        items_result.append(result)
+
+    return {"all_valid": all_valid, "items_result": items_result}
+
+
+def _build_product_hints_text(validation_result: dict[str, Any]) -> str:
+    """从校验结果中构建产品可选颜色/尺码的提示文本，用于 AI 二次解析"""
+    lines = []
+    seen_products = set()
+    for ir in validation_result.get("items_result", []):
+        pno = (ir["item"].get("product_no") or "").strip()
+        if not pno or pno in seen_products:
+            continue
+        seen_products.add(pno)
+        available = ir.get("available_colors_sizes") or {}
+        if not available:
+            lines.append(f"款号 {pno}：库存中未找到该货号")
+            continue
+        color_parts = []
+        for color, sizes in available.items():
+            color_parts.append(f"  {color}: {', '.join(sizes)}")
+        lines.append(f"款号 {pno} 可选颜色和尺码：")
+        lines.extend(color_parts)
+    return "\n".join(lines)
+
+
+REPARSE_SYSTEM_PROMPT = """你是一个服装订单解析助手。客户发来的订单已经过一次解析，但部分颜色或尺码与库存不匹配。
+现在提供该货号的所有可选颜色和尺码，请你重新匹配：
+- 客户说的"白色"可能对应"米白"、"乳白"、"象牙白"等，请根据可选颜色智能匹配
+- 客户说的尺码缩写（如"大"、"中"、"小"）请匹配为标准尺码（S/M/L/XL/2XL/3XL等）
+- 如果确实无法匹配，保留原值并在 uncertainties 中说明
+- 严格返回 JSON，不要返回 markdown
+返回结构与原始订单相同：
+{
+  "customer_name": "",
+  "contact_person": "",
+  "order_date": "YYYY-MM-DD",
+  "remark": "",
+  "items": [
+    {
+      "product_no": "",
+      "product_name": "",
+      "color": "",
+      "brand": "",
+      "unit": "件",
+      "price": 0,
+      "discount": 1,
+      "sizes": [{"size": "S", "qty": 1}],
+      "remark": ""
+    }
+  ],
+  "uncertainties": []
+}
+"""
+
+
+async def reparse_with_product_hints(
+    ai_inputs: list[dict[str, Any]],
+    first_parse_result: dict[str, Any],
+    validation_result: dict[str, Any],
+    customer_hint: str = "",
+    db: Optional[Session] = None,
+) -> dict[str, Any]:
+    """用库存颜色/尺码提示信息让 AI 重新解析订单"""
+    product_hints = _build_product_hints_text(validation_result)
+
+    cfg = ai_order_parser._load_config(db)
+    ai_order_parser._ensure_enabled(cfg)
+    has_image = any(m.get("type") == "image" for m in ai_inputs)
+    model = cfg["vision_model"] if has_image else cfg["model"]
+
+    user_parts: list[dict[str, Any]] = []
+    user_parts.append({
+        "type": "text",
+        "text": (
+            f"客户提示: {customer_hint or '无'}\n\n"
+            f"=== 第一次解析结果 ===\n{json.dumps(first_parse_result, ensure_ascii=False, indent=2)}\n\n"
+            f"=== 库存可选颜色和尺码 ===\n{product_hints}\n\n"
+            f"请根据以上库存信息重新匹配颜色和尺码，输出修正后的完整订单 JSON。\n"
+            f"以下是客户原始消息供参考："
+        ),
+    })
+
+    for idx, msg in enumerate(ai_inputs, 1):
+        msg_type = msg.get("type", "text")
+        if msg_type == "text":
+            user_parts.append({"type": "text", "text": f"[消息{idx}] {msg.get('content', '')}"})
+        elif msg_type == "image" and msg.get("base64"):
+            mime = msg.get("mime") or "image/png"
+            user_parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
+            user_parts.append({"type": "image_url", "image_url": {"url": msg['base64']}})
+        elif msg_type == "file":
+            summary = msg.get("excel_summary") or msg.get("content") or ""
+            fname = msg.get("file_name") or "附件"
+            user_parts.append({"type": "text", "text": f"[消息{idx}] 文件 {fname}:\n{summary}"})
+
+    return await ai_order_parser._chat(
+        model,
+        [
+            {"role": "system", "content": REPARSE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_parts},
+        ],
+        db=db,
+    )
+
+
+# ---------------------------------------------------------------------------
 # 写入审核队列
 # ---------------------------------------------------------------------------
 def _build_context_summary(ai_inputs: list[dict[str, Any]]) -> str:
@@ -547,7 +775,7 @@ async def handle_at_order(
             logger.warning("@接单: 无有效消息内容 room=%s sender=%s", room_id, sender_id)
             return
 
-        # 5. AI 批量解析
+        # 5. AI 第一次解析
         context_summary = _build_context_summary(valid_inputs)
         customer_hint = customer.get("customer_name") or ""
 
@@ -555,14 +783,35 @@ async def handle_at_order(
         try:
             parsed = await ai_order_parser.parse_batch(valid_inputs, customer_hint=customer_hint, db=db)
             normalized = _normalize_order(parsed, customer_hint)
+            logger.info("@接单: 第一次解析完成 room=%s items=%d", room_id, len(normalized.get("items") or []))
 
-            # 6. 写入审核队列
+            # 6. 库存校验：货号+颜色+尺码
+            from app.services.erp_sync import ensure_tables
+            ensure_tables(db)
+            validation = validate_order_against_inventory(db, normalized)
+
+            final_order = normalized
+            if not validation["all_valid"]:
+                logger.info("@接单: 库存校验未通过，启动二次解析 room=%s", room_id)
+                try:
+                    reparsed = await reparse_with_product_hints(
+                        valid_inputs, normalized, validation,
+                        customer_hint=customer_hint, db=db,
+                    )
+                    final_order = _normalize_order(reparsed, customer_hint)
+                    logger.info("@接单: 二次解析完成 room=%s items=%d", room_id, len(final_order.get("items") or []))
+                except Exception as reparse_exc:
+                    logger.warning("@接单: 二次解析失败，使用第一次结果 room=%s: %s", room_id, reparse_exc)
+            else:
+                logger.info("@接单: 库存校验全部通过 room=%s", room_id)
+
+            # 7. 写入审核队列
             review_id = _write_review(
-                db, normalized, customer, room_id, sender_id, instance_id, context_summary,
+                db, final_order, customer, room_id, sender_id, instance_id, context_summary,
                 parse_status="success",
             )
 
-            # 7. 写入 at_order_contexts
+            # 8. 写入 at_order_contexts
             ensure_at_order_tables(db)
             collected_ids = [msg["id"] for msg in collected_msgs]
             db.execute(
@@ -589,8 +838,8 @@ async def handle_at_order(
             )
             db.commit()
 
-            # 8. 群内回复解析结果
-            items = normalized.get("items") or []
+            # 9. 群内回复解析结果
+            items = final_order.get("items") or []
             total_qty = sum(sum(s.get("qty", 0) for s in it.get("sizes", [])) for it in items)
             product_list = ", ".join(it.get("product_no", "?") for it in items[:5])
             if len(items) > 5:

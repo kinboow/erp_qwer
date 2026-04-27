@@ -1,6 +1,7 @@
 import base64
 import json
 import logging
+import re
 from typing import Any, Optional
 
 import httpx
@@ -80,6 +81,31 @@ class AIOrderParser:
         if not cfg.get("api_key"):
             raise AIOrderParserError("未配置 AI API Key，无法进行 AI 解析")
 
+    @staticmethod
+    def _extract_json(text_content: str) -> dict[str, Any]:
+        """从 AI 返回的文本中提取 JSON（兼容 markdown 代码块包裹）"""
+        text_content = text_content.strip()
+        # 1. 直接尝试解析
+        try:
+            return json.loads(text_content)
+        except Exception:
+            pass
+        # 2. 尝试从 ```json ... ``` 代码块中提取
+        m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", text_content, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except Exception:
+                pass
+        # 3. 尝试提取第一个 { ... } 块
+        m = re.search(r"(\{.*\})", text_content, re.DOTALL)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except Exception:
+                pass
+        raise AIOrderParserError(f"AI 返回内容不是有效 JSON: {text_content[:300]}")
+
     async def _chat(self, model: str, messages: list[dict[str, Any]], db: Optional[Session] = None) -> dict[str, Any]:
         cfg = self._load_config(db)
         self._ensure_enabled(cfg)
@@ -87,27 +113,25 @@ class AIOrderParser:
         api_key = cfg["api_key"]
         temperature = cfg.get("temperature", 0.1)
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        request_body: dict[str, Any] = {
+            "model": model,
+            "temperature": temperature,
+            "messages": messages,
+        }
+
+        async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 f"{base_url}/chat/completions",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": model,
-                    "temperature": temperature,
-                    "response_format": {"type": "json_object"},
-                    "messages": messages,
-                },
+                json=request_body,
             )
         response.raise_for_status()
         payload = response.json()
         content = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}").strip()
-        try:
-            return json.loads(content)
-        except Exception as exc:
-            raise AIOrderParserError(f"AI 返回内容不是有效 JSON: {content[:200]}") from exc
+        return self._extract_json(content)
 
     async def parse_text(self, text: str, customer_hint: str = "", db: Optional[Session] = None) -> dict[str, Any]:
         cfg = self._load_config(db)
@@ -133,7 +157,7 @@ class AIOrderParser:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": f"请解析图片中的下单信息。补充说明: {extra_text or '无'}"},
-                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}},
+                        {"type": "image_url", "image_url": {"url": image_base64}},
                     ],
                 },
             ],
@@ -187,7 +211,7 @@ class AIOrderParser:
             elif msg_type == "image" and msg.get("base64"):
                 mime = msg.get("mime") or "image/png"
                 user_parts.append({"type": "text", "text": f"[消息{idx}] 图片:"})
-                user_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
+                user_parts.append({"type": "image_url", "image_url": {"url": msg['base64']}})
             elif msg_type == "file":
                 summary = msg.get("excel_summary") or msg.get("content") or ""
                 fname = msg.get("file_name") or "附件"
@@ -201,6 +225,24 @@ class AIOrderParser:
             ],
             db=db,
         )
+
+
+    async def upload_file(self, file_bytes: bytes, filename: str, purpose: str = "agent", db: Optional[Session] = None) -> dict[str, Any]:
+        """上传文件到智谱 /files API，返回 FileObject"""
+        cfg = self._load_config(db)
+        self._ensure_enabled(cfg)
+        base_url = cfg["base_url"].rstrip("/")
+        api_key = cfg["api_key"]
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                f"{base_url}/files",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (filename, file_bytes)},
+                data={"purpose": purpose},
+            )
+        response.raise_for_status()
+        return response.json()
 
 
 ai_order_parser = AIOrderParser()

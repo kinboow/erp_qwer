@@ -40,11 +40,11 @@ class Settings(BaseSettings):
     MQ_PASSWORD: str = "guest"
     MQ_VHOST: str = "/"
 
-    # AI解析配置
-    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    # AI解析配置（智谱 GLM）
+    OPENAI_BASE_URL: str = "https://open.bigmodel.cn/api/paas/v4"
     OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-4o-mini"
-    OPENAI_VISION_MODEL: str = "gpt-4o-mini"
+    OPENAI_MODEL: str = "glm-4.6v-flash"
+    OPENAI_VISION_MODEL: str = "glm-4.6v-flash"
 
     # ERP集成配置
     ERP_BASE_URL: str = ""

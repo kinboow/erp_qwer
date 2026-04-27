@@ -74,7 +74,7 @@ const routes = [
         path: 'downstream-order-reviews',
         name: 'DownstreamOrderReviews',
         component: () => import('@/views/business/DownstreamOrderReviews.vue'),
-        meta: { title: '订单待审核' }
+        meta: { title: '销售订单' }
       },
       {
         path: 'products',

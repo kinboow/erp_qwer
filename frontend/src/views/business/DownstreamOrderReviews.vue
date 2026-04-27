@@ -1,30 +1,21 @@
 <template>
   <div class="review-page">
-    <div class="lark-page-header">
-      <div class="header-title">订单待审核</div>
-      <div class="header-desc">接收企微客户群消息，AI 解析后进入人工审核，再决定下单、替换旧单、手动录单或废单。</div>
-    </div>
+    <div class="review-main">
+      <!-- ====== 左侧：待审核列表 ====== -->
+      <div class="list-panel">
+        <div class="list-toolbar">
+          <el-select v-model="filters.review_status" clearable placeholder="审核状态" size="default" style="width: 140px" @change="fetchReviews">
+            <el-option label="待审核" value="pending" />
+            <el-option label="已审核下单" value="approved" />
+            <el-option label="已替换旧单" value="replaced" />
+            <el-option label="手动录单" value="manual_ordered" />
+            <el-option label="废单" value="voided" />
+          </el-select>
+          <el-button class="lark-btn-secondary" size="default" @click="fetchReviews">刷新</el-button>
+          <span class="list-total">{{ pagination.total }} 条</span>
+        </div>
 
-    <div class="toolbar-card">
-      <div class="toolbar-left">
-        <el-select v-model="filters.review_status" clearable placeholder="审核状态" style="width: 180px" @change="fetchReviews">
-          <el-option label="待审核" value="pending" />
-          <el-option label="已审核下单" value="approved" />
-          <el-option label="已替换旧单" value="replaced" />
-          <el-option label="手动录单" value="manual_ordered" />
-          <el-option label="废单" value="voided" />
-        </el-select>
-        <el-button class="lark-btn-secondary" @click="fetchReviews">刷新</el-button>
-      </div>
-      <div class="toolbar-right">
-        <span class="summary-text">共 {{ pagination.total }} 条待审核消息</span>
-      </div>
-    </div>
-
-    <div class="review-layout">
-      <div class="review-list-card">
-        <div class="card-title">消息列表</div>
-        <el-scrollbar height="calc(100vh - 270px)">
+        <el-scrollbar class="list-scroll">
           <div
             v-for="item in reviewList"
             :key="item.id"
@@ -33,7 +24,7 @@
             @click="selectReview(item)"
           >
             <div class="review-item-head">
-              <div class="room-name">{{ item.room_name || '未命名群聊' }}</div>
+              <span class="room-name">{{ item.room_name || '未命名群聊' }}</span>
               <el-tag size="small" :type="statusTagType(item.review_status)">{{ statusText(item.review_status) }}</el-tag>
             </div>
             <div class="review-item-meta">
@@ -42,92 +33,96 @@
             </div>
             <div class="review-item-desc">{{ item.content_text || item.attachment_name || '无文本内容' }}</div>
           </div>
-          <el-empty v-if="!reviewLoading && reviewList.length === 0" description="暂无待审核消息" />
+          <el-empty v-if="!reviewLoading && reviewList.length === 0" description="暂无数据" :image-size="64" />
         </el-scrollbar>
+
+        <div class="list-pagination">
+          <el-pagination
+            v-model:current-page="pagination.page"
+            v-model:page-size="pagination.pageSize"
+            :total="pagination.total"
+            :page-sizes="[10, 20, 50]"
+            small
+            layout="prev, pager, next"
+            @size-change="fetchReviews"
+            @current-change="fetchReviews"
+          />
+        </div>
       </div>
 
-      <div class="review-detail-card">
-        <div v-if="selectedReview" class="detail-inner">
-          <div class="detail-head">
-            <div>
-              <div class="card-title">审核详情</div>
-              <div class="detail-subtitle">
-                {{ selectedReview.room_name || '未命名群聊' }}
-                <span v-if="selectedReview.sender_name"> / {{ selectedReview.sender_name }}</span>
-              </div>
+      <!-- ====== 右侧：审核详情 ====== -->
+      <div class="detail-panel">
+        <template v-if="selectedReview">
+          <!-- 顶部信息栏 -->
+          <div class="detail-header">
+            <div class="detail-header-left">
+              <span class="detail-room">{{ selectedReview.room_name || '未命名群聊' }}</span>
+              <span v-if="selectedReview.sender_name" class="detail-sender">/ {{ selectedReview.sender_name }}</span>
+              <el-tag size="small" :type="statusTagType(selectedReview.review_status)" style="margin-left:8px">{{ statusText(selectedReview.review_status) }}</el-tag>
             </div>
-            <div class="detail-actions-top">
-              <el-button class="lark-btn-secondary" @click="handleReparse" :loading="actionLoading">重新解析</el-button>
+            <el-button class="lark-btn-secondary" size="default" @click="handleReparse" :loading="actionLoading">重新解析</el-button>
+          </div>
+
+          <!-- 中间对比区：左原始消息 / 右解析结果 -->
+          <div class="detail-body">
+            <div class="compare-grid">
+              <div class="compare-left">
+                <div class="panel-label">原始消息</div>
+                <div class="msg-meta-row">
+                  <span>类型：{{ selectedReview.message_type || '-' }}</span>
+                  <span>附件：{{ selectedReview.attachment_name || '-' }}</span>
+                </div>
+                <pre class="raw-block">{{ formatRawMessage(selectedReview) }}</pre>
+              </div>
+
+              <div class="compare-right">
+                <div class="panel-label">解析结果（下单内容）</div>
+                <template v-if="currentOrder">
+                  <div class="order-info-bar">
+                    <span>客户：<strong>{{ currentOrder.customer_name || selectedReview.customer_name || '-' }}</strong></span>
+                    <span>联系人：<strong>{{ currentOrder.contact_person || '-' }}</strong></span>
+                    <span>下单时间：<strong>{{ currentOrder.order_date || '-' }}</strong></span>
+                    <span v-if="currentOrder.remark">备注：<strong>{{ currentOrder.remark }}</strong></span>
+                  </div>
+                  <el-table :data="currentOrder.items || []" border size="small" class="order-table" max-height="380">
+                    <el-table-column type="index" label="#" width="42" align="center" />
+                    <el-table-column prop="product_no" label="款号" min-width="120" show-overflow-tooltip />
+                    <el-table-column prop="color" label="颜色" min-width="90" show-overflow-tooltip />
+                    <el-table-column label="尺码 × 数量" min-width="180">
+                      <template #default="{ row }">
+                        {{ formatSizes(row.sizes) }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column prop="remark" label="备注" min-width="110" show-overflow-tooltip />
+                  </el-table>
+                  <div v-if="currentOrder.uncertainties?.length" class="uncertainty-box">
+                    <div class="uncertainty-title">待确认信息</div>
+                    <div v-for="(u, idx) in currentOrder.uncertainties" :key="idx" class="uncertainty-item">{{ u }}</div>
+                  </div>
+                </template>
+                <el-empty v-else description="暂无解析结果" :image-size="48" />
+              </div>
             </div>
           </div>
 
-          <div class="compare-grid">
-            <div class="compare-panel">
-              <div class="panel-title">原始消息</div>
-              <div class="message-meta">
-                <span>消息类型：{{ selectedReview.message_type || '-' }}</span>
-                <span>附件：{{ selectedReview.attachment_name || '-' }}</span>
-              </div>
-              <pre class="json-block">{{ formatRawMessage(selectedReview) }}</pre>
-            </div>
-
-            <div class="compare-panel">
-              <div class="panel-title">解析结果</div>
-              <template v-if="currentOrder">
-                <div class="parsed-summary">
-                  <div class="summary-row"><span>客户：</span><strong>{{ currentOrder.customer_name || selectedReview.customer_name || '-' }}</strong></div>
-                  <div class="summary-row"><span>联系人：</span><strong>{{ currentOrder.contact_person || '-' }}</strong></div>
-                  <div class="summary-row"><span>下单时间：</span><strong>{{ currentOrder.order_date || '-' }}</strong></div>
-                  <div class="summary-row"><span>备注：</span><strong>{{ currentOrder.remark || '-' }}</strong></div>
-                </div>
-                <el-table :data="currentOrder.items || []" border size="small" class="parsed-table">
-                  <el-table-column prop="product_no" label="款号" min-width="120" />
-                  <el-table-column prop="color" label="颜色" min-width="100" />
-                  <el-table-column label="尺码数量" min-width="180">
-                    <template #default="{ row }">
-                      {{ formatSizes(row.sizes) }}
-                    </template>
-                  </el-table-column>
-                  <el-table-column prop="remark" label="备注" min-width="120" show-overflow-tooltip />
-                </el-table>
-                <div v-if="currentOrder.uncertainties?.length" class="uncertainty-box">
-                  <div class="uncertainty-title">待确认信息</div>
-                  <div v-for="(item, index) in currentOrder.uncertainties" :key="index" class="uncertainty-item">{{ item }}</div>
-                </div>
-              </template>
-              <el-empty v-else description="暂无解析结果" />
-            </div>
-          </div>
-
-          <div class="action-panel">
-            <div class="action-form-row">
-              <el-select v-model="selectedCustomerId" filterable placeholder="请选择客户" style="width: 280px">
-                <el-option v-for="item in customerOptions" :key="item.id" :label="`${item.customer_name}${item.erp_customer_id ? ` (${item.erp_customer_id})` : ''}`" :value="item.id" />
+          <!-- 底部操作栏 -->
+          <div class="detail-footer">
+            <div class="footer-form">
+              <el-select v-model="selectedCustomerId" filterable placeholder="请选择客户" style="width: 260px">
+                <el-option v-for="c in customerOptions" :key="c.id" :label="`${c.customer_name}${c.erp_customer_id ? ` (${c.erp_customer_id})` : ''}`" :value="c.id" />
               </el-select>
-              <el-input v-model="reviewNote" placeholder="审核备注（选填）" />
+              <el-input v-model="reviewNote" placeholder="审核备注（选填）" style="flex:1" />
             </div>
-            <div class="action-buttons">
-              <el-button type="primary" :loading="actionLoading" @click="handleApprove">审核</el-button>
+            <div class="footer-actions">
+              <el-button type="primary" :loading="actionLoading" @click="handleApprove">审核下单</el-button>
               <el-button type="warning" :loading="actionLoading" @click="handleReplace">替换旧单</el-button>
               <el-button type="success" :loading="actionLoading" @click="openManualDialog">手动录单</el-button>
               <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">废单</el-button>
             </div>
           </div>
-        </div>
-        <el-empty v-else description="请选择左侧消息查看详情" />
+        </template>
+        <el-empty v-else description="请选择左侧消息查看详情" class="detail-empty" />
       </div>
-    </div>
-
-    <div class="pagination-wrap">
-      <el-pagination
-        v-model:current-page="pagination.page"
-        v-model:page-size="pagination.pageSize"
-        :total="pagination.total"
-        :page-sizes="[10, 20, 50]"
-        layout="sizes, prev, pager, next, jumper"
-        @size-change="fetchReviews"
-        @current-change="fetchReviews"
-      />
     </div>
 
     <el-dialog v-model="manualDialogVisible" title="手动录单" width="860px" destroy-on-close>
@@ -207,7 +202,7 @@ const manualDialogVisible = ref(false)
 const manualCustomerId = ref(null)
 
 const filters = reactive({
-  review_status: ''
+  review_status: 'pending'
 })
 
 const pagination = reactive({
@@ -274,8 +269,12 @@ const formatRawMessage = (row) => {
 }
 
 const fetchCustomers = async () => {
-  const res = await getCustomerList({ page: 1, pageSize: 500 })
-  customerOptions.value = res.data.list || []
+  try {
+    const res = await getCustomerList({ page: 1, pageSize: 500 })
+    customerOptions.value = res?.data?.list || []
+  } catch {
+    customerOptions.value = []
+  }
 }
 
 const fetchReviews = async () => {
@@ -286,8 +285,8 @@ const fetchReviews = async () => {
       pageSize: pagination.pageSize,
       review_status: filters.review_status || undefined
     })
-    reviewList.value = res.data.list || []
-    pagination.total = res.data.total || 0
+    reviewList.value = res?.data?.list || []
+    pagination.total = res?.data?.total || 0
     if (reviewList.value.length > 0) {
       const targetId = selectedReview.value?.id
       const matched = reviewList.value.find(item => item.id === targetId) || reviewList.value[0]
@@ -295,6 +294,10 @@ const fetchReviews = async () => {
     } else {
       selectedReview.value = null
     }
+  } catch {
+    reviewList.value = []
+    pagination.total = 0
+    selectedReview.value = null
   } finally {
     reviewLoading.value = false
   }
@@ -450,103 +453,102 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+/* ===== 整体布局 ===== */
 .review-page {
+  height: calc(100vh - 100px);
   display: flex;
   flex-direction: column;
+}
+
+.review-main {
+  flex: 1;
+  display: flex;
   gap: 16px;
+  min-height: 0;
 }
 
-.lark-page-header {
-  margin-bottom: 4px;
-}
-
-.header-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--lark-text-primary);
-  margin-bottom: 6px;
-}
-
-.header-desc {
-  font-size: 13px;
-  color: var(--lark-text-secondary);
-}
-
-.toolbar-card,
-.review-list-card,
-.review-detail-card {
+/* ===== 左侧列表面板 ===== */
+.list-panel {
+  width: 320px;
+  flex-shrink: 0;
   background: var(--lark-bg-base);
   border-radius: var(--lark-radius-lg);
-  padding: 16px 20px;
-}
-
-.toolbar-card {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.toolbar-left,
-.toolbar-right,
-.action-form-row,
-.action-buttons,
-.manual-top-row {
+.list-toolbar {
   display: flex;
-  gap: 12px;
   align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--lark-border-light);
+  flex-shrink: 0;
 }
 
-.summary-text,
-.detail-subtitle,
-.message-meta {
+.list-total {
+  margin-left: auto;
+  font-size: 12px;
   color: var(--lark-text-secondary);
-  font-size: 13px;
+  white-space: nowrap;
 }
 
-.review-layout {
-  display: grid;
-  grid-template-columns: 320px 1fr;
-  gap: 16px;
+.list-scroll {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 10px;
 }
 
-.card-title,
-.panel-title {
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--lark-text-primary);
+.list-pagination {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--lark-border-light);
 }
 
+/* 列表项 */
 .review-list-item {
   border: 1px solid var(--lark-border-light);
-  border-radius: 12px;
-  padding: 12px;
-  margin-bottom: 10px;
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: all 0.15s ease;
 }
 
-.review-list-item:hover,
+.review-list-item:hover {
+  background: var(--lark-bg-hover);
+}
+
 .review-list-item.active {
   border-color: var(--lark-primary);
   background: var(--lark-primary-light);
 }
 
-.review-item-head,
-.review-item-meta,
-.detail-head {
+.review-item-head {
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  align-items: center;
+  margin-bottom: 6px;
 }
 
-.review-item-head {
-  margin-bottom: 8px;
+.room-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--lark-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .review-item-meta {
+  display: flex;
+  justify-content: space-between;
   font-size: 12px;
   color: var(--lark-text-secondary);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .review-item-desc {
@@ -554,50 +556,101 @@ onMounted(async () => {
   color: var(--lark-text-regular);
   line-height: 1.5;
   display: -webkit-box;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
 
-.detail-inner {
+/* ===== 右侧详情面板 ===== */
+.detail-panel {
+  flex: 1;
+  min-width: 0;
+  background: var(--lark-bg-base);
+  border-radius: var(--lark-radius-lg);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  overflow: hidden;
+}
+
+.detail-empty {
+  margin: auto;
+}
+
+/* 顶栏 */
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--lark-border-light);
+  flex-shrink: 0;
+}
+
+.detail-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.detail-room {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--lark-text-primary);
+  white-space: nowrap;
+}
+
+.detail-sender {
+  font-size: 13px;
+  color: var(--lark-text-secondary);
+  white-space: nowrap;
+}
+
+/* 中间内容区 */
+.detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px 20px;
 }
 
 .compare-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 340px 1fr;
   gap: 16px;
+  min-height: 100%;
 }
 
-.compare-panel {
-  border: 1px solid var(--lark-border-light);
-  border-radius: 12px;
-  padding: 14px;
-  min-height: 420px;
-}
-
-.message-meta,
-.parsed-summary {
-  margin-top: 10px;
-  margin-bottom: 12px;
-}
-
-.message-meta {
+.compare-left,
+.compare-right {
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
-.summary-row {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 8px;
+.compare-left {
+  border-right: 1px solid var(--lark-border-light);
+  padding-right: 16px;
+}
+
+.panel-label {
   font-size: 13px;
+  font-weight: 600;
+  color: var(--lark-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
 }
 
-.json-block {
+.msg-meta-row {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--lark-text-secondary);
+  margin-bottom: 10px;
+}
+
+.raw-block {
+  flex: 1;
   background: #f7f8fa;
   border-radius: 8px;
   padding: 12px;
@@ -606,49 +659,71 @@ onMounted(async () => {
   color: #334155;
   white-space: pre-wrap;
   word-break: break-word;
-  max-height: 500px;
   overflow: auto;
+  margin: 0;
 }
 
-.parsed-table {
-  margin-top: 8px;
+.order-info-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--lark-text-regular);
+  margin-bottom: 12px;
+}
+
+.order-table {
+  margin-bottom: 8px;
 }
 
 .uncertainty-box {
-  margin-top: 14px;
+  margin-top: 12px;
   background: #fff7e6;
   border: 1px solid #ffd591;
   border-radius: 8px;
-  padding: 12px;
+  padding: 10px 12px;
 }
 
 .uncertainty-title {
   font-weight: 600;
-  margin-bottom: 8px;
+  font-size: 13px;
+  margin-bottom: 6px;
 }
 
 .uncertainty-item {
   font-size: 13px;
   color: #8c6d1f;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
-.action-panel {
+/* 底部操作栏 */
+.detail-footer {
+  flex-shrink: 0;
   border-top: 1px solid var(--lark-border-light);
-  padding-top: 16px;
+  padding: 12px 20px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
-.action-form-row {
-  display: grid;
-  grid-template-columns: 280px 1fr;
-}
-
-.pagination-wrap {
+.footer-form {
   display: flex;
-  justify-content: flex-end;
+  gap: 12px;
+  align-items: center;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* 手动录单弹窗 */
+.manual-top-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 12px;
 }
 
 .manual-actions,
@@ -658,11 +733,16 @@ onMounted(async () => {
   justify-content: space-between;
 }
 
+/* 响应式 */
 @media (max-width: 1200px) {
-  .review-layout,
-  .compare-grid,
-  .action-form-row {
+  .compare-grid {
     grid-template-columns: 1fr;
+  }
+  .compare-left {
+    border-right: none;
+    border-bottom: 1px solid var(--lark-border-light);
+    padding-right: 0;
+    padding-bottom: 16px;
   }
 }
 </style>

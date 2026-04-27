@@ -12,7 +12,7 @@
         </el-form-item>
 
         <el-form-item label="API Key">
-          <el-input v-model="form.ai_api_key" placeholder="智谱/OpenAI API Key" show-password />
+          <el-input v-model="form.ai_api_key" :placeholder="maskedApiKey || '请输入智谱 API Key'" show-password />
         </el-form-item>
 
         <div class="form-row">
@@ -44,7 +44,7 @@
       </div>
 
       <div class="form-actions">
-        <el-button type="primary" @click="handleTest" :loading="testing" :disabled="!form.ai_base_url || !form.ai_api_key">
+        <el-button type="primary" @click="handleTest" :loading="testing" :disabled="!form.ai_base_url || (!form.ai_api_key && !maskedApiKey)">
           <el-icon><Connection /></el-icon>
           测试连接
         </el-button>
@@ -93,13 +93,15 @@ const form = reactive({
 
 const temperature = ref(0.1)
 const aiEnabled = ref(true)
+const maskedApiKey = ref('')
 
 async function loadConfig() {
   try {
     const res = await getAiConfig()
     const cfg = res.data || {}
     form.ai_base_url = cfg.ai_base_url || ''
-    form.ai_api_key = cfg.ai_api_key || ''
+    maskedApiKey.value = cfg.ai_api_key || ''
+    form.ai_api_key = ''
     form.ai_model = cfg.ai_model || ''
     form.ai_vision_model = cfg.ai_vision_model || ''
     temperature.value = parseFloat(cfg.ai_temperature) || 0.1
@@ -110,15 +112,19 @@ async function loadConfig() {
 async function handleSave() {
   saving.value = true
   try {
-    await saveAiConfig({
+    const payload = {
       ai_base_url: form.ai_base_url,
-      ai_api_key: form.ai_api_key,
       ai_model: form.ai_model,
       ai_vision_model: form.ai_vision_model,
       ai_temperature: String(temperature.value),
       ai_enabled: aiEnabled.value ? 'true' : 'false',
-    })
+    }
+    if (form.ai_api_key) {
+      payload.ai_api_key = form.ai_api_key
+    }
+    await saveAiConfig(payload)
     ElMessage.success('AI 配置已保存')
+    await loadConfig()
   } catch (e) {
     ElMessage.error(e?.response?.data?.message || '保存失败')
   } finally {
@@ -130,7 +136,14 @@ async function handleTest() {
   testing.value = true
   testResult.value = null
   try {
-    const res = await testAiConnection()
+    const testPayload = {
+      ai_base_url: form.ai_base_url,
+      ai_model: form.ai_model,
+    }
+    if (form.ai_api_key) {
+      testPayload.ai_api_key = form.ai_api_key
+    }
+    const res = await testAiConnection(testPayload)
     testResult.value = res.data || {}
     ElMessage.success('AI 连接测试成功')
   } catch (e) {

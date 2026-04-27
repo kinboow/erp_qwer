@@ -8,6 +8,6 @@ export const saveAiConfig = (data) => {
   return request({ url: '/api/ai/config', method: 'put', data })
 }
 
-export const testAiConnection = () => {
-  return request({ url: '/api/ai/test', method: 'post', timeout: 30000 })
+export const testAiConnection = (data) => {
+  return request({ url: '/api/ai/test', method: 'post', data, timeout: 30000 })
 }

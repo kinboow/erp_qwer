@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.services.downstream_orders import create_review_from_callback, resolve_customer_by_room
 from app.services.message_logs import record_message_log
-from app.services.at_order_handler import extract_trigger_info, handle_at_order, is_at_bot
+from app.services.at_order_handler import contains_order_keyword, extract_trigger_info, handle_at_order, is_at_bot
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,8 @@ async def ingest_runtime_message(
             trigger_info = extract_trigger_info(normalized_payload, resolved_instance_id)
             trigger_room_id = trigger_info.get("room_id") or ""
             trigger_sender_id = trigger_info.get("sender_id") or ""
-            if trigger_room_id and trigger_sender_id:
+            trigger_content = trigger_info.get("content") or ""
+            if trigger_room_id and trigger_sender_id and contains_order_keyword(trigger_content):
                 customer = resolve_customer_by_room(db, trigger_room_id, resolved_instance_id)
                 if customer:
                     trigger_msg_id = (log_result or {}).get("id") or 0

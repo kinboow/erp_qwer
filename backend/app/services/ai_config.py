@@ -26,8 +26,8 @@ CREATE TABLE IF NOT EXISTS ai_config (
 _AI_CONFIG_DEFAULTS: dict[str, str] = {
     "ai_base_url": "https://open.bigmodel.cn/api/paas/v4",
     "ai_api_key": "",
-    "ai_model": "GLM-4.6V",
-    "ai_vision_model": "GLM-4.6V",
+    "ai_model": "glm-4.6v-flash",
+    "ai_vision_model": "glm-4.6v-flash",
     "ai_temperature": "0.1",
     "ai_enabled": "true",
 }
