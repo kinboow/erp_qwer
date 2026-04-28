@@ -7,21 +7,17 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
+import subprocess
 import uuid
+from base64 import b64encode
 from datetime import datetime
 from typing import Any
 
-import barcode
-from barcode.writer import ImageWriter
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+import qrcode
+from qrcode.image.pil import PilImage
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.units import mm
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import (
-    SimpleDocTemplate, Table, TableStyle, Spacer, Paragraph, Image as RLImage,
-)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -29,7 +25,7 @@ from app.utils.oss_client import oss_client
 
 logger = logging.getLogger(__name__)
 
-PAGE_W, PAGE_H = A4  # 595.27, 841.89 pt
+PAGE_W, PAGE_H = landscape(A4)  # 841.89, 595.27 pt
 
 # ---------------------------------------------------------------------------
 # DDL
@@ -78,59 +74,147 @@ def _register_chinese_font() -> str:
     font_name = "ChineseFont"
     if _FONT_REGISTERED:
         return font_name
-
-    import platform
-    import os
-
-    candidates = []
-    if platform.system() == "Windows":
-        windir = os.environ.get("WINDIR", r"C:\Windows")
-        candidates = [
-            os.path.join(windir, "Fonts", "msyh.ttc"),     # 微软雅黑
-            os.path.join(windir, "Fonts", "simsun.ttc"),    # 宋体
-            os.path.join(windir, "Fonts", "simhei.ttf"),    # 黑体
-        ]
-    else:
-        candidates = [
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "/System/Library/Fonts/PingFang.ttc",
-        ]
-
-    for path in candidates:
-        if os.path.isfile(path):
-            try:
-                pdfmetrics.registerFont(TTFont(font_name, path))
-                _FONT_REGISTERED = True
-                logger.info("拣货单: 注册字体 %s -> %s", font_name, path)
-                return font_name
-            except Exception as e:
-                logger.warning("拣货单: 注册字体失败 %s: %s", path, e)
-
-    # 回退到 Helvetica（不支持中文但至少不崩溃）
-    logger.warning("拣货单: 未找到中文字体，回退 Helvetica")
+    _FONT_REGISTERED = True
     return "Helvetica"
 
 
 # ---------------------------------------------------------------------------
-# 条形码生成
+# 二维码生成
 # ---------------------------------------------------------------------------
-def _generate_barcode_image(content: str, width_mm: float = 50, height_mm: float = 12) -> io.BytesIO:
-    """生成 Code128 条形码 PNG 图片，返回 BytesIO"""
-    code128 = barcode.get_barcode_class("code128")
-    writer = ImageWriter()
-    writer.set_options({
-        "module_width": 0.25,
-        "module_height": height_mm,
-        "font_size": 6,
-        "text_distance": 2,
-        "quiet_zone": 2,
-    })
-    bc = code128(content, writer=writer)
+def _generate_qr_image(content: str, box_size: int = 4, border: int = 1) -> io.BytesIO:
+    """生成 QR Code PNG 图片，返回 BytesIO"""
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=box_size,
+        border=border,
+    )
+    qr.add_data(content)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
     buf = io.BytesIO()
-    bc.write(buf, options={"write_text": True})
+    img.save(buf, format="PNG")
     buf.seek(0)
     return buf
+
+
+def _image_buf_to_data_url(buf: io.BytesIO) -> str:
+    return f"data:image/png;base64,{b64encode(buf.getvalue()).decode('ascii')}"
+
+
+# ---------------------------------------------------------------------------
+# 尺码排序
+# ---------------------------------------------------------------------------
+_SIZE_ORDER = [
+    "XXS", "XS", "S", "M", "L", "XL", "2XL", "3XL", "4XL", "5XL", "6XL",
+    "26", "27", "28", "29", "30", "31", "32", "33", "34", "35", "36",
+    "37", "38", "39", "40", "41", "42", "43", "44", "45", "46",
+    "F", "均码",
+]
+_SIZE_RANK = {s: i for i, s in enumerate(_SIZE_ORDER)}
+
+
+def _size_sort_key(size_name: str) -> tuple:
+    upper = size_name.strip().upper()
+    if upper in _SIZE_RANK:
+        return (0, _SIZE_RANK[upper])
+    return (1, size_name)
+
+
+# ---------------------------------------------------------------------------
+# 按货号分组
+# ---------------------------------------------------------------------------
+def _group_items_to_product_blocks(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from collections import OrderedDict
+    grouped: OrderedDict[str, dict] = OrderedDict()
+    for item in items:
+        pno = item.get("product_no") or "未知"
+        if pno not in grouped:
+            grouped[pno] = {"product_no": pno, "size_set": set(), "color_rows": []}
+        color = item.get("color") or "-"
+        sizes = item.get("sizes") or []
+        qty_map: dict[str, int] = {}
+        subtotal = 0
+        for s in sizes:
+            sn = s.get("size", "")
+            sq = int(s.get("qty", 0))
+            if sn:
+                qty_map[sn] = qty_map.get(sn, 0) + sq
+                grouped[pno]["size_set"].add(sn)
+            subtotal += sq
+        grouped[pno]["color_rows"].append({"color": color, "qty_map": qty_map, "subtotal": subtotal})
+
+    blocks = []
+    for pno, g in grouped.items():
+        blocks.append({
+            "product_no": pno,
+            "color_rows": g["color_rows"],
+            "n_rows": len(g["color_rows"]),
+        })
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# 页面布局常量
+# ---------------------------------------------------------------------------
+_MARGIN_TOP = 10 * mm
+_MARGIN_BOTTOM = 10 * mm
+_MARGIN_X = 10 * mm
+_TITLE_AREA_H = 16 * mm          # 标题 + 二维码
+_INFO_AREA_H = 26 * mm           # 客户信息（仅首页）
+_TABLE_HEADER_H = 8 * mm         # 表头行高
+_ROW_H = 6 * mm                  # 数据行高
+_FOOTER_H = 10 * mm              # 页脚
+
+_TITLE_FONT_SIZE = 18
+_INFO_FONT_SIZE = 9.5
+_TABLE_FONT_SIZE = 8.5
+_TABLE_HEADER_FONT_SIZE = 10
+
+
+def _available_rows(page_idx: int) -> int:
+    """计算某页能容纳的数据行数（不含表头）"""
+    body = PAGE_H - _MARGIN_TOP - _TITLE_AREA_H - _MARGIN_BOTTOM - _FOOTER_H - _TABLE_HEADER_H
+    if page_idx == 0:
+        body -= _INFO_AREA_H
+    return max(int(body / _ROW_H), 1)
+
+
+def _paginate_blocks(blocks: list[dict]) -> list[list[dict]]:
+    """按款号整块分页，不拆分款号"""
+    pages: list[list[dict]] = []
+    cur_page: list[dict] = []
+    cur_rows = 0
+    page_idx = 0
+
+    for blk in blocks:
+        cap = _available_rows(page_idx)
+        needed = blk["n_rows"]
+        if cur_page and (cur_rows + needed) > cap:
+            pages.append(cur_page)
+            cur_page = []
+            cur_rows = 0
+            page_idx += 1
+            cap = _available_rows(page_idx)
+        cur_page.append(blk)
+        cur_rows += needed
+
+    if cur_page:
+        pages.append(cur_page)
+    return pages if pages else [[]]
+
+
+# ---------------------------------------------------------------------------
+# 收集所有尺码（全订单统一列）
+# ---------------------------------------------------------------------------
+def _collect_all_sizes(items: list[dict]) -> list[str]:
+    s = set()
+    for it in items:
+        for sz in (it.get("sizes") or []):
+            sn = sz.get("size", "")
+            if sn:
+                s.add(sn)
+    return sorted(s, key=_size_sort_key)
 
 
 # ---------------------------------------------------------------------------
@@ -141,115 +225,58 @@ def _build_picking_pdf(
     items: list[dict[str, Any]],
     page_records: list[dict[str, str]],
 ) -> bytes:
-    """
-    生成拣货单 PDF。
+    all_sizes = _collect_all_sizes(items)
+    blocks = _group_items_to_product_blocks(items)
+    block_pages = _paginate_blocks(blocks)
+    total_pages = len(block_pages)
 
-    page_records: [{"page_index": 0, "page_id": "xxx", "barcode_content": "SO2025...|xxx"}, ...]
-    """
-    font_name = _register_chinese_font()
-
-    buf = io.BytesIO()
-
-    # 手动逐页绘制（用 canvas 而非 platypus）以精确控制条形码位置
-    from reportlab.pdfgen import canvas as pdf_canvas
-
-    c = pdf_canvas.Canvas(buf, pagesize=A4)
-    c.setTitle(f"拣货单 - {order.get('order_no', '')}")
-
-    # 样式参数
-    margin_x = 20 * mm
-    margin_top = 25 * mm
-    margin_bottom = 25 * mm
-    barcode_w = 45 * mm
-    barcode_h = 12 * mm
-
-    # ---------------------------------------------------------------
-    # 分页：按固定行数分页，每页最多 N 个明细行
-    # ---------------------------------------------------------------
-    ITEMS_PER_PAGE = 20  # 每页最多放20个明细行
-    total_pages = max(1, (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
-
-    # 确保 page_records 数量匹配
-    assert len(page_records) == total_pages, f"page_records({len(page_records)}) != total_pages({total_pages})"
-
-    for page_idx in range(total_pages):
-        if page_idx > 0:
-            c.showPage()
-
+    assert len(page_records) == total_pages, \
+        f"page_records({len(page_records)}) != total_pages({total_pages})"
+    payload_pages = []
+    for page_idx, page_blocks in enumerate(block_pages):
         pr = page_records[page_idx]
-        bc_content = pr["barcode_content"]
+        qr_buf = _generate_qr_image(pr["barcode_content"], box_size=4, border=1)
+        payload_pages.append({
+            "page_index": page_idx,
+            "page_id": pr["page_id"],
+            "barcode_content": pr["barcode_content"],
+            "show_info": page_idx == 0,
+            "qr_data_url": _image_buf_to_data_url(qr_buf),
+            "blocks": page_blocks,
+        })
 
-        # -- 条形码：右上角 --
-        bc_buf1 = _generate_barcode_image(bc_content, width_mm=50, height_mm=10)
-        bc_img1 = RLImage(bc_buf1, width=barcode_w, height=barcode_h)
-        bc_img1.drawOn(c, PAGE_W - margin_x - barcode_w, PAGE_H - margin_top + 2 * mm)
+    payload = {
+        "title": "韩酷服饰-拣货单",
+        "order": {
+            "order_no": order.get("order_no", ""),
+            "order_date": order.get("order_date", ""),
+            "customer_name": order.get("customer_name", ""),
+            "customer_tel": order.get("customer_tel", ""),
+            "customer_addr": order.get("customer_addr", ""),
+            "creator": order.get("creator", ""),
+            "remark": (order.get("remark") or "")[:120],
+        },
+        "all_sizes": all_sizes,
+        "pages": payload_pages,
+    }
 
-        # -- 条形码：左下角 --
-        bc_buf2 = _generate_barcode_image(bc_content, width_mm=50, height_mm=10)
-        bc_img2 = RLImage(bc_buf2, width=barcode_w, height=barcode_h)
-        bc_img2.drawOn(c, margin_x, margin_bottom - barcode_h - 2 * mm)
+    script_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "scripts", "generate-picking-pdf.cjs")
+    )
+    if not os.path.isfile(script_path):
+        raise RuntimeError(f"pdfmake 生成脚本不存在: {script_path}")
 
-        # -- 标题 --
-        c.setFont(font_name, 16)
-        c.drawCentredString(PAGE_W / 2, PAGE_H - margin_top + 5 * mm, "拣 货 单")
-
-        # -- 订单信息头 --
-        y = PAGE_H - margin_top - 12 * mm
-        c.setFont(font_name, 9)
-        info_lines = [
-            f"订单号: {order.get('order_no', '')}    日期: {order.get('order_date', '')}    客户: {order.get('customer_name', '')}",
-            f"业务员: {order.get('salesperson', '')}    备注: {(order.get('remark') or '')[:60]}    页 {page_idx + 1}/{total_pages}",
-        ]
-        for line in info_lines:
-            c.drawString(margin_x, y, line)
-            y -= 5 * mm
-
-        y -= 3 * mm
-
-        # -- 明细表格 --
-        page_items = items[page_idx * ITEMS_PER_PAGE: (page_idx + 1) * ITEMS_PER_PAGE]
-
-        # 表头
-        header = ["#", "货号", "品名", "颜色", "尺码明细", "小计", "备注"]
-        col_widths = [8 * mm, 28 * mm, 22 * mm, 18 * mm, 60 * mm, 14 * mm, 25 * mm]
-
-        table_data = [header]
-        for idx, item in enumerate(page_items):
-            global_idx = page_idx * ITEMS_PER_PAGE + idx + 1
-            sizes = item.get("sizes") or []
-            size_str = "  ".join(f"{s.get('size', '')}:{s.get('qty', 0)}" for s in sizes) if sizes else "-"
-            table_data.append([
-                str(global_idx),
-                item.get("product_no", "") or "",
-                (item.get("product_name", "") or "")[:8],
-                (item.get("color", "") or "")[:6],
-                size_str[:50],
-                str(int(item.get("total_qty", 0))),
-                (item.get("remark", "") or "")[:10],
-            ])
-
-        t = Table(table_data, colWidths=col_widths)
-        t.setStyle(TableStyle([
-            ("FONTNAME", (0, 0), (-1, -1), font_name),
-            ("FONTSIZE", (0, 0), (-1, -1), 7.5),
-            ("FONTSIZE", (0, 0), (-1, 0), 8),
-            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8ecf0")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#333333")),
-            ("FONTNAME", (0, 0), (-1, 0), font_name),
-            ("ALIGN", (0, 0), (-1, 0), "CENTER"),
-            ("ALIGN", (0, 1), (0, -1), "CENTER"),
-            ("ALIGN", (5, 1), (5, -1), "RIGHT"),
-            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("TOPPADDING", (0, 0), (-1, -1), 2),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ]))
-
-        tw, th = t.wrap(0, 0)
-        t.drawOn(c, margin_x, y - th)
-
-    c.save()
-    return buf.getvalue()
+    proc = subprocess.run(
+        ["node", script_path],
+        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"pdfmake 生成失败: {err.strip()}")
+    return proc.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -302,9 +329,10 @@ def generate_picking_pdf(db: Session, order_no: str) -> dict[str, Any]:
             pass
         items.append({**dict(r), "sizes": sizes})
 
-    # 3. 计算页数
-    items_per_page = 20
-    total_pages = max(1, (len(items) + items_per_page - 1) // items_per_page)
+    # 3. 按货号分组 → 分页 → 计算真实页数
+    blocks = _group_items_to_product_blocks(items)
+    block_pages = _paginate_blocks(blocks)
+    total_pages = len(block_pages)
 
     # 4. 从 DB 读取已有 page_id（如果有的话）
     existing_pages = db.execute(
@@ -363,7 +391,9 @@ def generate_picking_pdf(db: Session, order_no: str) -> dict[str, Any]:
     )
     db.commit()
 
-    proxy_url = f"/api/sales-orders/oss-file/{object_name}"
+    import time
+    ts = int(time.time() * 1000)
+    proxy_url = f"/api/sales-orders/oss-file/{object_name}?t={ts}"
 
     return {
         "oss_url": proxy_url,

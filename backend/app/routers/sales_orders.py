@@ -257,7 +257,7 @@ def api_oss_proxy(file_path: str):
             media_type=content_type,
             headers={
                 "Content-Disposition": f'inline; filename="{filename}"',
-                "Cache-Control": "public, max-age=86400",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
             },
         )
     except Exception as e:
