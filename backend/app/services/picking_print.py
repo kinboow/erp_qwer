@@ -207,14 +207,11 @@ def _paginate_blocks(blocks: list[dict]) -> list[list[dict]]:
 # ---------------------------------------------------------------------------
 # 收集所有尺码（全订单统一列）
 # ---------------------------------------------------------------------------
+_FIXED_SIZES = ["S", "M", "L", "XL", "2XL", "3XL", "4XL"]
+
+
 def _collect_all_sizes(items: list[dict]) -> list[str]:
-    s = set()
-    for it in items:
-        for sz in (it.get("sizes") or []):
-            sn = sz.get("size", "")
-            if sn:
-                s.add(sn)
-    return sorted(s, key=_size_sort_key)
+    return list(_FIXED_SIZES)
 
 
 # ---------------------------------------------------------------------------
@@ -248,13 +245,13 @@ def _build_picking_pdf(
     payload = {
         "title": "韩酷服饰-拣货单",
         "order": {
-            "order_no": order.get("order_no", ""),
-            "order_date": order.get("order_date", ""),
-            "customer_name": order.get("customer_name", ""),
-            "customer_tel": order.get("customer_tel", ""),
-            "customer_addr": order.get("customer_addr", ""),
-            "creator": order.get("creator", ""),
-            "remark": (order.get("remark") or "")[:120],
+            "order_no": str(order.get("order_no") or ""),
+            "order_date": str(order.get("order_date") or ""),
+            "customer_name": str(order.get("customer_name") or ""),
+            "customer_tel": str(order.get("customer_tel") or ""),
+            "customer_addr": str(order.get("customer_addr") or ""),
+            "creator": str(order.get("creator") or ""),
+            "remark": str(order.get("remark") or "")[:120],
         },
         "all_sizes": all_sizes,
         "pages": payload_pages,

@@ -2,200 +2,244 @@ const fs = require('fs');
 const path = require('path');
 const PdfPrinter = require('pdfmake');
 
-const mm = (value) => value * 2.834645669291339;
+// 1mm = 2.834645669291339pt
+const mm = (v) => v * 2.834645669291339;
 
+// ── 常量 ──
+const PAGE_W = mm(297);
+const PAGE_H = mm(210);
+const MARGIN_L = mm(15);
+const MARGIN_R = mm(15);
+const MARGIN_T = mm(12);
+const MARGIN_B = mm(14);
+const CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R;
+const QR_SIZE = mm(22);
+
+const HEADER_ROW_H = mm(9);
+const DATA_ROW_H = mm(7);
+
+// 第一页：标题(~12mm) + 信息区(~24mm) + 表头
+const FIRST_PAGE_TABLE_BODY_H = PAGE_H - MARGIN_T - MARGIN_B - mm(12) - mm(24) - HEADER_ROW_H;
+// 后续页：标题(~12mm) + 间距(~6mm) + 表头
+const OTHER_PAGE_TABLE_BODY_H = PAGE_H - MARGIN_T - MARGIN_B - mm(12) - mm(6) - HEADER_ROW_H;
+
+// ── stdin ──
 function readStdin() {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('data', (c) => chunks.push(c));
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     process.stdin.on('error', reject);
   });
 }
 
-function resolveFontPath() {
+// ── 字体（全局强制：等线） ──
+function resolveFonts() {
   const windir = process.env.WINDIR || 'C:\\Windows';
-  const candidates = [
-    path.join(windir, 'Fonts', 'simhei.ttf'),
-    path.join(windir, 'Fonts', 'simkai.ttf'),
-    path.join(windir, 'Fonts', 'simfang.ttf'),
-    path.join(windir, 'Fonts', 'simsun.ttc'),
-    path.join(windir, 'Fonts', 'msyh.ttc'),
-  ];
-  const fontPath = candidates.find((item) => fs.existsSync(item));
-  if (!fontPath) {
-    throw new Error('未找到可用中文字体');
+  const dengNormal = path.join(windir, 'Fonts', 'Deng.ttf');
+  const dengBold   = path.join(windir, 'Fonts', 'Dengb.ttf');
+  if (!fs.existsSync(dengNormal)) {
+    throw new Error('未找到等线字体: C:/Windows/Fonts/Deng.ttf');
   }
-  return fontPath;
+  return {
+    normal: dengNormal,
+    bold: fs.existsSync(dengBold) ? dengBold : dengNormal,
+    italics: dengNormal,
+    bolditalics: fs.existsSync(dengBold) ? dengBold : dengNormal,
+  };
 }
 
-function buildWidths(allSizes) {
-  const pageWidth = mm(297);
-  const contentWidth = pageWidth - mm(12) - mm(12);
-  const productWidth = mm(18);
-  const colorWidth = mm(18);
-  const pairWidth = (contentWidth - productWidth - colorWidth) / Math.max(allSizes.length, 1);
-  const qtyWidth = pairWidth * 0.55;
-  const blankWidth = pairWidth * 0.45;
-  const widths = [productWidth, colorWidth];
-  for (const _size of allSizes) {
-    widths.push(qtyWidth);
-    widths.push(blankWidth);
+// ── 列宽（固定值） ──
+const CELL_PAD = 0; // 设为 0，避免列宽被 padding 额外撑大
+const PNO_W = mm(20);        // 款号 2cm
+const COLOR_W = mm(25);      // 颜色 2.5cm
+const SIZE_SUB_W = mm(16); // 尺码每小列 1.65cm
+const TABLE_LINE_W = 0.5;
+
+function calcTableOuterWidth(widths) {
+  const contentW = widths.reduce((sum, w) => sum + w, 0);
+  return contentW + TABLE_LINE_W * (widths.length + 1);
+}
+
+function buildWidths(nSizes) {
+  const widths = [PNO_W, COLOR_W];
+  for (let i = 0; i < nSizes; i++) {
+    widths.push(SIZE_SUB_W, SIZE_SUB_W);
   }
+
+  const maxOuterW = CONTENT_W;
+  const outerW = calcTableOuterWidth(widths);
+  if (outerW > maxOuterW) {
+    const overflow = outerW - maxOuterW;
+    const sizeCols = Math.max(nSizes * 2, 1);
+    const reduceEach = overflow / sizeCols;
+    for (let i = 2; i < widths.length; i++) {
+      widths[i] = Math.max(widths[i] - reduceEach, mm(10));
+    }
+  }
+
   return widths;
 }
 
-function buildInfo(order) {
-  const blocks = [];
-  const contentWidth = mm(297) - mm(12) - mm(12);
-  blocks.push({
+// ── 客户信息区 ──
+function buildInfoBlock(order) {
+  const col1W = CONTENT_W * 0.32;
+  const col2W = CONTENT_W * 0.28;
+  const rows = [];
+  rows.push({
     columns: [
-      { width: contentWidth * 0.35, text: `单号：${order.order_no || ''}` },
-      { width: contentWidth * 0.35, text: `制单人：${order.creator || ''}` },
-      { width: '*', text: '' }
+      { width: col1W, text: `单号：${order.order_no || ''}` },
+      { width: col2W, text: `制单人：${order.creator || ''}` },
+      { width: '*', text: '' },
     ],
-    margin: [0, 0, 0, mm(1.2)],
+    margin: [0, 0, 0, mm(1.5)],
   });
-  blocks.push({
+  rows.push({
     columns: [
-      { width: contentWidth * 0.35, text: `订单日期：${order.order_date || ''}` },
-      { width: contentWidth * 0.35, text: `客户：${order.customer_name || ''}` },
-      { width: '*', text: `客户电话：${order.customer_tel || ''}` }
+      { width: col1W, text: `订单日期：${order.order_date || ''}` },
+      { width: col2W, text: `客户：${order.customer_name || ''}` },
+      { width: '*', text: `客户电话：${order.customer_tel || ''}` },
     ],
-    margin: [0, 0, 0, mm(1.2)],
+    margin: [0, 0, 0, mm(1.5)],
   });
   if (order.customer_addr) {
-    blocks.push({ text: `客户地址：${order.customer_addr}`, margin: [0, 0, 0, mm(1.2)] });
+    rows.push({ text: `客户地址：${order.customer_addr}`, margin: [0, 0, 0, mm(1.5)] });
   }
-  if (order.remark) {
-    blocks.push({ text: `备注：${order.remark}`, margin: [0, 0, 0, mm(1.2)] });
-  }
-  return blocks;
+  rows.push({ text: `备注：${order.remark || '无'}`, margin: [0, 0, 0, mm(1.5)] });
+  return rows;
 }
 
+// ── 表格 ──
 function buildTable(page, payload) {
-  const body = [];
+  const nSizes = payload.all_sizes.length;
+  const nCols = 2 + nSizes * 2;
+  const widths = buildWidths(nSizes);
+
+  // 表头行
   const header = [
     { text: '款号', style: 'th' },
     { text: '颜色', style: 'th' },
   ];
-  for (const size of payload.all_sizes) {
-    header.push({ text: size, style: 'th' });
-    header.push({ text: '', style: 'th' });
+  for (const sz of payload.all_sizes) {
+    header.push({ text: sz, style: 'th', colSpan: 2 });
+    header.push({ text: '' }); // colSpan 占位
   }
-  body.push(header);
 
-  const groupSpans = []; // [{startRow: 1, count: 2}]
-  let currentRowIndex = 1;
-  page.blocks.forEach((block, blockIndex) => {
-    const nRows = block.color_rows.length;
-    groupSpans.push({ startRow: currentRowIndex, count: nRows });
-    
-    block.color_rows.forEach((colorRow, colorIndex) => {
-      const row = [
-        { text: colorIndex === 0 ? (block.product_no || '') : '', rowSpan: colorIndex === 0 ? nRows : 1, style: 'tdCenter' },
-        { text: colorRow.color || '', style: 'tdCenter' },
-      ];
-      for (const size of payload.all_sizes) {
-        const qty = colorRow.qty_map && colorRow.qty_map[size] ? String(colorRow.qty_map[size]) : '';
-        row.push({ text: qty, style: 'qty' });
-        row.push({ text: '', style: 'blank' });
+  const body = [header];
+
+  // 记录每个款号组的起始行（1-based，因为 0 是表头）
+  const groupBoundaries = new Set();
+  let rowIdx = 1;
+
+  for (const blk of page.blocks) {
+    const nRows = blk.color_rows.length;
+    groupBoundaries.add(rowIdx); // 组首行
+    for (let ci = 0; ci < nRows; ci++) {
+      const cr = blk.color_rows[ci];
+      const row = [];
+      // 款号列：首行 rowSpan 合并
+      if (ci === 0) {
+        row.push({ text: blk.product_no || '', rowSpan: nRows, style: 'tdKey', alignment: 'center' });
+      } else {
+        row.push({ text: '', style: 'tdKey' });
+      }
+      // 颜色
+      row.push({ text: cr.color || '', style: 'tdKey', alignment: 'center' });
+      // 尺码数量 + 空白
+      for (const sz of payload.all_sizes) {
+        const qty = (cr.qty_map && cr.qty_map[sz] != null) ? String(cr.qty_map[sz]) : '0';
+        row.push({ text: qty, style: 'td', alignment: 'center' });
+        row.push({ text: '', style: 'td' });
       }
       body.push(row);
-      currentRowIndex += 1;
-    });
-  });
-
-  const availableBodyHeight = page.show_info ? mm(145) : mm(165); 
-  const rowHeight = mm(6.5);
-  const usedHeight = currentRowIndex * rowHeight;
-  if (usedHeight < availableBodyHeight) {
-    const emptyRows = Math.floor((availableBodyHeight - usedHeight) / rowHeight);
-    for (let i = 0; i < emptyRows; i++) {
-      const row = [{ text: '', style: 'tdCenter' }, { text: '', style: 'tdCenter' }];
-      for (const size of payload.all_sizes) {
-        row.push({ text: '', style: 'qty' }, { text: '', style: 'blank' });
-      }
-      body.push(row);
-      currentRowIndex += 1;
+      rowIdx++;
     }
   }
 
-  const isGroupStartRow = (rowIndex) => groupSpans.some(g => g.startRow === rowIndex);
+  // 补空行到底部
+  const bodyH = page.show_info ? FIRST_PAGE_TABLE_BODY_H : OTHER_PAGE_TABLE_BODY_H;
+  const dataRowCount = rowIdx - 1;
+  const maxDataRows = Math.floor(bodyH / DATA_ROW_H);
+  const padCount = Math.max(maxDataRows - dataRowCount, 0);
+  for (let i = 0; i < padCount; i++) {
+    const emptyRow = [];
+    for (let c = 0; c < nCols; c++) {
+      emptyRow.push({ text: ' ', style: 'td' });
+    }
+    body.push(emptyRow);
+  }
+
+  // 判断某行是否是组分隔线位置
+  const isGroupBorder = (lineIdx) => groupBoundaries.has(lineIdx);
 
   return {
     table: {
       headerRows: 1,
-      widths: buildWidths(payload.all_sizes),
+      widths,
       body,
-      heights: (rowIndex) => (rowIndex === 0 ? mm(8) : rowHeight),
+      heights: (ri) => (ri === 0 ? HEADER_ROW_H : DATA_ROW_H),
+      dontBreakRows: true,
+      keepWithHeaderRows: 1,
     },
     layout: {
-      hLineWidth: (i, node) => {
-        if (i === 0 || i === 1 || i === node.table.body.length) {
-          return 1.0;
-        }
-        return isGroupStartRow(i) ? 1.0 : 0.5;
-      },
-      vLineWidth: (i, node) => {
-        if (i === 0 || i === node.table.widths.length) {
-          return 1.0;
-        }
-        return 0.5;
-      },
-      hLineColor: (i, node) => {
-        if (i === 0 || i === 1 || i === node.table.body.length || isGroupStartRow(i)) {
-          return '#000000';
-        }
-        return '#888888';
-      },
-      vLineColor: (i, node) => {
-         if (i === 0 || i === node.table.widths.length) {
-            return '#000000';
-         }
-         return '#888888';
-      },
-      paddingLeft: () => 4,
-      paddingRight: () => 4,
-      paddingTop: () => 3,
-      paddingBottom: () => 3,
-      fillColor: (rowIndex, columnIndex) => {
-        if (rowIndex === 0) {
-          return null;
-        }
-        if (columnIndex >= 2 && columnIndex % 2 === 0) {
-          return '#ececec';
-        }
-        return null;
-      },
+      hLineWidth: () => 0.5,
+      vLineWidth: () => 0.5,
+      hLineColor: () => '#000000',
+      vLineColor: () => '#000000',
+      paddingLeft: () => CELL_PAD,
+      paddingRight: () => CELL_PAD,
+      paddingTop: () => 0,
+      paddingBottom: () => 0,
+      fillColor: () => null,
     },
+    _outerWidth: calcTableOuterWidth(widths),
     margin: [0, 0, 0, 0],
   };
 }
 
+// ── 文档 ──
 function buildDocument(payload) {
   const content = [];
-  const qrWidth = mm(20);
-  payload.pages.forEach((page, pageIndex) => {
+  const totalPages = payload.pages.length;
+
+  payload.pages.forEach((page, pi) => {
+    // 标题行：左侧空白平衡 + 居中标题 + 右侧二维码
     content.push({
-      image: page.qr_data_url,
-      width: qrWidth,
-      absolutePosition: { x: mm(297) - mm(12) - qrWidth, y: mm(10) },
+      columns: [
+        { width: QR_SIZE, text: '' },          // 左占位，平衡居中
+        {
+          width: '*',
+          text: payload.title || '韩酷服饰-拣货单',
+          fontSize: 20,
+          bold: true,
+          alignment: 'center',
+        },
+        {
+          width: QR_SIZE,
+          image: page.qr_data_url,
+          fit: [QR_SIZE, QR_SIZE],
+          alignment: 'right',
+        },
+      ],
+      margin: [0, 0, 0, mm(3)],
     });
-    content.push({
-      text: payload.title || '韩酷服饰-拣货单',
-      fontSize: 18,
-      bold: true,
-      alignment: 'center',
-      margin: [0, mm(2), 0, mm(2)],
-    });
+    // 信息区（仅首页）
     if (page.show_info) {
-      content.push({ stack: buildInfo(payload.order), fontSize: 9.5, margin: [0, mm(4), 0, mm(2)] });
+      content.push({
+        stack: buildInfoBlock(payload.order),
+        fontSize: 11,
+        margin: [0, mm(2), 0, mm(2)],
+      });
     } else {
-      content.push({ text: '', margin: [0, mm(8), 0, 0] });
+      content.push({ text: '', margin: [0, mm(3), 0, mm(1)] });
     }
-    content.push(buildTable(page, payload));
-    if (pageIndex < payload.pages.length - 1) {
+    // 表格（X 轴居中）
+    const tableNode = buildTable(page, payload);
+    const leftOffset = Math.max((CONTENT_W - (tableNode._outerWidth || CONTENT_W)) / 2, 0);
+    tableNode.margin = [leftOffset, 0, 0, 0];
+    content.push(tableNode);
+    // 分页
+    if (pi < totalPages - 1) {
       content.push({ text: '', pageBreak: 'after' });
     }
   });
@@ -203,18 +247,18 @@ function buildDocument(payload) {
   return {
     pageSize: 'A4',
     pageOrientation: 'landscape',
-    pageMargins: [mm(12), mm(10), mm(12), mm(10)],
+    pageMargins: [MARGIN_L, MARGIN_T, MARGIN_R, MARGIN_B],
     content,
     defaultStyle: {
       font: 'ChineseFont',
       fontSize: 9,
-      lineHeight: 1.1,
+      lineHeight: 1,
     },
     styles: {
-      th: { alignment: 'center', bold: true, fontSize: 10 },
-      tdCenter: { alignment: 'center', margin: [0, 2, 0, 0] },
-      qty: { alignment: 'center', margin: [0, 2, 0, 0] },
-      blank: { alignment: 'center' },
+      th:     { alignment: 'center', bold: true, fontSize: 11, lineHeight: 1, margin: [0, 6.25, 0, 0] },
+      td:     { alignment: 'center', fontSize: 9, lineHeight: 1, margin: [0, 3.5, 0, 0] },
+      tdKey:  { alignment: 'center', fontSize: 11, bold: true, lineHeight: 1, margin: [0, 3.5, 0, 0] },
+      tdBold: { alignment: 'center', fontSize: 9, bold: true, lineHeight: 1, margin: [0, 3.5, 0, 0] },
     },
     footer(currentPage, pageCount) {
       return {
@@ -222,39 +266,26 @@ function buildDocument(payload) {
         alignment: 'center',
         font: 'ChineseFont',
         fontSize: 9,
-        margin: [0, 0, 0, 6],
+        margin: [0, 0, 0, 0],
       };
     },
   };
 }
 
+// ── main ──
 async function main() {
   const raw = await readStdin();
   const payload = JSON.parse(raw);
-  const fontPath = resolveFontPath();
+  const fonts = resolveFonts();
   const printer = new PdfPrinter({
-    ChineseFont: {
-      normal: fontPath,
-      bold: fontPath,
-      italics: fontPath,
-      bolditalics: fontPath,
-    },
+    ChineseFont: fonts,
   });
-  const docDefinition = buildDocument(payload);
-  const pdfDoc = printer.createPdfKitDocument(docDefinition);
+  const doc = printer.createPdfKitDocument(buildDocument(payload));
   const chunks = [];
-  pdfDoc.on('data', (chunk) => chunks.push(chunk));
-  pdfDoc.on('end', () => {
-    process.stdout.write(Buffer.concat(chunks));
-  });
-  pdfDoc.on('error', (error) => {
-    console.error(error);
-    process.exit(1);
-  });
-  pdfDoc.end();
+  doc.on('data', (c) => chunks.push(c));
+  doc.on('end', () => process.stdout.write(Buffer.concat(chunks)));
+  doc.on('error', (e) => { console.error(e); process.exit(1); });
+  doc.end();
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+main().catch((e) => { console.error(e); process.exit(1); });
