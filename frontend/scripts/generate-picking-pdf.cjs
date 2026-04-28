@@ -83,30 +83,95 @@ function buildWidths(nSizes) {
 
 // ── 客户信息区 ──
 function buildInfoBlock(order) {
+  const infoRowGap = mm(1.5) + 3;
   const col1W = CONTENT_W * 0.32;
   const col2W = CONTENT_W * 0.28;
   const rows = [];
   rows.push({
     columns: [
-      { width: col1W, text: `单号：${order.order_no || ''}` },
-      { width: col2W, text: `制单人：${order.creator || ''}` },
+      {
+        width: col1W,
+        text: [
+          { text: '单号：', bold: true },
+          { text: `${order.order_no || ''}` },
+        ],
+      },
+      {
+        width: col2W,
+        text: [
+          { text: '制单人：', bold: true },
+          { text: `${order.creator || ''}` },
+        ],
+      },
       { width: '*', text: '' },
     ],
-    margin: [0, 0, 0, mm(1.5)],
+    margin: [0, 0, 0, infoRowGap],
   });
   rows.push({
     columns: [
-      { width: col1W, text: `订单日期：${order.order_date || ''}` },
-      { width: col2W, text: `客户：${order.customer_name || ''}` },
-      { width: '*', text: `客户电话：${order.customer_tel || ''}` },
+      {
+        width: col1W,
+        text: [
+          { text: '订单日期：', bold: true },
+          { text: `${order.order_date || ''}` },
+        ],
+      },
+      {
+        width: col2W,
+        text: [
+          { text: '客户：', bold: true },
+          { text: `${order.customer_name || ''}` },
+        ],
+      },
+      {
+        width: '*',
+        text: [
+          { text: '客户电话：', bold: true },
+          { text: `${order.customer_tel || ''}` },
+        ],
+      },
     ],
-    margin: [0, 0, 0, mm(1.5)],
+    margin: [0, 0, 0, infoRowGap],
   });
   if (order.customer_addr) {
-    rows.push({ text: `客户地址：${order.customer_addr}`, margin: [0, 0, 0, mm(1.5)] });
+    rows.push({
+      text: [
+        { text: '客户地址：', bold: true },
+        { text: `${order.customer_addr}` },
+      ],
+      margin: [0, 0, 0, infoRowGap],
+    });
   }
-  rows.push({ text: `备注：${order.remark || '无'}`, margin: [0, 0, 0, mm(1.5)] });
+  rows.push({
+    text: [
+      { text: '备注：', bold: true },
+      { text: `${order.remark || '无'}` },
+    ],
+    margin: [0, 0, 0, infoRowGap],
+  });
   return rows;
+}
+
+function calcPageTotalQty(page) {
+  let total = 0;
+  for (const blk of (page.blocks || [])) {
+    for (const cr of (blk.color_rows || [])) {
+      const qtyMap = cr.qty_map || {};
+      for (const v of Object.values(qtyMap)) {
+        const n = Number(v) || 0;
+        total += n;
+      }
+    }
+  }
+  return total;
+}
+
+function calcDocumentTotalQty(payload) {
+  let total = 0;
+  for (const page of (payload.pages || [])) {
+    total += calcPageTotalQty(page);
+  }
+  return total;
 }
 
 // ── 表格 ──
@@ -139,34 +204,26 @@ function buildTable(page, payload) {
       const row = [];
       // 款号列：首行 rowSpan 合并
       if (ci === 0) {
-        row.push({ text: blk.product_no || '', rowSpan: nRows, style: 'tdKey', alignment: 'center' });
+        row.push({ text: blk.product_no || '', rowSpan: nRows, style: 'tdKey', alignment: 'center', valign: 'middle' });
       } else {
-        row.push({ text: '', style: 'tdKey' });
+        row.push({ text: '', style: 'tdKey', valign: 'middle' });
       }
       // 颜色
-      row.push({ text: cr.color || '', style: 'tdKey', alignment: 'center' });
+      row.push({ text: cr.color || '', style: 'tdKey', alignment: 'center', valign: 'middle' });
       // 尺码数量 + 空白
       for (const sz of payload.all_sizes) {
         const qty = (cr.qty_map && cr.qty_map[sz] != null) ? String(cr.qty_map[sz]) : '0';
-        row.push({ text: qty, style: 'td', alignment: 'center' });
+        row.push({
+          text: qty,
+          style: 'tdQty',
+          alignment: 'center',
+          fillColor: qty !== '' ? '#e6e6e6' : null,
+        });
         row.push({ text: '', style: 'td' });
       }
       body.push(row);
       rowIdx++;
     }
-  }
-
-  // 补空行到底部
-  const bodyH = page.show_info ? FIRST_PAGE_TABLE_BODY_H : OTHER_PAGE_TABLE_BODY_H;
-  const dataRowCount = rowIdx - 1;
-  const maxDataRows = Math.floor(bodyH / DATA_ROW_H);
-  const padCount = Math.max(maxDataRows - dataRowCount, 0);
-  for (let i = 0; i < padCount; i++) {
-    const emptyRow = [];
-    for (let c = 0; c < nCols; c++) {
-      emptyRow.push({ text: ' ', style: 'td' });
-    }
-    body.push(emptyRow);
   }
 
   // 判断某行是否是组分隔线位置
@@ -201,12 +258,14 @@ function buildTable(page, payload) {
 function buildDocument(payload) {
   const content = [];
   const totalPages = payload.pages.length;
+  const docTotalQty = calcDocumentTotalQty(payload);
 
   payload.pages.forEach((page, pi) => {
     // 标题行：左侧空白平衡 + 居中标题 + 右侧二维码
+    // 非首页通过 pageBreak:'before' 强制分到新一页
     content.push({
       columns: [
-        { width: QR_SIZE, text: '' },          // 左占位，平衡居中
+        { width: QR_SIZE, text: '' },
         {
           width: '*',
           text: payload.title || '韩酷服饰-拣货单',
@@ -216,31 +275,47 @@ function buildDocument(payload) {
         },
         {
           width: QR_SIZE,
-          image: page.qr_data_url,
-          fit: [QR_SIZE, QR_SIZE],
-          alignment: 'right',
+          stack: [
+            {
+              image: page.qr_data_url,
+              fit: [QR_SIZE, QR_SIZE],
+              alignment: 'right',
+            },
+            {
+              text: page.page_id || '',
+              alignment: 'center',
+              fontSize: 7,
+              margin: [0, 1, 0, 0],
+            },
+          ],
         },
       ],
-      margin: [0, 0, 0, mm(3)],
+      margin: [0, pi > 0 ? 25 : 0, 0, mm(3)],
+      pageBreak: pi > 0 ? 'before' : undefined,
     });
     // 信息区（仅首页）
-    if (page.show_info) {
+    if (pi === 0) {
       content.push({
         stack: buildInfoBlock(payload.order),
-        fontSize: 11,
-        margin: [0, mm(2), 0, mm(2)],
+        fontSize: 11.5,
+        margin: [0, -20, 0, mm(2)],
       });
     } else {
-      content.push({ text: '', margin: [0, mm(3), 0, mm(1)] });
+      content.push({ text: '', margin: [0, mm(3) - 15, 0, mm(1)] });
     }
     // 表格（X 轴居中）
     const tableNode = buildTable(page, payload);
     const leftOffset = Math.max((CONTENT_W - (tableNode._outerWidth || CONTENT_W)) / 2, 0);
     tableNode.margin = [leftOffset, 0, 0, 0];
     content.push(tableNode);
-    // 分页
-    if (pi < totalPages - 1) {
-      content.push({ text: '', pageBreak: 'after' });
+    if (pi === totalPages - 1) {
+      content.push({
+        text: `总计：${docTotalQty} 件`,
+        alignment: 'right',
+        bold: true,
+        fontSize: 11,
+        margin: [0, mm(3), 0, 0],
+      });
     }
   });
 
@@ -255,9 +330,10 @@ function buildDocument(payload) {
       lineHeight: 1,
     },
     styles: {
-      th:     { alignment: 'center', bold: true, fontSize: 11, lineHeight: 1, margin: [0, 6.25, 0, 0] },
+      th:     { alignment: 'center', bold: true, fontSize: 12.5, lineHeight: 1, margin: [0, 6.5, 0, 0] },
       td:     { alignment: 'center', fontSize: 9, lineHeight: 1, margin: [0, 3.5, 0, 0] },
-      tdKey:  { alignment: 'center', fontSize: 11, bold: true, lineHeight: 1, margin: [0, 3.5, 0, 0] },
+      tdQty:  { alignment: 'center', fontSize: 11.5, lineHeight: 1, margin: [0, 4.2, 0, 0] },
+      tdKey:  { alignment: 'center', valign: 'middle', fontSize: 11, bold: true, lineHeight: 1, margin: [0, 3.5, 0, 0] },
       tdBold: { alignment: 'center', fontSize: 9, bold: true, lineHeight: 1, margin: [0, 3.5, 0, 0] },
     },
     footer(currentPage, pageCount) {

@@ -160,10 +160,10 @@ def _group_items_to_product_blocks(items: list[dict[str, Any]]) -> list[dict[str
 _MARGIN_TOP = 10 * mm
 _MARGIN_BOTTOM = 10 * mm
 _MARGIN_X = 10 * mm
-_TITLE_AREA_H = 16 * mm          # 标题 + 二维码
+_TITLE_AREA_H = 24 * mm          # 标题 + 二维码（含二维码下方ID文本，保守估算）
 _INFO_AREA_H = 26 * mm           # 客户信息（仅首页）
-_TABLE_HEADER_H = 8 * mm         # 表头行高
-_ROW_H = 6 * mm                  # 数据行高
+_TABLE_HEADER_H = 9 * mm         # 表头行高
+_ROW_H = 7 * mm                  # 数据行高
 _FOOTER_H = 10 * mm              # 页脚
 
 _TITLE_FONT_SIZE = 18
@@ -177,27 +177,43 @@ def _available_rows(page_idx: int) -> int:
     body = PAGE_H - _MARGIN_TOP - _TITLE_AREA_H - _MARGIN_BOTTOM - _FOOTER_H - _TABLE_HEADER_H
     if page_idx == 0:
         body -= _INFO_AREA_H
-    return max(int(body / _ROW_H), 1)
+    # pdfmake 实际渲染时会有细微高度浮动（字体/行距/边框），预留 1 行安全余量，
+    # 避免同一 table 自动跨页导致中间页缺少标题与二维码。
+    return max(int(body / _ROW_H) - 3, 1)
 
 
 def _paginate_blocks(blocks: list[dict]) -> list[list[dict]]:
-    """按款号整块分页，不拆分款号"""
+    """分页（按行填充每页，允许款号跨页并在续页重复显示款号）"""
     pages: list[list[dict]] = []
     cur_page: list[dict] = []
-    cur_rows = 0
     page_idx = 0
+    cap = _available_rows(page_idx)
+    used = 0
+
+    def flush_page() -> None:
+        nonlocal cur_page, page_idx, cap, used
+        pages.append(cur_page)
+        cur_page = []
+        page_idx += 1
+        cap = _available_rows(page_idx)
+        used = 0
 
     for blk in blocks:
-        cap = _available_rows(page_idx)
-        needed = blk["n_rows"]
-        if cur_page and (cur_rows + needed) > cap:
-            pages.append(cur_page)
-            cur_page = []
-            cur_rows = 0
-            page_idx += 1
-            cap = _available_rows(page_idx)
-        cur_page.append(blk)
-        cur_rows += needed
+        product_no = blk.get("product_no") or "未知"
+        for cr in list(blk.get("color_rows") or []):
+            if used >= cap:
+                flush_page()
+
+            if cur_page and cur_page[-1].get("product_no") == product_no:
+                cur_page[-1]["color_rows"].append(cr)
+                cur_page[-1]["n_rows"] += 1
+            else:
+                cur_page.append({
+                    "product_no": product_no,
+                    "color_rows": [cr],
+                    "n_rows": 1,
+                })
+            used += 1
 
     if cur_page:
         pages.append(cur_page)

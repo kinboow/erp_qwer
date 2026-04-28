@@ -396,48 +396,64 @@ def restart_sync_scheduler(app: Any) -> None:
 async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None) -> dict[str, Any]:
     """
     拉取 ERP 销售订单列表 + 每张订单的详情，写入本地数据库。
+    使用滑动时间窗口向前回溯，直到某个窗口返回 0 条记录时停止。
     返回同步统计信息。
     """
     cfg = _get_db_config()
-    days = days_back or cfg.get("sync_days_back", 90)
-    datee = datetime.now().strftime("%Y-%m-%d")
-    dates = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    window_days = days_back or cfg.get("sync_days_back", 90)
 
     db: Session = SessionLocal()
     try:
         ensure_tables(db)
 
-        # 1. 获取销售订单列表（分页拉取全部，保留列表层的客户/业务员等信息）
+        # 1. 使用滑动窗口获取销售订单列表
         list_data: dict[str, Any] = {}  # order_no -> list item data
-        page = 1
-        rows_per_page = 200
+        window_end = datetime.now()
+        total_windows = 0
+
         while True:
-            order_list = await list_orders(
-                erp_client,
-                dates=dates,
-                datee=datee,
-                state=["0", "1"],
-                page=page,
-                rows=rows_per_page,
-            )
-            for item in order_list.rows:
-                list_data[item.order_no] = {
-                    "customer_name": item.customer_name or "",
-                    "customer_tel": item.customer_tel or "",
-                    "customer_id": item.customer_id or "",
-                    "salesperson": item.salesperson or "",
-                    "creator": item.creator or "",
-                    "total_qty": item.total_qty or 0,
-                    "total_amount": item.total_amount or 0,
-                    "print_count": item.print_count or 0,
-                    "product_no": item.product_no or "",
-                }
-            if page * rows_per_page >= order_list.total:
+            datee = window_end.strftime("%Y-%m-%d")
+            dates = (window_end - timedelta(days=window_days)).strftime("%Y-%m-%d")
+            total_windows += 1
+
+            window_count = 0
+            page = 1
+            rows_per_page = 200
+            while True:
+                order_list = await list_orders(
+                    erp_client,
+                    dates=dates,
+                    datee=datee,
+                    state=["0", "1"],
+                    page=page,
+                    rows=rows_per_page,
+                )
+                for item in order_list.rows:
+                    list_data[item.order_no] = {
+                        "customer_name": item.customer_name or "",
+                        "customer_tel": item.customer_tel or "",
+                        "customer_id": item.customer_id or "",
+                        "salesperson": item.salesperson or "",
+                        "creator": item.creator or "",
+                        "total_qty": item.total_qty or 0,
+                        "total_amount": item.total_amount or 0,
+                        "print_count": item.print_count or 0,
+                        "product_no": item.product_no or "",
+                    }
+                    window_count += 1
+                if page * rows_per_page >= order_list.total:
+                    break
+                page += 1
+
+            logger.info("[ERP Sync] 销售订单窗口 %s ~ %s 获取 %d 条", dates, datee, window_count)
+
+            if window_count == 0:
                 break
-            page += 1
+
+            window_end = window_end - timedelta(days=window_days) - timedelta(days=1)
 
         all_order_nos = list(list_data.keys())
-        logger.info("[ERP Sync] 获取到 %d 张销售订单（%s ~ %s）", len(all_order_nos), dates, datee)
+        logger.info("[ERP Sync] 获取到 %d 张销售订单（共 %d 个窗口）", len(all_order_nos), total_windows)
 
         synced = 0
         failed = 0
@@ -458,8 +474,7 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
                     pass
 
         result = {
-            "dates": dates,
-            "datee": datee,
+            "total_windows": total_windows,
             "total_found": len(all_order_nos),
             "synced": synced,
             "failed": failed,
@@ -593,47 +608,63 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
 async def sync_sales_shipments(erp_client: ERPClient, days_back: int | None = None) -> dict[str, Any]:
     """
     拉取 ERP 销售发货单列表 + 每张发货单的详情，写入本地数据库。
+    使用滑动时间窗口向前回溯，直到某个窗口返回 0 条记录时停止。
     返回同步统计信息。
     """
     cfg = _get_db_config()
-    days = days_back or cfg.get("sync_days_back", 90)
-    datee = datetime.now().strftime("%Y-%m-%d")
-    dates = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    window_days = days_back or cfg.get("sync_days_back", 90)
 
     db: Session = SessionLocal()
     try:
         ensure_tables(db)
 
-        # 1. 获取发货单列表（分页拉取全部）
+        # 1. 使用滑动窗口获取发货单列表
         list_data: dict[str, Any] = {}  # order_no -> list item data
-        page = 1
-        rows_per_page = 200
+        window_end = datetime.now()
+        total_windows = 0
+
         while True:
-            shipment_list = await list_shipments(
-                erp_client,
-                dates=dates,
-                datee=datee,
-                state=["0", "1"],
-                page=page,
-                rows=rows_per_page,
-            )
-            for item in shipment_list.rows:
-                list_data[item.order_no] = {
-                    "customer_name": item.customer_name or "",
-                    "customer_id": item.customer_id or "",
-                    "salesperson": item.salesperson or "",
-                    "total_qty": item.total_qty or 0,
-                    "total_amount": item.total_amount or 0,
-                    "tracking_no": item.tracking_no or "",
-                    "shipping_method": item.shipping_method or "",
-                    "freight": item.freight,
-                }
-            if page * rows_per_page >= shipment_list.total:
+            datee = window_end.strftime("%Y-%m-%d")
+            dates = (window_end - timedelta(days=window_days)).strftime("%Y-%m-%d")
+            total_windows += 1
+
+            window_count = 0
+            page = 1
+            rows_per_page = 200
+            while True:
+                shipment_list = await list_shipments(
+                    erp_client,
+                    dates=dates,
+                    datee=datee,
+                    state=["0", "1"],
+                    page=page,
+                    rows=rows_per_page,
+                )
+                for item in shipment_list.rows:
+                    list_data[item.order_no] = {
+                        "customer_name": item.customer_name or "",
+                        "customer_id": item.customer_id or "",
+                        "salesperson": item.salesperson or "",
+                        "total_qty": item.total_qty or 0,
+                        "total_amount": item.total_amount or 0,
+                        "tracking_no": item.tracking_no or "",
+                        "shipping_method": item.shipping_method or "",
+                        "freight": item.freight,
+                    }
+                    window_count += 1
+                if page * rows_per_page >= shipment_list.total:
+                    break
+                page += 1
+
+            logger.info("[ERP Sync] 发货单窗口 %s ~ %s 获取 %d 条", dates, datee, window_count)
+
+            if window_count == 0:
                 break
-            page += 1
+
+            window_end = window_end - timedelta(days=window_days) - timedelta(days=1)
 
         all_order_nos = list(list_data.keys())
-        logger.info("[ERP Sync] 获取到 %d 张销售发货单（%s ~ %s）", len(all_order_nos), dates, datee)
+        logger.info("[ERP Sync] 获取到 %d 张销售发货单（共 %d 个窗口）", len(all_order_nos), total_windows)
 
         synced = 0
         failed = 0
@@ -654,8 +685,7 @@ async def sync_sales_shipments(erp_client: ERPClient, days_back: int | None = No
                     pass
 
         result = {
-            "dates": dates,
-            "datee": datee,
+            "total_windows": total_windows,
             "total_found": len(all_order_nos),
             "synced": synced,
             "failed": failed,
