@@ -9,6 +9,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.database import SessionLocal, run_in_threadpool
 from app.models import User, WechatInstance
 from app.services.ai_order_parser import AIOrderParserError, ai_order_parser
 from app.services.downstream_support import ensure_downstream_support_tables
@@ -530,18 +531,15 @@ def _extract_excel_summary(attachment_base64: str) -> str:
 
 
 def _resolve_product_no_for_context(db: Session, name: str) -> str:
-    """通过产品表精确匹配或映射表解析别名 → 真实货号。"""
+    """通过映射表或产品表解析 AI 提取的款号 → 真实货号。
+
+    优先级：映射表 > 产品表精确匹配 > 原值
+    这样即使 AI 提取的款号在产品表中存在，只要映射表里配了别名也会被正确映射。
+    """
     name = name.strip()
     if not name:
         return name
-    # 1. 精确匹配 erp_products
-    direct = db.execute(
-        text("SELECT product_no FROM erp_products WHERE product_no = :name LIMIT 1"),
-        {"name": name},
-    ).mappings().first()
-    if direct:
-        return direct["product_no"]
-    # 2. 查映射表别名
+    # 1. 优先查映射表——用户显式配置的别名拥有最高优先级
     try:
         alias = db.execute(
             text("SELECT product_no FROM product_name_mappings WHERE alias_name = :name LIMIT 1"),
@@ -551,6 +549,13 @@ def _resolve_product_no_for_context(db: Session, name: str) -> str:
             return alias["product_no"]
     except Exception:
         pass
+    # 2. 精确匹配 erp_products
+    direct = db.execute(
+        text("SELECT product_no FROM erp_products WHERE product_no = :name LIMIT 1"),
+        {"name": name},
+    ).mappings().first()
+    if direct:
+        return direct["product_no"]
     return name
 
 
@@ -826,9 +831,9 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
         product_nos = await ai_order_parser.extract_product_nos(context_messages, db=db)
         logger.info("[AI Parse] review=%d 提取到款号: %s", review_id, product_nos)
 
-        # === 步骤 2：查询库存可选颜色/尺码 ===
-        product_context = query_product_context_for_nos(db, product_nos) if product_nos else ""
-        logger.info("[AI Parse] review=%d 步骤2: 库存上下文: %s", review_id, product_context[:200])
+        # === 步骤 2：查询产品表可选颜色/尺码 ===
+        product_context = await run_in_threadpool(query_product_context_for_nos, db, product_nos) if product_nos else ""
+        logger.info("[AI Parse] review=%d 步骤2: 产品上下文: %s", review_id, product_context[:200])
 
         # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
         logger.info("[AI Parse] review=%d 步骤3: 带上下文解析订单...", review_id)

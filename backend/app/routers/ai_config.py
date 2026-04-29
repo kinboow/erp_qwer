@@ -15,6 +15,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import User
 from app.services.ai_config import (
+    AI_PROVIDER_PRESETS,
     ensure_ai_config_table,
     get_ai_config,
     get_ai_config_for_parser,
@@ -27,6 +28,7 @@ router = APIRouter(tags=["AI-模型配置"])
 
 
 class AiConfigPayload(BaseModel):
+    ai_provider: Optional[str] = None
     ai_base_url: Optional[str] = None
     ai_api_key: Optional[str] = None
     ai_model: Optional[str] = None
@@ -40,6 +42,13 @@ def _json_response(code: int = 200, message: str = "success", data: Any = None) 
     if data is not None:
         resp["data"] = data
     return resp
+
+
+@router.get("/providers", summary="获取 AI 供应商预设列表")
+def api_get_ai_providers(
+    current_user: User = Depends(get_current_user),
+):
+    return _json_response(data=AI_PROVIDER_PRESETS)
 
 
 @router.get("/config", summary="获取 AI 模型配置")

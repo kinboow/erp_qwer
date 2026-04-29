@@ -43,7 +43,30 @@ CREATE TABLE IF NOT EXISTS ai_call_logs (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
+# 供应商预设配置
+AI_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    "qwen": {
+        "label": "通义千问（阿里云）",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "default_model": "qwen3.5-flash",
+        "default_vision_model": "qwen3.5-flash",
+    },
+    "bytedance": {
+        "label": "豆包（字节跳动 · 火山方舟）",
+        "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+        "default_model": "doubao-seed-2-0-lite-260215",
+        "default_vision_model": "doubao-seed-2-0-lite-260215",
+    },
+    "custom": {
+        "label": "自定义（OpenAI 兼容）",
+        "base_url": "",
+        "default_model": "",
+        "default_vision_model": "",
+    },
+}
+
 _AI_CONFIG_DEFAULTS: dict[str, str] = {
+    "ai_provider": "qwen",
     "ai_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "ai_api_key": "",
     "ai_model": "qwen3.5-flash",
@@ -111,6 +134,7 @@ def get_ai_config_for_parser(db: Session) -> dict[str, Any]:
     """供 ai_order_parser 调用，返回合并后的最终配置（DB 优先，.env 回退）"""
     cfg = get_ai_config(db)
     return {
+        "provider": (cfg.get("ai_provider") or "").strip() or "qwen",
         "base_url": (cfg.get("ai_base_url") or "").strip() or settings.OPENAI_BASE_URL,
         "api_key": (cfg.get("ai_api_key") or "").strip() or settings.OPENAI_API_KEY,
         "model": (cfg.get("ai_model") or "").strip() or settings.OPENAI_MODEL,

@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import SessionLocal
+from app.database import SessionLocal, run_in_threadpool
 from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.services.base import list_products as erp_list_products
 from app.ncloud.services.inventory import query_inventory as erp_query_inventory
@@ -495,7 +495,7 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
                 failed += 1
                 continue
             try:
-                _upsert_order(db, detail, now_str, list_extra=list_data.get(order_no))
+                await run_in_threadpool(_upsert_order, db, detail, now_str, list_extra=list_data.get(order_no))
                 synced += 1
             except Exception as db_exc:
                 logger.warning("[ERP Sync] 写入订单 %s 失败: %s", order_no, db_exc)
@@ -735,7 +735,7 @@ async def sync_sales_shipments(erp_client: ERPClient, days_back: int | None = No
                 failed += 1
                 continue
             try:
-                _upsert_shipment(db, detail, now_str, list_extra=list_data.get(order_no))
+                await run_in_threadpool(_upsert_shipment, db, detail, now_str, list_extra=list_data.get(order_no))
                 synced += 1
             except Exception as db_exc:
                 logger.warning("[ERP Sync] 写入发货单 %s 失败: %s", order_no, db_exc)
@@ -887,7 +887,7 @@ async def sync_products(erp_client: ERPClient) -> dict[str, Any]:
             product_list = await erp_list_products(erp_client, page=page, rows=rows_per_page)
             for item in product_list.rows:
                 try:
-                    _upsert_product(db, item, now_str)
+                    await run_in_threadpool(_upsert_product, db, item, now_str)
                     synced += 1
                 except Exception as exc:
                     logger.warning("[ERP Sync] 同步产品 %s 失败: %s", item.product_id, exc)
@@ -896,6 +896,7 @@ async def sync_products(erp_client: ERPClient) -> dict[str, Any]:
                         db.rollback()
                     except Exception:
                         pass
+            await asyncio.sleep(0)  # 让出事件循环
 
             if page * rows_per_page >= product_list.total:
                 break
@@ -981,7 +982,7 @@ async def sync_inventory(erp_client: ERPClient) -> dict[str, Any]:
             )
             for item in inv_resp.rows:
                 try:
-                    _upsert_inventory_item(db, item, now_str)
+                    await run_in_threadpool(_upsert_inventory_item, db, item, now_str)
                     synced += 1
                 except Exception as exc:
                     logger.warning("[ERP Sync] 同步库存 %s/%s 失败: %s", item.warehouse, item.product_no, exc)
@@ -990,6 +991,7 @@ async def sync_inventory(erp_client: ERPClient) -> dict[str, Any]:
                         db.rollback()
                     except Exception:
                         pass
+            await asyncio.sleep(0)  # 让出事件循环
 
             if page * rows_per_page >= inv_resp.total:
                 break

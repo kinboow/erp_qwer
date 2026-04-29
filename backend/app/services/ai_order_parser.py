@@ -113,6 +113,7 @@ class AIOrderParser:
             except Exception as exc:
                 logger.warning("从数据库加载 AI 配置失败，回退到 .env: %s", exc)
         return {
+            "provider": "qwen",
             "base_url": self._fallback_base_url,
             "api_key": self._fallback_api_key,
             "model": self._fallback_model,
@@ -152,8 +153,15 @@ class AIOrderParser:
                 pass
         raise AIOrderParserError(f"AI 返回内容不是有效 JSON: {text_content[:300]}")
 
+    def supports_oss_upload(self, db: Optional[Session] = None) -> bool:
+        """当前供应商是否支持 DashScope OSS 上传（仅通义千问支持）"""
+        cfg = self._load_config(db)
+        return cfg.get("provider", "qwen") == "qwen"
+
     async def upload_file(self, file_bytes: bytes, filename: str, model: str, db: Optional[Session] = None) -> str:
-        """上传文件到千问临时存储，返回 oss:// URL（有48小时有效期）"""
+        """上传文件到千问临时存储，返回 oss:// URL（有48小时有效期）。
+        注意：仅通义千问（DashScope）支持此功能，其他供应商请使用 base64 传图。
+        """
         cfg = self._load_config(db)
         self._ensure_enabled(cfg)
         api_key = cfg["api_key"]
@@ -224,7 +232,7 @@ class AIOrderParser:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        if self._messages_contain_oss(messages):
+        if self._messages_contain_oss(messages) and cfg.get("provider", "qwen") == "qwen":
             headers["X-DashScope-OssResourceResolve"] = "enable"
 
         # 构建请求摘要
@@ -648,13 +656,17 @@ CONTEXT_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。现在�
 【尺码匹配规则】
 - 同样做近似匹配："大"→"XL"，"中"→"M"，"小"→"S"，"加大"→"2XL"等。
 - 手写看不清时，根据可选尺码推测最接近的。
-- 【禁止】输出不在可选项列表中的尺码，永远选一个最接近的。
+- 如果客户写的尺码确实无法匹配到可选尺码中的任何一个（例如可选只有 S/M/L 但客户写了 "4XL"），则：
+  1. 仍然正常输出该行数据，size 字段填写客户原始写的尺码文字。
+  2. 在该 item 的 remark 中注明"尺码XXX不在可选范围内，请联系客服确认"。
+  3. 同时在 uncertainties 数组中添加一条描述，例如"款号XXXX的尺码XXX不在可选范围[S,M,L,XL]内"。
+- 只有确实完全无法匹配时才走上述流程；如果能通过近似匹配找到对应尺码，则正常匹配，不报错。
 
 【其他规则】
 - 如果某个款号不在提供的产品信息中，仍然正常解析。
 - 数量必须准确，不要编造。
 - 款号只包含数字，不包含英文字母。
-- uncertainties 只在极端情况下使用（例如完全无法辨认内容），正常的近似匹配不需要加 uncertainty。
+- uncertainties 在以下情况使用：(1) 完全无法辨认内容；(2) 客户尺码不在可选范围内。正常的近似匹配不需要加 uncertainty。
 
 严格只返回 JSON，不要返回 markdown。
 返回结构：

@@ -138,7 +138,7 @@ async def ingest_runtime_message(
     media_order_triggered = False
     try:
         bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
-        if not sender_is_employee and bot_wxid and is_at_bot(normalized_payload, bot_wxid):
+        if not sender_is_employee and (bot_wxid or resolved_instance_id) and is_at_bot(normalized_payload, bot_wxid, resolved_instance_id):
             trigger_info = extract_trigger_info(normalized_payload, resolved_instance_id)
             trigger_room_id = trigger_info.get("room_id") or ""
             trigger_sender_id = trigger_info.get("sender_id") or ""

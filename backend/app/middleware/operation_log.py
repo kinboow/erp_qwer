@@ -10,6 +10,7 @@
 
 import json
 import logging
+import threading
 import time
 from typing import Optional
 
@@ -205,39 +206,44 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
         if len(parts) == 2 and parts[1].isdigit():
             description = f"{desc_template} (ID:{parts[1]})"
 
-        # 异步写入 DB
-        try:
-            db = SessionLocal()
+        # 后台线程写入 DB，不阻塞响应返回
+        log_params = {
+            "user_id": user_id,
+            "username": username or "",
+            "module": module,
+            "action": action,
+            "method": method,
+            "path": path,
+            "ip": ip,
+            "ua": (request.headers.get("user-agent") or "")[:500],
+            "req_data": body_summary,
+            "status": status_ok,
+            "duration": duration_ms,
+        }
+
+        def _write_log():
             try:
-                db.execute(text(
-                    "INSERT INTO operation_logs "
-                    "(user_id, username, module, action, method, path, ip, user_agent, "
-                    " request_data, status, duration, created_at) "
-                    "VALUES (:user_id, :username, :module, :action, :method, :path, :ip, :ua, "
-                    " :req_data, :status, :duration, NOW())"
-                ), {
-                    "user_id": user_id,
-                    "username": username or "",
-                    "module": module,
-                    "action": action,
-                    "method": method,
-                    "path": path,
-                    "ip": ip,
-                    "ua": (request.headers.get("user-agent") or "")[:500],
-                    "req_data": body_summary,
-                    "status": status_ok,
-                    "duration": duration_ms,
-                })
-                db.commit()
-            except Exception as e:
-                logger.warning("写入操作日志失败: %s", e)
+                db = SessionLocal()
                 try:
-                    db.rollback()
-                except Exception:
-                    pass
-            finally:
-                db.close()
-        except Exception as e:
-            logger.warning("获取 DB 连接失败: %s", e)
+                    db.execute(text(
+                        "INSERT INTO operation_logs "
+                        "(user_id, username, module, action, method, path, ip, user_agent, "
+                        " request_data, status, duration, created_at) "
+                        "VALUES (:user_id, :username, :module, :action, :method, :path, :ip, :ua, "
+                        " :req_data, :status, :duration, NOW())"
+                    ), log_params)
+                    db.commit()
+                except Exception as e:
+                    logger.warning("写入操作日志失败: %s", e)
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning("获取 DB 连接失败: %s", e)
+
+        threading.Thread(target=_write_log, daemon=True).start()
 
         return response

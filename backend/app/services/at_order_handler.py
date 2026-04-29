@@ -19,7 +19,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.database import SessionLocal
+from app.database import SessionLocal, run_in_threadpool
 
 from app.services.ai_order_parser import AIOrderParserError, ai_order_parser
 from app.services.downstream_orders import (
@@ -76,16 +76,23 @@ def ensure_at_order_tables(db: Session) -> None:
 # ---------------------------------------------------------------------------
 # @检测
 # ---------------------------------------------------------------------------
-def is_at_bot(payload: dict[str, Any], bot_wxid: str) -> bool:
-    """检测消息是否 @了机器人"""
-    if not bot_wxid:
+def is_at_bot(payload: dict[str, Any], bot_wxid: str, instance_id: str = "") -> bool:
+    """检测消息是否 @了机器人（同时匹配 wxid 和 instance_id）"""
+    # 构建所有可能匹配的 bot 标识
+    bot_ids: set[str] = set()
+    if bot_wxid:
+        bot_ids.add(bot_wxid)
+    if instance_id:
+        bot_ids.add(str(instance_id))
+    if not bot_ids:
         return False
+
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     message_data = message.get("data") if isinstance(message.get("data"), dict) else {}
     if not message_data and isinstance(payload.get("data"), dict):
         message_data = payload["data"]
 
-    # 方式 1: at_list 包含 bot wxid
+    # 方式 1: at_list 包含 bot wxid 或 instance_id
     at_list = message_data.get("at_list") or payload.get("at_list") or []
     if isinstance(at_list, str):
         try:
@@ -95,9 +102,10 @@ def is_at_bot(payload: dict[str, Any], bot_wxid: str) -> bool:
     if isinstance(at_list, list):
         for item in at_list:
             if isinstance(item, dict):
-                if str(item.get("user_id", "")).strip() == bot_wxid:
+                uid = str(item.get("user_id", "")).strip()
+                if uid and uid in bot_ids:
                     return True
-            elif isinstance(item, str) and item == bot_wxid:
+            elif isinstance(item, str) and item.strip() in bot_ids:
                 return True
 
     # 方式 2: is_at_me 标识
@@ -367,24 +375,28 @@ def _build_name_mapping_hints(db: Session) -> str:
 
 
 def _resolve_product_no(db: Session, name: str) -> str:
-    """通过映射表解析名称 → 货号。先精确匹配货号，再查别名映射。"""
+    """通过映射表解析名称 → 货号。
+
+    优先级：映射表 > 产品表精确匹配 > 原值
+    映射表优先，确保用户显式配置的别名总是生效。
+    """
     name = name.strip()
     if not name:
         return name
-    # 1. 直接在库存/产品表匹配货号
-    direct = db.execute(
-        text("SELECT product_no FROM erp_products WHERE product_no = :name LIMIT 1"),
-        {"name": name},
-    ).mappings().first()
-    if direct:
-        return direct["product_no"]
-    # 2. 查映射表
+    # 1. 优先查映射表——用户显式配置的别名拥有最高优先级
     alias = db.execute(
         text("SELECT product_no FROM product_name_mappings WHERE alias_name = :name LIMIT 1"),
         {"name": name},
     ).mappings().first()
     if alias:
         return alias["product_no"]
+    # 2. 直接在产品表匹配货号
+    direct = db.execute(
+        text("SELECT product_no FROM erp_products WHERE product_no = :name LIMIT 1"),
+        {"name": name},
+    ).mappings().first()
+    if direct:
+        return direct["product_no"]
     return name
 
 
@@ -687,9 +699,9 @@ async def _process_order(
     try:
         from app.services.erp_sync import ensure_tables
         from app.services.downstream_orders import query_product_context_for_nos
-        ensure_tables(db)
+        await run_in_threadpool(ensure_tables, db)
 
-        mapping_hint = _build_name_mapping_hints(db)
+        mapping_hint = await run_in_threadpool(_build_name_mapping_hints, db)
         full_hint = f"{customer_hint}\n{mapping_hint}" if mapping_hint else customer_hint
 
         # === 步骤 1：智能体 A — 提取款号 ===
@@ -697,9 +709,9 @@ async def _process_order(
         product_nos = await ai_order_parser.extract_product_nos(ai_inputs, db=db)
         logger.info("%s: 提取到款号: %s room=%s", source_label, product_nos, room_id)
 
-        # === 步骤 2：查询库存可选颜色/尺码 ===
-        product_context = query_product_context_for_nos(db, product_nos) if product_nos else ""
-        logger.info("%s: 步骤2 库存上下文: %s room=%s", source_label, product_context[:200], room_id)
+        # === 步骤 2：查询产品表可选颜色/尺码 ===
+        product_context = await run_in_threadpool(query_product_context_for_nos, db, product_nos) if product_nos else ""
+        logger.info("%s: 步骤2 产品上下文: %s room=%s", source_label, product_context[:200], room_id)
 
         # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
         logger.info("%s: 步骤3 带上下文解析订单 room=%s", source_label, room_id)
@@ -922,28 +934,11 @@ async def handle_media_order(
             logger.info("媒体接单: 下载失败或无内容 room=%s log_id=%d", room_id, msg_log_id)
             return
 
-        # 2. 图片上传 OSS
-        if message_type == "image" and ai_input.get("base64"):
-            db = SessionLocal()
-            try:
-                cfg = ai_order_parser._load_config(db)
-                vision_model = cfg.get("vision_model") or cfg.get("model") or "qwen3.5-flash"
-                img_bytes = base64.b64decode(ai_input["base64"])
-                ext = (ai_input.get("mime") or "image/png").split("/")[-1]
-                fname = f"media_order_{msg_log_id}.{ext}"
-                oss_url = await ai_order_parser.upload_file(img_bytes, fname, vision_model, db=db)
-                ai_input["oss_url"] = oss_url
-                logger.info("媒体接单: 图片已上传 OSS: %s", oss_url)
-            except Exception as upload_exc:
-                logger.warning("媒体接单: 图片上传 OSS 失败，回退 base64: %s", upload_exc)
-            finally:
-                db.close()
-
         # 清理内部字段
         ai_input.pop("_payload", None)
         ai_input.pop("_msg_id", None)
 
-        # 3. 智能体1：验证是否为报货信息
+        # 2. 智能体1：验证是否为报货信息（直接用 base64，不存图片）
         ai_input_for_judge = [ai_input]
         db = SessionLocal()
         try:
@@ -972,6 +967,26 @@ async def handle_media_order(
             finally:
                 db.close()
             return
+
+        # 3. 验证通过后，图片上传 OSS（仅通义千问支持，其他供应商直接使用 base64）
+        if message_type == "image" and ai_input.get("base64"):
+            db = SessionLocal()
+            try:
+                if ai_order_parser.supports_oss_upload(db):
+                    cfg = ai_order_parser._load_config(db)
+                    vision_model = cfg.get("vision_model") or cfg.get("model") or "qwen3.5-flash"
+                    img_bytes = base64.b64decode(ai_input["base64"])
+                    ext = (ai_input.get("mime") or "image/png").split("/")[-1]
+                    fname = f"media_order_{msg_log_id}.{ext}"
+                    oss_url = await ai_order_parser.upload_file(img_bytes, fname, vision_model, db=db)
+                    ai_input["oss_url"] = oss_url
+                    logger.info("媒体接单: 图片已上传 OSS: %s", oss_url)
+                else:
+                    logger.info("媒体接单: 当前供应商不支持 OSS 上传，使用 base64 传图")
+            except Exception as upload_exc:
+                logger.warning("媒体接单: 图片上传 OSS 失败，回退 base64: %s", upload_exc)
+            finally:
+                db.close()
 
         # 4. 智能体2：完整解析
         await _process_order(

@@ -1,5 +1,9 @@
 import request from '@/utils/request'
 
+export const getAiProviders = () => {
+  return request({ url: '/api/ai/providers', method: 'get' })
+}
+
 export const getAiConfig = () => {
   return request({ url: '/api/ai/config', method: 'get' })
 }
