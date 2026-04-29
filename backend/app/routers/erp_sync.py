@@ -254,13 +254,13 @@ def api_module_sync_status() -> dict[str, Any]:
 
 
 @router.post("/trigger", summary="手动触发全量同步")
-async def api_sync_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
+async def api_sync_trigger(request: Request, days_back: int = 360) -> dict[str, Any]:
     try:
         erp_client = request.app.state.erp_client
-        orders_result = await _sync_module("orders", sync_sales_orders(erp_client, days_back=days_back))
-        shipments_result = await _sync_module("shipments", sync_sales_shipments(erp_client, days_back=days_back))
-        products_result = await _sync_module("products", sync_products(erp_client))
-        inventory_result = await _sync_module("inventory", sync_inventory(erp_client))
+        orders_result = await _sync_module("orders", sync_sales_orders(erp_client, days_back=days_back), trigger="manual")
+        shipments_result = await _sync_module("shipments", sync_sales_shipments(erp_client, days_back=days_back), trigger="manual")
+        products_result = await _sync_module("products", sync_products(erp_client), trigger="manual")
+        inventory_result = await _sync_module("inventory", sync_inventory(erp_client), trigger="manual")
         return {"code": 200, "message": "同步完成", "data": {
             "orders": orders_result,
             "shipments": shipments_result,
@@ -272,7 +272,7 @@ async def api_sync_trigger(request: Request, days_back: int = 90) -> dict[str, A
 
 
 @router.post("/trigger-orders", summary="手动触发销售订单同步")
-async def api_sync_orders_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
+async def api_sync_orders_trigger(request: Request, days_back: int = 360) -> dict[str, Any]:
     if is_module_syncing("orders"):
         return {"code": 200, "message": "销售订单正在同步中，请稍候", "data": {"already_syncing": True}}
     import asyncio
@@ -282,7 +282,7 @@ async def api_sync_orders_trigger(request: Request, days_back: int = 90) -> dict
 
 
 @router.post("/trigger-shipments", summary="手动触发发货单同步")
-async def api_sync_shipments_trigger(request: Request, days_back: int = 90) -> dict[str, Any]:
+async def api_sync_shipments_trigger(request: Request, days_back: int = 360) -> dict[str, Any]:
     if is_module_syncing("shipments"):
         return {"code": 200, "message": "发货单正在同步中，请稍候", "data": {"already_syncing": True}}
     import asyncio
@@ -312,41 +312,16 @@ async def api_sync_inventory_trigger(request: Request) -> dict[str, Any]:
 
 
 async def _background_sync_module(module: str, coro, label: str) -> None:
-    """后台执行单模块同步（fire-and-forget），完成后刷新健康状态并写入系统消息"""
-    from app.services.system_messages import create_system_message_background
-    from app.services.system_activities import create_activity_background
+    """后台执行单模块同步（fire-and-forget），完成后刷新健康状态并写入汇总消息"""
+    from app.services.erp_sync import _record_sync_cycle_message
+    cycle_result: dict = {}
     try:
-        result = await _sync_module(module, coro)
-        if result is not None:
-            synced = result.get("synced", 0) if isinstance(result, dict) else 0
-            create_system_message_background(
-                title=f"手动同步{label}成功",
-                content=f"手动同步{label}完成，共同步 {synced} 条数据",
-                level="info",
-                source="erp_sync",
-            )
-            create_activity_background(
-                title=f"手动同步{label}成功",
-                content=f"手动同步{label}完成，共同步 {synced} 条数据",
-                type="info",
-                source="erp_sync",
-            )
+        result = await _sync_module(module, coro, trigger="manual")
+        cycle_result[module] = result or {"skipped": True}
     except Exception as exc:
         import logging
         logging.getLogger(__name__).exception("[ERP Sync] %s 同步异常", label)
-        from app.services.erp_sync import _record_sync_failure_message
-        _record_sync_failure_message(label, exc)
-        create_system_message_background(
-            title=f"手动同步{label}失败",
-            content=f"手动同步{label}时发生错误：{str(exc)[:200]}",
-            level="error",
-            source="erp_sync",
-        )
-        create_activity_background(
-            title=f"手动同步{label}失败",
-            content=f"手动同步{label}时发生错误：{str(exc)[:200]}",
-            type="urgent",
-            source="erp_sync",
-        )
+        cycle_result[module] = {"error": str(exc)}
     finally:
+        _record_sync_cycle_message(cycle_result, trigger="手动")
         _refresh_erp_status_background()

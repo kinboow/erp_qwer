@@ -43,7 +43,8 @@
           </div>
 
           <!-- 系统日志表格 -->
-          <el-table :data="systemLogs" v-loading="systemLoading" stripe class="lark-table">
+          <el-table :data="systemLogs" v-loading="systemLoading" stripe class="lark-table"
+            :tooltip-options="{ placement: 'top', popperOptions: { modifiers: [{ name: 'flip', options: { fallbackPlacements: ['bottom', 'left', 'right'] } }] } }">
             <el-table-column label="时间" prop="timestamp" width="180">
               <template #default="{ row }">
                 <span class="log-time">{{ row.timestamp }}</span>
@@ -124,7 +125,8 @@
           </div>
 
           <!-- 操作日志表格 -->
-          <el-table :data="opLogs" v-loading="opLoading" stripe class="lark-table">
+          <el-table :data="opLogs" v-loading="opLoading" stripe class="lark-table"
+            :tooltip-options="{ placement: 'top', popperOptions: { modifiers: [{ name: 'flip', options: { fallbackPlacements: ['bottom', 'left', 'right'] } }] } }">
             <el-table-column label="时间" prop="created_at" width="180">
               <template #default="{ row }">
                 <span class="log-time">{{ row.created_at }}</span>
@@ -213,7 +215,8 @@
             </div>
           </div>
 
-          <el-table :data="messageLogs" v-loading="messageLoading" stripe class="lark-table">
+          <el-table :data="messageLogs" v-loading="messageLoading" stripe class="lark-table"
+            :tooltip-options="{ placement: 'top', popperOptions: { modifiers: [{ name: 'flip', options: { fallbackPlacements: ['bottom', 'left', 'right'] } }] } }">
             <el-table-column type="expand" width="52">
               <template #default="{ row }">
                 <pre class="message-payload-block">{{ formatPayload(row.payload) }}</pre>
@@ -368,13 +371,13 @@ async function fetchOpLogs() {
 
 // ========== 辅助方法 ==========
 function levelTagType(level) {
-  const map = { error: 'danger', warn: 'warning', info: 'info', debug: '' }
-  return map[level] || ''
+  const map = { error: 'danger', warn: 'warning', warning: 'warning', info: 'info', debug: 'info' }
+  return map[level] || 'info'
 }
 
 function actionTagType(action) {
-  const map = { create: 'success', update: 'warning', delete: 'danger', login: 'info', logout: '', sync: 'primary', view: '' }
-  return map[action] || ''
+  const map = { create: 'success', update: 'warning', delete: 'danger', login: 'info', logout: 'info', sync: 'primary', view: 'info' }
+  return map[action] || 'info'
 }
 
 function actionLabel(action) {

@@ -12,6 +12,6 @@ export const getShipmentItems = (orderNo) => {
   return request({ url: `/api/sales-shipments/${encodeURIComponent(orderNo)}/items`, method: 'get' })
 }
 
-export const syncShipments = (daysBack = 90) => {
+export const syncShipments = (daysBack = 360) => {
   return request({ url: '/api/erp/sync/trigger-shipments', method: 'post', params: { days_back: daysBack }, timeout: 300000 })
 }

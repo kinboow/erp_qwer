@@ -244,7 +244,7 @@ _CONFIG_DEFAULTS = {
     "erp_password": "",
     "erp_qr_image_path": "",
     "sync_interval_minutes": "15",
-    "sync_days_back": "90",
+    "sync_days_back": "360",
     "sync_enabled": "true",
 }
 
@@ -291,7 +291,7 @@ def get_erp_sync_config(db: Session) -> dict[str, Any]:
         cfg.setdefault(k, v)
     # 转换类型
     cfg["sync_interval_minutes"] = int(cfg.get("sync_interval_minutes") or 15)
-    cfg["sync_days_back"] = int(cfg.get("sync_days_back") or 90)
+    cfg["sync_days_back"] = int(cfg.get("sync_days_back") or 360)
     cfg["sync_enabled"] = str(cfg.get("sync_enabled", "true")).lower() in ("true", "1", "yes")
     return cfg
 
@@ -361,6 +361,7 @@ async def reload_erp_client(app: Any) -> None:
         },
         follow_redirects=False,
         trust_env=False,
+        timeout=httpx.Timeout(30, connect=10),
     )
     erp_client = ERPClient(http_client)
     app.state.http_client = http_client
@@ -400,16 +401,20 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
     返回同步统计信息。
     """
     cfg = _get_db_config()
-    window_days = days_back or cfg.get("sync_days_back", 90)
+    window_days = days_back or cfg.get("sync_days_back", 360)
+    # 短周期（<=180天，即定时同步）：找到数据就停，空窗口顺延
+    # 长周期（>180天，即手动同步）：完整滑动窗口回溯
+    stop_on_data = window_days <= 180
 
     db: Session = SessionLocal()
     try:
         ensure_tables(db)
 
-        # 1. 使用滑动窗口获取销售订单列表
+        # 1. 获取销售订单列表
         list_data: dict[str, Any] = {}  # order_no -> list item data
         window_end = datetime.now()
         total_windows = 0
+        consecutive_empty = 0
 
         while True:
             datee = window_end.strftime("%Y-%m-%d")
@@ -447,8 +452,15 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
 
             logger.info("[ERP Sync] 销售订单窗口 %s ~ %s 获取 %d 条", dates, datee, window_count)
 
+            if window_count > 0 and stop_on_data:
+                break  # 定时同步：找到数据就停，不继续滑动
+
             if window_count == 0:
-                break
+                consecutive_empty += 1
+                if consecutive_empty >= 3:
+                    break
+            else:
+                consecutive_empty = 0
 
             window_end = window_end - timedelta(days=window_days) - timedelta(days=1)
 
@@ -459,14 +471,34 @@ async def sync_sales_orders(erp_client: ERPClient, days_back: int | None = None)
         failed = 0
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 2. 逐单获取详情并写入数据库（用列表数据补充详情中缺失的字段）
-        for order_no in all_order_nos:
+        # 2. 并发获取详情（5 路并行 + 重试），串行写入数据库
+        sem = asyncio.Semaphore(5)
+
+        async def _fetch_one(order_no: str) -> tuple[str, Any | None, Exception | None]:
+            async with sem:
+                last_exc: Exception | None = None
+                for attempt in range(3):
+                    try:
+                        detail = await get_order_detail(erp_client, order_no)
+                        return (order_no, detail, None)
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                return (order_no, None, last_exc)
+
+        results_list = await asyncio.gather(*[_fetch_one(no) for no in all_order_nos])
+
+        for order_no, detail, exc in results_list:
+            if exc is not None:
+                logger.warning("[ERP Sync] 同步订单 %s 失败: %s", order_no, exc)
+                failed += 1
+                continue
             try:
-                detail = await get_order_detail(erp_client, order_no)
                 _upsert_order(db, detail, now_str, list_extra=list_data.get(order_no))
                 synced += 1
-            except Exception as exc:
-                logger.warning("[ERP Sync] 同步订单 %s 失败: %s", order_no, exc)
+            except Exception as db_exc:
+                logger.warning("[ERP Sync] 写入订单 %s 失败: %s", order_no, db_exc)
                 failed += 1
                 try:
                     db.rollback()
@@ -612,16 +644,18 @@ async def sync_sales_shipments(erp_client: ERPClient, days_back: int | None = No
     返回同步统计信息。
     """
     cfg = _get_db_config()
-    window_days = days_back or cfg.get("sync_days_back", 90)
+    window_days = days_back or cfg.get("sync_days_back", 360)
+    stop_on_data = window_days <= 180
 
     db: Session = SessionLocal()
     try:
         ensure_tables(db)
 
-        # 1. 使用滑动窗口获取发货单列表
+        # 1. 获取发货单列表
         list_data: dict[str, Any] = {}  # order_no -> list item data
         window_end = datetime.now()
         total_windows = 0
+        consecutive_empty = 0
 
         while True:
             datee = window_end.strftime("%Y-%m-%d")
@@ -658,8 +692,15 @@ async def sync_sales_shipments(erp_client: ERPClient, days_back: int | None = No
 
             logger.info("[ERP Sync] 发货单窗口 %s ~ %s 获取 %d 条", dates, datee, window_count)
 
-            if window_count == 0:
+            if window_count > 0 and stop_on_data:
                 break
+
+            if window_count == 0:
+                consecutive_empty += 1
+                if consecutive_empty >= 3:
+                    break
+            else:
+                consecutive_empty = 0
 
             window_end = window_end - timedelta(days=window_days) - timedelta(days=1)
 
@@ -670,14 +711,34 @@ async def sync_sales_shipments(erp_client: ERPClient, days_back: int | None = No
         failed = 0
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 2. 逐单获取详情并写入数据库
-        for order_no in all_order_nos:
+        # 2. 并发获取详情（5 路并行 + 重试），串行写入数据库
+        sem = asyncio.Semaphore(5)
+
+        async def _fetch_one(order_no: str) -> tuple[str, Any | None, Exception | None]:
+            async with sem:
+                last_exc: Exception | None = None
+                for attempt in range(3):
+                    try:
+                        detail = await get_shipment_detail(erp_client, order_no)
+                        return (order_no, detail, None)
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 2:
+                            await asyncio.sleep(1.5 * (attempt + 1))
+                return (order_no, None, last_exc)
+
+        results_list = await asyncio.gather(*[_fetch_one(no) for no in all_order_nos])
+
+        for order_no, detail, exc in results_list:
+            if exc is not None:
+                logger.warning("[ERP Sync] 同步发货单 %s 失败: %s", order_no, exc)
+                failed += 1
+                continue
             try:
-                detail = await get_shipment_detail(erp_client, order_no)
                 _upsert_shipment(db, detail, now_str, list_extra=list_data.get(order_no))
                 synced += 1
-            except Exception as exc:
-                logger.warning("[ERP Sync] 同步发货单 %s 失败: %s", order_no, exc)
+            except Exception as db_exc:
+                logger.warning("[ERP Sync] 写入发货单 %s 失败: %s", order_no, db_exc)
                 failed += 1
                 try:
                     db.rollback()
@@ -995,9 +1056,6 @@ def _upsert_inventory_item(db: Session, item: Any, synced_at: str) -> None:
 _sync_task: Optional[asyncio.Task] = None
 _last_sync_result: dict[str, Any] = {}
 _is_syncing: bool = False
-_FAILURE_MESSAGE_DEDUP_SECONDS = 600
-_last_failure_message_at: dict[str, datetime] = {}
-
 # ---------------------------------------------------------------------------
 # 模块级同步锁 — 跨用户互斥
 # ---------------------------------------------------------------------------
@@ -1007,118 +1065,173 @@ _module_syncing: dict[str, bool] = {
     "products": False,
     "inventory": False,
 }
+# 记录每个模块当前同步的触发方式："scheduled"(定时) / "manual"(手动) / ""
+_sync_trigger: dict[str, str] = {
+    "orders": "",
+    "shipments": "",
+    "products": "",
+    "inventory": "",
+}
 
 
 def is_module_syncing(module: str) -> bool:
     return _module_syncing.get(module, False)
 
 
-def get_all_module_sync_status() -> dict[str, bool]:
-    return dict(_module_syncing)
+def get_all_module_sync_status() -> dict[str, Any]:
+    return {k: {"syncing": v, "trigger": _sync_trigger.get(k, "")} for k, v in _module_syncing.items()}
 
 
-async def _sync_module(module: str, coro):
+async def _sync_module(module: str, coro, trigger: str = "manual"):
     """带模块锁的同步包装器，完成后广播通知前端"""
     from app.services import ws_notify
 
     if _module_syncing.get(module, False):
         return None  # 已在同步中
     _module_syncing[module] = True
+    _sync_trigger[module] = trigger
     try:
         result = await coro
-        await ws_notify.broadcast("sync_complete", {"module": module, "success": True})
+        await ws_notify.broadcast("sync_complete", {"module": module, "success": True, "trigger": trigger})
         return result
     except Exception:
-        await ws_notify.broadcast("sync_complete", {"module": module, "success": False})
+        await ws_notify.broadcast("sync_complete", {"module": module, "success": False, "trigger": trigger})
         raise
     finally:
         _module_syncing[module] = False
+        _sync_trigger[module] = ""
 
 
-def _record_sync_failure_message(module_name: str, exc: Exception) -> None:
-    error_text = str(exc).strip() or repr(exc)
+def _record_sync_cycle_message(cycle_result: dict[str, Any], trigger: str = "定时") -> None:
+    """将一次同步周期的所有模块结果汇总为一条系统消息和一条系统动态"""
     now = datetime.now()
-    dedup_key = f"{module_name}|{error_text}"
-    last_time = _last_failure_message_at.get(dedup_key)
-    if last_time and (now - last_time).total_seconds() < _FAILURE_MESSAGE_DEDUP_SECONDS:
-        return
+    _MODULE_LABELS = {
+        "orders": "销售订单",
+        "shipments": "销售发货单",
+        "products": "产品",
+        "inventory": "库存",
+    }
 
-    _last_failure_message_at[dedup_key] = now
+    lines: list[str] = []
+    has_error = False
+    for key, label in _MODULE_LABELS.items():
+        r = cycle_result.get(key)
+        if r is None or (isinstance(r, dict) and r.get("skipped")):
+            lines.append(f"  {label}：跳过")
+            continue
+        if isinstance(r, dict) and "error" in r:
+            has_error = True
+            lines.append(f"  {label}：失败 - {str(r['error'])[:80]}")
+            continue
+        if isinstance(r, dict):
+            total = r.get("total_found", 0)
+            synced = r.get("synced", 0)
+            failed = r.get("failed", 0)
+            line = f"  {label}：发现 {total}，成功 {synced}"
+            if failed:
+                line += f"，失败 {failed}"
+                has_error = True
+            lines.append(line)
+        else:
+            lines.append(f"  {label}：完成")
 
-    # 清理过期的去重键，避免长期运行时内存增长
-    for key, ts in list(_last_failure_message_at.items()):
-        if (now - ts).total_seconds() >= _FAILURE_MESSAGE_DEDUP_SECONDS:
-            _last_failure_message_at.pop(key, None)
+    summary = "\n".join(lines)
+    level = "error" if has_error else "success"
+    msg_type = "urgent" if has_error else "info"
+    status_text = "部分失败" if has_error else "全部完成"
+    title = f"【{trigger}】ERP 同步{status_text}"
 
     try:
-        # 系统动态：记录详细错误信息
         create_activity_background(
-            title=f"{module_name}同步失败",
-            content=f"{module_name}同步失败：{error_text}",
-            type="urgent",
+            title=title,
+            content=f"【{trigger}】ERP 同步于 {now.strftime('%H:%M:%S')} {status_text}：\n{summary}",
+            type=msg_type,
             source="erp_sync",
         )
-        # 系统消息：仅简要通知
         create_system_message_background(
-            title=f"{module_name}同步失败",
-            content=f"{module_name}在 {now.strftime('%H:%M:%S')} 同步时发生错误",
-            level="error",
+            title=title,
+            content=f"【{trigger}】ERP 同步于 {now.strftime('%H:%M:%S')} {status_text}：\n{summary}",
+            level=level,
             source="erp_sync",
         )
     except Exception:
-        logger.exception("[ERP Sync] 写入同步失败记录失败")
+        logger.exception("[ERP Sync] 写入同步汇总记录失败")
 
 
 async def _sync_loop(erp_client: ERPClient) -> None:
     """后台循环，每隔 N 分钟执行一次同步"""
     global _last_sync_result, _is_syncing
 
+    _MAX_MODULE_RETRIES = 2  # 每个模块最多额外重试 2 次
+    _RETRY_DELAY = 5         # 重试前等待秒数
+
+    async def _run_module_with_retry(module_key: str, coro_factory, label: str, trigger: str = "scheduled") -> dict[str, Any] | None:
+        """执行单模块同步，失败时重试（含重新登录）"""
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_MODULE_RETRIES + 1):
+            try:
+                result = await _sync_module(module_key, coro_factory(), trigger=trigger)
+                return result
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _MAX_MODULE_RETRIES:
+                    logger.warning("[ERP Sync] %s 同步失败 (第%d次)，%d秒后重试: %s",
+                                   label, attempt + 1, _RETRY_DELAY, exc)
+                    # 可能是 session 过期，强制重新登录
+                    try:
+                        erp_client._auth.invalidate()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(_RETRY_DELAY)
+                else:
+                    logger.exception("[ERP Sync] %s 同步异常（已重试%d次）", label, _MAX_MODULE_RETRIES)
+        return {"error": str(last_exc)}
+
     # 启动后先等 10 秒再执行第一次，给服务初始化时间
     await asyncio.sleep(10)
 
     while True:
         cfg = _get_db_config()
+        interval = int(cfg.get("sync_interval_minutes", 15)) * 60
         cycle_result: dict[str, Any] = {}
+        cycle_start = datetime.now()
+        logger.info("[ERP Sync] ===== 定时同步周期开始 =====")
         try:
             _is_syncing = True
-            try:
-                orders_result = await _sync_module("orders", sync_sales_orders(erp_client))
-                cycle_result["orders"] = orders_result or {"skipped": True}
-            except Exception as exc:
-                logger.exception("[ERP Sync] 销售订单同步异常")
-                cycle_result["orders"] = {"error": str(exc)}
-                _record_sync_failure_message("销售订单", exc)
+            # 定时同步采用增量模式：只拉最近 30 天的数据，
+            # 30天之前的历史数据保持不变，仅通过手动全量同步更新。
+            _SCHEDULED_DAYS_BACK = 30
 
-            try:
-                shipments_result = await _sync_module("shipments", sync_sales_shipments(erp_client))
-                cycle_result["shipments"] = shipments_result or {"skipped": True}
-            except Exception as exc:
-                logger.exception("[ERP Sync] 发货单同步异常")
-                cycle_result["shipments"] = {"error": str(exc)}
-                _record_sync_failure_message("销售发货单", exc)
-
-            try:
-                products_result = await _sync_module("products", sync_products(erp_client))
-                cycle_result["products"] = products_result or {"skipped": True}
-            except Exception as exc:
-                logger.exception("[ERP Sync] 产品同步异常")
-                cycle_result["products"] = {"error": str(exc)}
-                _record_sync_failure_message("产品", exc)
-
-            try:
-                inventory_result = await _sync_module("inventory", sync_inventory(erp_client))
-                cycle_result["inventory"] = inventory_result or {"skipped": True}
-            except Exception as exc:
-                logger.exception("[ERP Sync] 库存同步异常")
-                cycle_result["inventory"] = {"error": str(exc)}
-                _record_sync_failure_message("库存", exc)
+            # 4 个模块并发执行，各自写不同的表，互不冲突
+            r_orders, r_shipments, r_products, r_inventory = await asyncio.gather(
+                _run_module_with_retry(
+                    "orders", lambda: sync_sales_orders(erp_client, days_back=_SCHEDULED_DAYS_BACK), "销售订单"),
+                _run_module_with_retry(
+                    "shipments", lambda: sync_sales_shipments(erp_client, days_back=_SCHEDULED_DAYS_BACK), "发货单"),
+                _run_module_with_retry(
+                    "products", lambda: sync_products(erp_client), "产品"),
+                _run_module_with_retry(
+                    "inventory", lambda: sync_inventory(erp_client), "库存"),
+            )
+            cycle_result["orders"] = r_orders or {"skipped": True}
+            cycle_result["shipments"] = r_shipments or {"skipped": True}
+            cycle_result["products"] = r_products or {"skipped": True}
+            cycle_result["inventory"] = r_inventory or {"skipped": True}
 
             cycle_result["synced_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _last_sync_result = cycle_result
+        except Exception as loop_exc:
+            logger.exception("[ERP Sync] 同步周期异常: %s", loop_exc)
         finally:
             _is_syncing = False
+            elapsed = (datetime.now() - cycle_start).total_seconds()
+            logger.info("[ERP Sync] ===== 定时同步周期结束，耗时 %.1f 秒，下次 %d 分钟后 =====", elapsed, interval // 60)
+            # 无论成功失败，都汇总为一条系统消息和动态
+            try:
+                _record_sync_cycle_message(cycle_result, trigger="定时")
+            except Exception:
+                logger.exception("[ERP Sync] 写入同步汇总消息失败")
 
-        interval = int(cfg.get("sync_interval_minutes", 15)) * 60
         await asyncio.sleep(interval)
 
 

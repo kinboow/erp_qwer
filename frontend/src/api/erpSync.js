@@ -16,7 +16,7 @@ export const getErpSyncStatus = () => {
   return request({ url: '/api/erp/sync/status', method: 'get' })
 }
 
-export const triggerErpSync = (daysBack = 90) => {
+export const triggerErpSync = (daysBack = 360) => {
   return request({ url: `/api/erp/sync/trigger?days_back=${daysBack}`, method: 'post', timeout: 300000 })
 }
 

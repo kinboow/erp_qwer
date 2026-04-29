@@ -16,6 +16,7 @@ const MODULE_LABELS = {
 
 export function useSyncStatus(module, onSyncComplete) {
   const syncing = ref(false)
+  const trigger = ref('')   // 'scheduled' | 'manual' | ''
   let notifyWs = null
   let reconnectTimer = null
 
@@ -24,7 +25,14 @@ export function useSyncStatus(module, onSyncComplete) {
     try {
       const res = await request({ url: '/api/erp/sync/module-status', method: 'get' })
       const data = res.data || {}
-      syncing.value = !!data[module]
+      const info = data[module]
+      if (info && typeof info === 'object') {
+        syncing.value = !!info.syncing
+        trigger.value = info.trigger || ''
+      } else {
+        syncing.value = !!info
+        trigger.value = ''
+      }
     } catch {
       // ignore
     }
@@ -40,12 +48,14 @@ export function useSyncStatus(module, onSyncComplete) {
         const msg = JSON.parse(evt.data)
         if (msg.event === 'sync_complete' && msg.data?.module === module) {
           const label = MODULE_LABELS[module] || module
+          const triggerHint = msg.data?.trigger === 'scheduled' ? '（定时）' : ''
           if (msg.data?.success) {
-            ElMessage.success(`${label}同步完成`)
+            ElMessage.success(`${label}同步完成${triggerHint}`)
           } else {
-            ElMessage.error(`${label}同步失败`)
+            ElMessage.error(`${label}同步失败${triggerHint}`)
           }
           syncing.value = false
+          trigger.value = ''
           if (typeof onSyncComplete === 'function') {
             onSyncComplete()
           }
@@ -79,5 +89,5 @@ export function useSyncStatus(module, onSyncComplete) {
     disconnectWs()
   })
 
-  return { syncing, checkSyncStatus }
+  return { syncing, trigger, checkSyncStatus }
 }

@@ -57,15 +57,21 @@ class ERPAuthManager:
             filename = qr_path.name
 
         files = {"imgData": (filename, img_bytes, "image/jpeg")}
-        try:
-            response = await self._client.post(
-                f"{settings.NCLOUD_BASE_URL.rstrip('/')}/Login/CheckAccountSet",
-                headers=AJAX_HEADERS,
-                files=files,
-                timeout=30,
-            )
-        except httpx.RequestError as exc:
-            raise ERPUpstreamError(f"CheckAccountSet request failed: {exc}") from exc
+        last_exc: Exception | None = None
+        for _attempt in range(3):
+            try:
+                response = await self._client.post(
+                    f"{settings.NCLOUD_BASE_URL.rstrip('/')}/Login/CheckAccountSet",
+                    headers=AJAX_HEADERS,
+                    files=files,
+                    timeout=30,
+                )
+                break
+            except httpx.RequestError as exc:
+                last_exc = exc
+                await asyncio.sleep(2)
+        else:
+            raise ERPUpstreamError(f"CheckAccountSet request failed: {last_exc}") from last_exc
 
         if response.status_code >= 400:
             raise ERPUpstreamError(f"CheckAccountSet HTTP {response.status_code}")
@@ -87,21 +93,31 @@ class ERPAuthManager:
             if self._logged_in and not force:
                 return
 
-            account_set = await self.resolve_account_set()
+            # 复用上次解析的账套信息，避免每次重新下载二维码
+            if self._last_account_set:
+                account_set = self._last_account_set
+            else:
+                account_set = await self.resolve_account_set()
 
-            try:
-                response = await self._client.post(
-                    f"{settings.NCLOUD_BASE_URL.rstrip('/')}/Login/CheckLogin",
-                    headers=FORM_HEADERS,
-                    data={
-                        "Account": settings.NCLOUD_USERNAME,
-                        "Password": settings.NCLOUD_PASSWORD,
-                        "qrcode": account_set["qrcode"],
-                    },
-                    timeout=30,
-                )
-            except httpx.RequestError as exc:
-                raise ERPUpstreamError(f"CheckLogin request failed: {exc}") from exc
+            last_exc = None
+            for _attempt in range(3):
+                try:
+                    response = await self._client.post(
+                        f"{settings.NCLOUD_BASE_URL.rstrip('/')}/Login/CheckLogin",
+                        headers=FORM_HEADERS,
+                        data={
+                            "Account": settings.NCLOUD_USERNAME,
+                            "Password": settings.NCLOUD_PASSWORD,
+                            "qrcode": account_set["qrcode"],
+                        },
+                        timeout=30,
+                    )
+                    break
+                except httpx.RequestError as exc:
+                    last_exc = exc
+                    await asyncio.sleep(2)
+            else:
+                raise ERPUpstreamError(f"CheckLogin request failed: {last_exc}") from last_exc
 
             if response.status_code >= 400:
                 raise ERPUpstreamError(f"CheckLogin HTTP {response.status_code}")

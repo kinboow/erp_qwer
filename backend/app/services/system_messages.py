@@ -15,6 +15,14 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 
 
+def _fmt_row(row) -> dict:
+    item = dict(row)
+    for k, v in item.items():
+        if isinstance(v, datetime):
+            item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+    return item
+
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS system_messages (
     id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -125,7 +133,7 @@ def list_system_messages(
         "total": count,
         "page": page,
         "page_size": page_size,
-        "items": [dict(r) for r in rows],
+        "items": [_fmt_row(r) for r in rows],
     }
 
 

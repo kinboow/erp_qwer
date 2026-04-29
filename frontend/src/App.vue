@@ -102,11 +102,20 @@ html, body, #app {
   box-shadow: var(--lark-shadow-hover);
 }
 
-/* 表格溢出提示框：限制宽度，自动换行 */
+/* 表格溢出提示框：限制宽度，自动换行，超长可滚动（隐藏滚动条） */
 .el-popper.is-dark {
-  max-width: 360px !important;
-  white-space: normal !important;
+  max-width: 480px !important;
+  white-space: pre-wrap !important;
   word-break: break-word !important;
   line-height: 1.6 !important;
+}
+.el-popper.is-dark .el-tooltip__content {
+  max-height: 60vh !important;
+  overflow-y: auto !important;
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.el-popper.is-dark .el-tooltip__content::-webkit-scrollbar {
+  display: none !important;
 }
 </style>

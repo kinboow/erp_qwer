@@ -35,7 +35,7 @@
           </div>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? '同步订单中...' : '同步销售订单' }}</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? `同步订单中${trigger === 'scheduled' ? '（定时）' : ''}...` : '同步销售订单' }}</el-button>
         </div>
       </div>
 
@@ -164,13 +164,13 @@ async function fetchOrders() {
   }
 }
 
-const { syncing } = useSyncStatus('orders', () => fetchOrders())
+const { syncing, trigger } = useSyncStatus('orders', () => fetchOrders())
 
 async function handleSync() {
   if (syncing.value) return
   syncing.value = true
   try {
-    const res = await syncOrders(90)
+    const res = await syncOrders(360)
     if (res.data?.already_syncing) {
       ElMessage.info('订单同步进行中，完成后将自动刷新')
     } else {

@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -10,6 +12,15 @@ from app.dependencies import get_current_user
 from app.services.message_logs import list_message_logs
 
 router = APIRouter(tags=["日志管理"])
+
+
+def _fmt_row(row) -> dict:
+    """将查询行中的 datetime 字段统一格式化为 YYYY-MM-DD HH:MM:SS"""
+    item = dict(row)
+    for k, v in item.items():
+        if isinstance(v, datetime):
+            item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+    return item
 
 
 def json_response(code=200, message="success", data=None):
@@ -53,12 +64,7 @@ async def get_system_logs(
 
     query = text(f"SELECT id, timestamp, level, service, message FROM system_logs {where_sql} ORDER BY timestamp DESC LIMIT :limit OFFSET :offset")
     rows = db.execute(query, {**params, "limit": pageSize, "offset": (page - 1) * pageSize}).mappings().all()
-    result = []
-    for row in rows:
-        item = dict(row)
-        if item.get("timestamp"):
-            item["timestamp"] = str(item["timestamp"])
-        result.append(item)
+    result = [_fmt_row(row) for row in rows]
     return json_response(data={"list": result, "total": total})
 
 
@@ -125,7 +131,7 @@ async def get_operation_logs(
 
     result = []
     for row in rows:
-        item = dict(row)
+        item = _fmt_row(row)
         path_val = item.get("path") or ""
         # 尝试匹配完整路径，然后截断数字尾部
         desc = PATH_DESC.get(path_val)

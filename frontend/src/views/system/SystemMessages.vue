@@ -7,6 +7,7 @@
         <div class="toolbar-left">
           <el-select v-model="filter.level" placeholder="消息级别" clearable style="width: 120px;" @change="fetchMessages">
             <el-option label="全部" value="" />
+            <el-option label="成功" value="success" />
             <el-option label="错误" value="error" />
             <el-option label="警告" value="warning" />
             <el-option label="信息" value="info" />
@@ -40,7 +41,8 @@
       </div>
 
       <!-- 消息表格 -->
-      <el-table :data="messages" v-loading="loading" stripe class="lark-table">
+      <el-table :data="messages" v-loading="loading" stripe class="lark-table"
+        :tooltip-options="{ placement: 'top', popperOptions: { modifiers: [{ name: 'flip', options: { fallbackPlacements: ['bottom', 'left', 'right'] } }] } }">
         <el-table-column label="级别" prop="level" width="80" align="center">
           <template #default="{ row }">
             <el-tag :type="levelTagType(row.level)" size="small" effect="light">
@@ -142,6 +144,7 @@ async function handleMarkRead(row) {
     await request({ url: `/api/system-messages/${row.id}/read`, method: 'put' })
     row.is_read = 1
     unreadCount.value = Math.max(0, unreadCount.value - 1)
+    window.dispatchEvent(new CustomEvent('msg-unread-changed', { detail: { count: unreadCount.value } }))
   } catch {
     ElMessage.error('标记失败')
   }
@@ -152,6 +155,7 @@ async function handleMarkAllRead() {
     await request({ url: '/api/system-messages/read-all', method: 'put' })
     messages.value.forEach(m => { m.is_read = 1 })
     unreadCount.value = 0
+    window.dispatchEvent(new CustomEvent('msg-unread-changed', { detail: { count: 0 } }))
     ElMessage.success('已全部标记为已读')
   } catch {
     ElMessage.error('操作失败')
@@ -159,12 +163,12 @@ async function handleMarkAllRead() {
 }
 
 function levelTagType(level) {
-  const map = { error: 'danger', warning: 'warning', info: 'info' }
+  const map = { error: 'danger', warning: 'warning', info: 'info', success: 'success' }
   return map[level] || ''
 }
 
 function levelLabel(level) {
-  const map = { error: '错误', warning: '警告', info: '信息' }
+  const map = { error: '错误', warning: '警告', info: '信息', success: '成功' }
   return map[level] || level
 }
 

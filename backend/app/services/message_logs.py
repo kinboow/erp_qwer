@@ -1,10 +1,19 @@
 import json
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+
+
+def _fmt_row(row) -> dict:
+    item = dict(row)
+    for k, v in item.items():
+        if isinstance(v, datetime):
+            item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+    return item
 
 
 MESSAGE_LOG_PREVIEW_LIMIT = 500
@@ -224,7 +233,7 @@ def list_message_logs(
     total = db.execute(text(f"SELECT COUNT(*) AS total FROM message_logs WHERE {where_sql}"), count_params).mappings().first()["total"]
     result = []
     for row in rows:
-        item = dict(row)
+        item = _fmt_row(row)
         item["payload"] = _json_loads(item.get("payload_json"), {})
         item.pop("payload_json", None)
         result.append(item)

@@ -56,14 +56,18 @@ class DatabaseLogHandler(logging.Handler):
         # 防止递归：数据库操作自身也会产生日志
         if getattr(record, '_db_log_skip', False):
             return
-        if record.name.startswith('sqlalchemy') or record.name.startswith('urllib3') or record.name.startswith('httpcore'):
+        _skip_prefixes = ('sqlalchemy', 'urllib3', 'httpcore', 'httpx', 'uvicorn.access', 'watchfiles', 'asyncio')
+        if any(record.name.startswith(p) for p in _skip_prefixes):
+            return
+        # ERP 同步成功日志只记入系统消息，不写入系统日志；仅保留 WARNING 及以上
+        if record.name.startswith('app.services.erp_sync') and record.levelno < logging.WARNING:
             return
 
         try:
             msg = self.format(record)
             level = record.levelname.lower()
             service = record.name or ''
-            now = datetime.utcnow()
+            now = datetime.now()
 
             db = self._session_factory()
             try:

@@ -59,7 +59,7 @@ class Settings(BaseSettings):
 
     # ERP 同步配置
     ERP_SYNC_INTERVAL_MINUTES: int = 15
-    ERP_SYNC_DAYS_BACK: int = 90
+    ERP_SYNC_DAYS_BACK: int = 360
 
     @property
     def DATABASE_URL(self) -> str:

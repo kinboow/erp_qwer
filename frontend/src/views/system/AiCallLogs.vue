@@ -23,7 +23,8 @@
       </div>
     </div>
 
-    <el-table :data="logs" v-loading="loading" stripe class="lark-table" empty-text="暂无调用日志">
+    <el-table :data="logs" v-loading="loading" stripe class="lark-table" empty-text="暂无调用日志"
+      :tooltip-options="{ placement: 'top', popperOptions: { modifiers: [{ name: 'flip', options: { fallbackPlacements: ['bottom', 'left', 'right'] } }] } }">
       <el-table-column label="时间" prop="called_at" width="170" />
       <el-table-column label="模型" prop="model" width="160" show-overflow-tooltip />
       <el-table-column label="来源" width="130">

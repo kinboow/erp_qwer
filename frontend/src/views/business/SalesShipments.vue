@@ -35,7 +35,7 @@
           </div>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? '同步发货单中...' : '同步发货单' }}</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? `同步发货单中${trigger === 'scheduled' ? '（定时）' : ''}...` : '同步发货单' }}</el-button>
         </div>
       </div>
 
@@ -200,13 +200,13 @@ function fallbackCopy(text) {
   document.body.removeChild(ta)
 }
 
-const { syncing } = useSyncStatus('shipments', () => fetchShipments())
+const { syncing, trigger } = useSyncStatus('shipments', () => fetchShipments())
 
 async function handleSync() {
   if (syncing.value) return
   syncing.value = true
   try {
-    const res = await syncShipments(90)
+    const res = await syncShipments(360)
     if (res.data?.already_syncing) {
       ElMessage.info('发货单同步进行中，完成后将自动刷新')
     } else {

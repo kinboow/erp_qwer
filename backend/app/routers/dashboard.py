@@ -121,66 +121,72 @@ def dashboard_stats(
 
     # 服务状态
     wechat_online = False
+    wechat_error = ""
     try:
         from app.services.wechat_health import get_wechat_health_status
         wechat_status = get_wechat_health_status()
         wechat_online = wechat_status.get("online", False)
+        if not wechat_online:
+            wechat_error = wechat_status.get("last_error") or ""
     except Exception:
         pass
 
     erp_online = False
+    erp_error = ""
     try:
         from app.services.erp_health import get_erp_health_status
         erp_status = get_erp_health_status()
         erp_online = erp_status.get("online", False)
+        if not erp_online:
+            erp_error = erp_status.get("last_error") or ""
     except Exception:
         pass
 
-    # 最近动态：最新10条订单和发货单混合
+    # 最近动态：ERP 同步状态 + 审核管理动态
     recent_activities = []
 
-    recent_orders = _safe_rows(db, """
-        SELECT order_no, order_date, state, customer_name, total_amount
-        FROM erp_sales_orders
-        ORDER BY order_date DESC, order_no DESC
-        LIMIT 5
-    """)
-    for r in recent_orders:
-        state_text = "已审核" if r.get("state") == 1 else "待审核"
-        amt = float(r.get("total_amount") or 0)
-        recent_activities.append({
-            "content": f"销售订单 {r['order_no']}（{r.get('customer_name', '')}）{state_text}，金额 ¥{amt:,.2f}",
-            "time": r.get("order_date", ""),
-            "type": "important" if r.get("state") != 1 else "normal",
-        })
-
-    recent_ships = _safe_rows(db, """
-        SELECT order_no, order_date, state, customer_name, total_amount
-        FROM erp_sales_shipments
-        ORDER BY order_date DESC, order_no DESC
-        LIMIT 5
-    """)
-    for r in recent_ships:
-        state_text = "已审核" if r.get("state") == 1 else "待审核"
-        recent_activities.append({
-            "content": f"发货单 {r['order_no']}（{r.get('customer_name', '')}）{state_text}",
-            "time": r.get("order_date", ""),
-            "type": "important" if r.get("state") != 1 else "normal",
-        })
-
-    # 系统动态（同步失败等）
+    # 1. ERP 同步动态（来自系统动态表，source=erp_sync）
     try:
-        from app.services.system_activities import get_recent_activities
-        sys_acts = get_recent_activities(db, limit=5)
+        from app.services.system_activities import get_recent_activities as _get_acts
+        sys_acts = _get_acts(db, limit=10)
         for a in sys_acts:
-            created = a.get("created_at")
-            time_str = created.strftime("%Y-%m-%d %H:%M:%S") if hasattr(created, "strftime") else str(created or "")
+            if a.get("source") != "erp_sync":
+                continue
+            time_str = a.get("created_at") or ""
             raw_type = a.get("type", "")
             mapped = "urgent" if raw_type in ("error", "urgent") else "important" if raw_type in ("warning", "important") else "normal"
             recent_activities.append({
-                "content": a.get("content") or a.get("title", ""),
+                "content": a.get("title") or a.get("content", ""),
                 "time": time_str,
                 "type": mapped,
+            })
+    except Exception:
+        pass
+
+    # 2. 审核管理动态（最近的下游订单审核状态变化）
+    try:
+        review_rows = _safe_rows(db, """
+            SELECT id, customer_name, sender_name, review_status, updated_at
+            FROM downstream_order_reviews
+            ORDER BY updated_at DESC
+            LIMIT 5
+        """)
+        _REVIEW_STATUS_MAP = {
+            "pending": "待审核",
+            "approved": "已通过",
+            "rejected": "已拒绝",
+        }
+        for r in review_rows:
+            status_text = _REVIEW_STATUS_MAP.get(r.get("review_status", ""), r.get("review_status", ""))
+            customer = r.get("customer_name") or r.get("sender_name") or ""
+            updated = r.get("updated_at") or ""
+            if hasattr(updated, "strftime"):
+                updated = updated.strftime("%Y-%m-%d %H:%M:%S")
+            tp = "urgent" if r.get("review_status") == "pending" else "normal"
+            recent_activities.append({
+                "content": f"订单审核 #{r['id']}（{customer}）{status_text}",
+                "time": str(updated),
+                "type": tp,
             })
     except Exception:
         pass
@@ -208,6 +214,8 @@ def dashboard_stats(
             "daily_shipments": trend_shipments,
             "recent_activities": recent_activities,
             "wechat_online": wechat_online,
+            "wechat_error": wechat_error,
             "erp_online": erp_online,
+            "erp_error": erp_error,
         }
     }

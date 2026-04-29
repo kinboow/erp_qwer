@@ -47,22 +47,26 @@
       <!-- 第四列：两个小状态卡片 -->
       <el-col :span="6">
         <div class="status-card-group">
-          <div class="mini-status-card" :class="stats.wechat_online ? 'online' : 'offline'">
-            <div class="mini-status-dot" :class="stats.wechat_online ? 'green' : 'red'"></div>
-            <div class="mini-status-info">
-              <div class="mini-status-label">企业微信</div>
-              <div class="mini-status-text">{{ stats.wechat_online ? '已连接' : '未连接' }}</div>
+          <el-tooltip :content="stats.wechat_error || '企业微信服务正常'" placement="left" :disabled="stats.wechat_online">
+            <div class="mini-status-card" :class="stats.wechat_online ? 'online' : 'offline'" @click="refreshWechatHealth">
+              <div class="mini-status-dot" :class="stats.wechat_online ? 'green' : 'red'"></div>
+              <div class="mini-status-info">
+                <div class="mini-status-label">企业微信</div>
+                <div class="mini-status-text">{{ stats.wechat_online ? '已连接' : '未连接' }}</div>
+              </div>
+              <img class="mini-status-icon" :src="iconWechatStatus" alt="企业微信状态" />
             </div>
-            <img class="mini-status-icon" :src="iconWechatStatus" alt="企业微信状态" />
-          </div>
-          <div class="mini-status-card" :class="stats.erp_online ? 'online' : 'offline'">
-            <div class="mini-status-dot" :class="stats.erp_online ? 'green' : 'red'"></div>
-            <div class="mini-status-info">
-              <div class="mini-status-label">ERP 服务</div>
-              <div class="mini-status-text">{{ stats.erp_online ? '运行中' : '未启动' }}</div>
+          </el-tooltip>
+          <el-tooltip :content="stats.erp_error || 'ERP 服务正常'" placement="left" :disabled="stats.erp_online">
+            <div class="mini-status-card" :class="stats.erp_online ? 'online' : 'offline'">
+              <div class="mini-status-dot" :class="stats.erp_online ? 'green' : 'red'"></div>
+              <div class="mini-status-info">
+                <div class="mini-status-label">ERP 服务</div>
+                <div class="mini-status-text">{{ stats.erp_online ? '运行中' : '未启动' }}</div>
+              </div>
+              <img class="mini-status-icon" :src="iconErpStatus" alt="ERP 服务状态" />
             </div>
-            <img class="mini-status-icon" :src="iconErpStatus" alt="ERP 服务状态" />
-          </div>
+          </el-tooltip>
         </div>
       </el-col>
     </el-row>

@@ -21,30 +21,6 @@
           </el-form-item>
         </div>
       </el-form>
-    </div>
-
-    <!-- 同步策略 -->
-    <div class="config-card">
-      <div class="card-title">
-        <el-icon><Timer /></el-icon>
-        <span>同步策略</span>
-      </div>
-
-      <div class="sync-strategy-grid">
-        <div class="strategy-item">
-          <div class="strategy-label">同步间隔（分钟）</div>
-          <el-input-number v-model="form.sync_interval_minutes" :min="1" :max="1440" controls-position="right" />
-        </div>
-        <div class="strategy-item">
-          <div class="strategy-label">同步天数范围</div>
-          <el-input-number v-model="form.sync_days_back" :min="1" :max="365" controls-position="right" />
-        </div>
-        <div class="strategy-item">
-          <div class="strategy-label">启用自动同步</div>
-          <el-switch v-model="form.sync_enabled" active-text="开启" inactive-text="关闭" />
-        </div>
-      </div>
-
       <div class="form-actions">
         <el-button type="primary" @click="handleTestConnection" :loading="testing" :disabled="!form.erp_base_url">
           <el-icon><Connection /></el-icon>
@@ -87,14 +63,6 @@
             {{ status.sync_enabled ? '已启用' : '已禁用' }}
           </div>
         </div>
-        <div class="status-card">
-          <div class="sc-label">同步间隔</div>
-          <div class="sc-value num">{{ status.interval_minutes || '-' }} <small>分钟</small></div>
-        </div>
-        <div class="status-card">
-          <div class="sc-label">同步范围</div>
-          <div class="sc-value num">{{ status.days_back || '-' }} <small>天</small></div>
-        </div>
       </div>
 
       <div v-if="status.last_result && Object.keys(status.last_result).length" class="last-sync-result">
@@ -129,7 +97,7 @@
 <script setup>
 import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Connection, Check, Refresh, Timer, DataAnalysis, Upload, Plus, Loading, WarningFilled } from '@element-plus/icons-vue'
+import { Connection, Check, Refresh, DataAnalysis, Upload, Plus, Loading, WarningFilled } from '@element-plus/icons-vue'
 import { getErpSyncConfig, saveErpSyncConfig, testErpConnection, getErpSyncStatus, uploadErpQr, fetchQrImageUrl } from '@/api/erpSync'
 
 const formRef = ref(null)
@@ -144,9 +112,6 @@ const form = reactive({
   erp_username: '',
   erp_password: '',
   erp_qr_image_path: '',
-  sync_interval_minutes: 15,
-  sync_days_back: 90,
-  sync_enabled: true,
 })
 
 const status = reactive({
@@ -154,7 +119,7 @@ const status = reactive({
   scheduler_running: false,
   sync_enabled: true,
   interval_minutes: 15,
-  days_back: 90,
+  days_back: 360,
   last_result: {},
 })
 
@@ -166,9 +131,6 @@ async function loadConfig() {
     form.erp_username = cfg.erp_username || ''
     form.erp_password = cfg.erp_password || ''
     form.erp_qr_image_path = cfg.erp_qr_image_path || ''
-    form.sync_interval_minutes = cfg.sync_interval_minutes || 15
-    form.sync_days_back = cfg.sync_days_back || 90
-    form.sync_enabled = cfg.sync_enabled !== false
   } catch { /* first load, no config yet */ }
 }
 
@@ -180,7 +142,7 @@ async function loadStatus() {
     status.scheduler_running = s.scheduler_running || false
     status.sync_enabled = s.sync_enabled !== false
     status.interval_minutes = s.interval_minutes || 15
-    status.days_back = s.days_back || 90
+    status.days_back = s.days_back || 360
     status.last_result = s.last_result || {}
   } catch { /* ignore */ }
 }
@@ -225,9 +187,6 @@ async function handleSave() {
       erp_username: form.erp_username,
       erp_password: form.erp_password,
       erp_qr_image_path: form.erp_qr_image_path,
-      sync_interval_minutes: form.sync_interval_minutes,
-      sync_days_back: form.sync_days_back,
-      sync_enabled: form.sync_enabled,
     })
     ElMessage.success('配置已保存')
     await loadStatus()
@@ -350,29 +309,6 @@ watch(
   font-weight: 500;
   font-size: 13px;
   color: var(--lark-text-primary);
-}
-
-/* 同步策略网格 */
-.sync-strategy-grid {
-  display: flex;
-  gap: 16px;
-  flex-wrap: wrap;
-  margin-bottom: 20px;
-}
-
-.strategy-item {
-  background: var(--lark-bg-base, #fff);
-  border-radius: 10px;
-  padding: 16px 20px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.04);
-  min-width: 160px;
-}
-
-.strategy-label {
-  font-size: 12px;
-  color: var(--lark-text-secondary, #8f959e);
-  margin-bottom: 10px;
-  font-weight: 500;
 }
 
 .form-actions {

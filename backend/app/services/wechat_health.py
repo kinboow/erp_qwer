@@ -61,17 +61,23 @@ async def _check_instance_status(base_url: str, api_key: str, selected_wxid: str
             raw_data = result.get("data", {})
             instances = raw_data.get("instances", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
 
+            # 尝试按 wxid 精确匹配；如果找不到，尝试按 nickname 或其他标识匹配
             inst = next((i for i in instances if i.get("wxid") == selected_wxid), None)
             if not inst:
-                return False, f"实例 {selected_wxid} 不在运行列表中"
+                # 列出所有实例的 wxid 帮助排查
+                wxids = [i.get("wxid", "?") for i in instances]
+                return False, f"实例 {selected_wxid} 不在运行列表中（现有: {wxids}）"
 
             nickname = inst.get('nickname') or selected_wxid
-            # 检查运行状态（status 或 attached）
-            if not (inst.get("status") or inst.get("attached")):
-                return False, f"实例 {nickname} 未运行"
-            # 检查登录状态
-            if not inst.get("login_status"):
-                return False, f"实例 {nickname} 未登录"
+            is_running = inst.get("status") or inst.get("attached")
+            is_logged_in = inst.get("login_status")
+            logger.debug("[WeChat Health] 实例 %s: status=%s, attached=%s, login_status=%s",
+                         nickname, inst.get("status"), inst.get("attached"), inst.get("login_status"))
+
+            if not is_running:
+                return False, f"实例 {nickname} 未运行（status={inst.get('status')}, attached={inst.get('attached')}）"
+            if not is_logged_in:
+                return False, f"实例 {nickname} 未登录（login_status={inst.get('login_status')}）"
 
             return True, ""
     except Exception as exc:

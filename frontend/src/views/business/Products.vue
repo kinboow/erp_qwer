@@ -20,7 +20,7 @@
           />
         </div>
         <div class="toolbar-right">
-          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? '同步产品中...' : '同步产品列表' }}</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? `同步产品中${trigger === 'scheduled' ? '（定时）' : ''}...` : '同步产品列表' }}</el-button>
         </div>
       </div>
 
@@ -185,7 +185,7 @@ function debouncedSearch() {
   _searchTimer = setTimeout(() => handleSearch(), 350)
 }
 
-const { syncing } = useSyncStatus('products', () => fetchProducts())
+const { syncing, trigger } = useSyncStatus('products', () => fetchProducts())
 
 async function handleSync() {
   if (syncing.value) return

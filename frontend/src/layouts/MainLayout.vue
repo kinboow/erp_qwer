@@ -511,10 +511,10 @@ async function handlePopoverItemClick(msg) {
 }
 
 function popoverLevelType(level) {
-  return { error: 'danger', warning: 'warning', info: 'info' }[level] || ''
+  return { error: 'danger', warning: 'warning', info: 'info', success: 'success' }[level] || ''
 }
 function popoverLevelLabel(level) {
-  return { error: '错误', warning: '警告', info: '信息' }[level] || level
+  return { error: '错误', warning: '警告', info: '信息', success: '成功' }[level] || level
 }
 function formatMsgTime(t) {
   if (!t) return ''
@@ -556,14 +556,23 @@ const handleCommand = (command) => {
   }
 }
 
+function onMsgUnreadChanged(e) {
+  const count = e.detail?.count
+  if (typeof count === 'number') {
+    msgUnreadCount.value = count
+  }
+}
+
 onMounted(() => {
   userStore.fetchUserInfo().catch(() => {})
   window.addEventListener('keydown', handleGlobalShortcut)
+  window.addEventListener('msg-unread-changed', onMsgUnreadChanged)
   startMsgPoll()
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalShortcut)
+  window.removeEventListener('msg-unread-changed', onMsgUnreadChanged)
   clearTimeout(searchTimer)
   clearInterval(msgPollTimer)
 })

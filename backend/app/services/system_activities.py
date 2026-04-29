@@ -5,12 +5,21 @@
 """
 
 import threading
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+
+
+def _fmt_row(row) -> dict:
+    item = dict(row)
+    for k, v in item.items():
+        if isinstance(v, datetime):
+            item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+    return item
 
 
 _DDL = """
@@ -117,7 +126,7 @@ def list_activities(
         "total": count,
         "page": page,
         "page_size": page_size,
-        "items": [dict(r) for r in rows],
+        "items": [_fmt_row(r) for r in rows],
     }
 
 
@@ -128,4 +137,4 @@ def get_recent_activities(db: Session, limit: int = 10) -> list[dict[str, Any]]:
         text("SELECT * FROM system_activities ORDER BY created_at DESC LIMIT :limit"),
         {"limit": limit},
     ).mappings().all()
-    return [dict(r) for r in rows]
+    return [_fmt_row(r) for r in rows]

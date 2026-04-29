@@ -109,6 +109,7 @@ async def startup_event():
         },
         follow_redirects=False,
         trust_env=False,
+        timeout=httpx.Timeout(30, connect=10),
     )
     erp_client = ERPClient(http_client)
     app.state.http_client = http_client
@@ -127,11 +128,16 @@ async def startup_event():
     # 启动企微健康检查轮询（每20秒）
     start_wechat_health_checker(interval_seconds=20)
 
+    # 设置根日志级别为 INFO，确保 INFO/WARNING/ERROR 都能被记录
+    root_logger = logging.getLogger()
+    if root_logger.level > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+
     # 注册系统日志 DB handler
     from app.services.db_log_handler import DatabaseLogHandler
     db_handler = DatabaseLogHandler(SessionLocal, level=logging.INFO)
     db_handler.setFormatter(logging.Formatter("%(message)s"))
-    logging.getLogger().addHandler(db_handler)
+    root_logger.addHandler(db_handler)
     logger.info("[Startup] 系统日志 DB handler 已注册")
 
     # 启动日志清理定时任务（15天）

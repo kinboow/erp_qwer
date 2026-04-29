@@ -46,7 +46,7 @@
           <el-checkbox v-model="filter.show_negative" @change="handleSearch">显示负库存</el-checkbox>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? '同步库存中...' : '同步库存' }}</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? `同步库存中${trigger === 'scheduled' ? '（定时）' : ''}...` : '同步库存' }}</el-button>
         </div>
       </div>
 
@@ -229,7 +229,7 @@ async function fetchInventory() {
   }
 }
 
-const { syncing } = useSyncStatus('inventory', fetchInventory)
+const { syncing, trigger } = useSyncStatus('inventory', fetchInventory)
 
 function viewDetail(row) {
   detailRow.value = row
