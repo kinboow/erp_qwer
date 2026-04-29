@@ -477,6 +477,210 @@ class AIOrderParser:
             caller="parse_batch",
         )
 
+    # ------------------------------------------------------------------
+    # 智能体 A：款号提取 — 从内容中提取所有纯数字款号
+    # ------------------------------------------------------------------
+    async def extract_product_nos(
+        self,
+        context_messages: list[dict[str, Any]],
+        db: Optional[Session] = None,
+    ) -> list[str]:
+        """智能体A: 从消息内容中提取所有纯数字款号。
+
+        返回: ["1234", "5678", ...]
+        """
+        cfg = self._load_config(db)
+        has_image = any(m.get("type") == "image" for m in context_messages)
+        model = cfg["vision_model"] if has_image else cfg["model"]
+
+        user_parts = self._build_multimodal_parts(context_messages)
+        if not user_parts:
+            return []
+
+        user_content: Any = user_parts if len(user_parts) > 1 else user_parts[0].get("text", "")
+
+        try:
+            result = await self._chat(
+                model,
+                [
+                    {"role": "system", "content": PRODUCT_NO_EXTRACT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ],
+                db=db,
+                caller="extract_product_nos",
+            )
+            nos = result.get("product_nos") or []
+            # 过滤：只保留纯数字
+            return [str(n).strip() for n in nos if str(n).strip().isdigit()]
+        except Exception as exc:
+            logger.warning("智能体A(款号提取)失败: %s", exc)
+            return []
+
+    async def extract_product_nos_from_text(
+        self, text_content: str, db: Optional[Session] = None,
+    ) -> list[str]:
+        """从纯文本中提取款号的便捷方法"""
+        return await self.extract_product_nos(
+            [{"type": "text", "content": text_content}], db=db,
+        )
+
+    async def extract_product_nos_from_image(
+        self, image_base64: str, mime_type: str = "image/png",
+        extra_text: str = "", db: Optional[Session] = None,
+    ) -> list[str]:
+        """从图片中提取款号的便捷方法"""
+        msgs: list[dict[str, Any]] = [{"type": "image", "base64": image_base64, "mime": mime_type}]
+        if extra_text:
+            msgs.insert(0, {"type": "text", "content": extra_text})
+        return await self.extract_product_nos(msgs, db=db)
+
+    async def extract_product_nos_from_excel(
+        self, file_name: str, text_summary: str, db: Optional[Session] = None,
+    ) -> list[str]:
+        """从 Excel 摘要中提取款号的便捷方法"""
+        return await self.extract_product_nos(
+            [{"type": "text", "content": f"文件名: {file_name}\n表格摘要:\n{text_summary}"}],
+            db=db,
+        )
+
+    # ------------------------------------------------------------------
+    # 智能体 B：带库存上下文的详细解析
+    # ------------------------------------------------------------------
+    async def parse_with_product_context(
+        self,
+        context_messages: list[dict[str, Any]],
+        product_context: str,
+        customer_hint: str = "",
+        db: Optional[Session] = None,
+    ) -> dict[str, Any]:
+        """智能体B: 带库存可选颜色/尺码上下文解析完整订单。
+
+        Args:
+            context_messages: 统一消息列表
+            product_context: 款号→可选颜色/尺码的文本描述
+            customer_hint: 客户名称提示
+        """
+        cfg = self._load_config(db)
+        has_image = any(m.get("type") == "image" for m in context_messages)
+        model = cfg["vision_model"] if has_image else cfg["model"]
+
+        user_parts: list[dict[str, Any]] = []
+        user_parts.append({
+            "type": "text",
+            "text": (
+                f"客户提示: {customer_hint or '无'}\n\n"
+                f"=== 产品表中各款号可选颜色和尺码 ===\n{product_context}\n\n"
+                f"请严格根据以上可选颜色和尺码信息，解析以下客户消息中的完整订单："
+            ),
+        })
+
+        for idx, msg in enumerate(context_messages, 1):
+            msg_type = msg.get("type", "text")
+            sender = msg.get("sender_name") or ""
+            sender_tag = f"({sender})" if sender else ""
+            if msg_type == "text":
+                user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} {msg.get('content', '')}"})
+            elif msg_type == "image":
+                if msg.get("oss_url"):
+                    user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 图片:"})
+                    user_parts.append({"type": "image_url", "image_url": {"url": msg["oss_url"]}})
+                elif msg.get("base64"):
+                    mime = msg.get("mime") or "image/png"
+                    user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 图片:"})
+                    user_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
+            elif msg_type == "file":
+                summary = msg.get("excel_summary") or msg.get("content") or ""
+                fname = msg.get("file_name") or "附件"
+                user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 文件 {fname}:\n{summary}"})
+
+        return await self._chat(
+            model,
+            [
+                {"role": "system", "content": CONTEXT_PARSER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_parts},
+            ],
+            db=db,
+            caller="parse_with_context",
+        )
+
+
+# ==========================================================================
+# 智能体 A — 款号提取 Agent（从内容中提取所有纯数字款号）
+# ==========================================================================
+PRODUCT_NO_EXTRACT_SYSTEM_PROMPT = """你是一个服装行业款号提取助手。
+你的唯一任务是从客户发来的内容（文字、图片、表格）中提取所有出现的款号（货号）。
+
+重要规则：
+1. 款号只包含数字，不包含英文字母。例如：1234、56789、001122
+2. 不要把价格、数量、尺码、日期等数字误认为款号
+3. 如果内容中出现类似"款号"、"货号"、"款"等关键词后面的数字，优先作为款号
+4. 同一个款号只输出一次，去重
+5. 如果完全找不到款号，返回空数组
+
+严格只返回 JSON，不要返回 markdown：
+{
+  "product_nos": ["1234", "5678"],
+  "reason": "简短说明提取依据"
+}
+"""
+
+# ==========================================================================
+# 智能体 B — 带库存上下文的详细解析 Agent
+# ==========================================================================
+CONTEXT_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。现在已经知道客户下单涉及的款号，以及每个款号在产品表中的可选颜色和可选尺码。
+请根据这些已知信息，精确解析客户的完整订单。
+
+【核心原则 — 永远从可选项里选，不要编造，不要说找不到】
+你输出的每一个颜色和尺码，都【必须】是提供的可选项之一，一字不差地复制可选项的文字。
+
+【颜色匹配规则】
+- 客户写的颜色不需要和可选项一模一样，只要意思相近、表达的是同一种颜色就匹配上。
+- 近似匹配示例：
+  "绿"或"绿色" → 可选项里含"绿"字的，如"军绿"、"果绿"、"墨绿"，选最合理的
+  "白" → "米白"、"乳白"、"本白"等，选最合理的
+  "黑" → "黑色"
+  "灰" → "浅灰"、"深灰"、"烟灰"等，选最合理的
+  "粉" → "粉色"、"粉红"等
+  "蓝" → "天蓝"、"深蓝"、"宝蓝"等
+- 图片中的手写体模糊看不清时，根据笔画形状和可选颜色列表推测最像的那个。
+- 【禁止】输出不在可选项列表中的颜色名称，【禁止】说"找不到匹配"。永远选一个最接近的。
+
+【尺码匹配规则】
+- 同样做近似匹配："大"→"XL"，"中"→"M"，"小"→"S"，"加大"→"2XL"等。
+- 手写看不清时，根据可选尺码推测最接近的。
+- 【禁止】输出不在可选项列表中的尺码，永远选一个最接近的。
+
+【其他规则】
+- 如果某个款号不在提供的产品信息中，仍然正常解析。
+- 数量必须准确，不要编造。
+- 款号只包含数字，不包含英文字母。
+- uncertainties 只在极端情况下使用（例如完全无法辨认内容），正常的近似匹配不需要加 uncertainty。
+
+严格只返回 JSON，不要返回 markdown。
+返回结构：
+{
+  "customer_name": "",
+  "contact_person": "",
+  "order_date": "YYYY-MM-DD",
+  "remark": "",
+  "items": [
+    {
+      "product_no": "",
+      "product_name": "",
+      "color": "",
+      "brand": "",
+      "unit": "件",
+      "price": 0,
+      "discount": 1,
+      "sizes": [
+        {"size": "S", "qty": 1}
+      ],
+      "remark": ""
+    }
+  ],
+  "uncertainties": []
+}
+"""
 
 
 ai_order_parser = AIOrderParser()

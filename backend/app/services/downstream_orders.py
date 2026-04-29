@@ -529,6 +529,75 @@ def _extract_excel_summary(attachment_base64: str) -> str:
     return "\n".join(lines[:240])
 
 
+def _resolve_product_no_for_context(db: Session, name: str) -> str:
+    """通过产品表精确匹配或映射表解析别名 → 真实货号。"""
+    name = name.strip()
+    if not name:
+        return name
+    # 1. 精确匹配 erp_products
+    direct = db.execute(
+        text("SELECT product_no FROM erp_products WHERE product_no = :name LIMIT 1"),
+        {"name": name},
+    ).mappings().first()
+    if direct:
+        return direct["product_no"]
+    # 2. 查映射表别名
+    try:
+        alias = db.execute(
+            text("SELECT product_no FROM product_name_mappings WHERE alias_name = :name LIMIT 1"),
+            {"name": name},
+        ).mappings().first()
+        if alias:
+            return alias["product_no"]
+    except Exception:
+        pass
+    return name
+
+
+def query_product_context_for_nos(db: Session, product_nos: list[str]) -> str:
+    """根据款号列表查询产品表中每个款号的可选颜色和尺码，返回格式化文本。
+
+    流程：
+    1. 先通过产品表精确匹配或映射表解析别名 → 真实货号
+    2. 用真实货号查询 erp_products 获取可选颜色（color 字段）和尺码规格（spec 字段）
+    """
+    if not product_nos:
+        return "未提取到款号，无法查询产品信息。"
+
+    from app.services.erp_sync import ensure_tables
+    ensure_tables(db)
+
+    lines: list[str] = []
+    for pno in product_nos:
+        # 步骤1：解析真实货号（精确匹配 + 别名映射）
+        resolved_pno = _resolve_product_no_for_context(db, pno)
+        pno_label = f"{pno}（→{resolved_pno}）" if resolved_pno != pno else pno
+
+        # 步骤2：从产品表查询颜色和尺码规格
+        product_row = db.execute(
+            text("SELECT color, spec FROM erp_products WHERE product_no = :pno LIMIT 1"),
+            {"pno": resolved_pno},
+        ).mappings().first()
+
+        if not product_row:
+            lines.append(f"款号 {pno_label}：产品表中未找到该货号")
+            continue
+
+        color_text = (product_row["color"] or "").strip()
+        spec_text = (product_row["spec"] or "").strip()
+
+        if color_text or spec_text:
+            lines.append(f"款号 {pno_label} 可选信息：")
+            if color_text:
+                lines.append(f"  可选颜色：{color_text}")
+            if spec_text:
+                lines.append(f"  可选尺码：{spec_text}")
+        else:
+            lines.append(f"款号 {pno_label}：产品表中无颜色和尺码信息")
+
+    return "\n".join(lines)
+
+
 def _normalize_discount(value: Any) -> int:
     try:
         number = float(value)
@@ -725,14 +794,57 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
     try:
         if message_type in {"image", "file"} and not row.get("attachment_base64"):
             raise AttachmentContentRequiredError("当前消息仅收到附件元数据，请先下载企业微信附件内容后再解析")
-        if ("excel" in attachment_mime or attachment_name.endswith(".xlsx") or attachment_name.endswith(".xls")) and row.get("attachment_base64"):
-            summary = _extract_excel_summary(row.get("attachment_base64") or "")
-            parsed = await ai_order_parser.parse_excel_summary(row.get("attachment_name") or "", summary, customer_hint)
-        elif (message_type in {"image", "img", "picture"} or attachment_mime.startswith("image/")) and row.get("attachment_base64"):
-            parsed = await ai_order_parser.parse_image_base64(row.get("attachment_base64") or "", row.get("attachment_mime") or "image/png", row.get("content_text") or "")
+
+        # 构建统一消息列表供 AI 使用
+        is_excel = ("excel" in attachment_mime or attachment_name.endswith(".xlsx") or attachment_name.endswith(".xls")) and row.get("attachment_base64")
+        is_image = (message_type in {"image", "img", "picture"} or attachment_mime.startswith("image/")) and row.get("attachment_base64")
+
+        context_messages: list[dict[str, Any]] = []
+        excel_summary = ""
+        if is_excel:
+            excel_summary = _extract_excel_summary(row.get("attachment_base64") or "")
+            context_messages.append({
+                "type": "file",
+                "file_name": row.get("attachment_name") or "",
+                "excel_summary": excel_summary,
+                "content": excel_summary,
+            })
+        elif is_image:
+            context_messages.append({
+                "type": "image",
+                "base64": row.get("attachment_base64") or "",
+                "mime": row.get("attachment_mime") or "image/png",
+            })
+            if row.get("content_text"):
+                context_messages.insert(0, {"type": "text", "content": row.get("content_text")})
         else:
             text_content = row.get("content_text") or row.get("attachment_name") or row.get("room_name") or ""
-            parsed = await ai_order_parser.parse_text(text_content, customer_hint)
+            context_messages.append({"type": "text", "content": text_content})
+
+        # === 步骤 1：智能体 A — 提取款号 ===
+        logger.info("[AI Parse] review=%d 步骤1: 提取款号...", review_id)
+        product_nos = await ai_order_parser.extract_product_nos(context_messages, db=db)
+        logger.info("[AI Parse] review=%d 提取到款号: %s", review_id, product_nos)
+
+        # === 步骤 2：查询库存可选颜色/尺码 ===
+        product_context = query_product_context_for_nos(db, product_nos) if product_nos else ""
+        logger.info("[AI Parse] review=%d 步骤2: 库存上下文: %s", review_id, product_context[:200])
+
+        # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
+        logger.info("[AI Parse] review=%d 步骤3: 带上下文解析订单...", review_id)
+        if product_context:
+            parsed = await ai_order_parser.parse_with_product_context(
+                context_messages, product_context, customer_hint=customer_hint, db=db,
+            )
+        else:
+            # 没有提取到款号时，回退到原始解析
+            if is_excel:
+                parsed = await ai_order_parser.parse_excel_summary(row.get("attachment_name") or "", excel_summary, customer_hint)
+            elif is_image:
+                parsed = await ai_order_parser.parse_image_base64(row.get("attachment_base64") or "", row.get("attachment_mime") or "image/png", row.get("content_text") or "")
+            else:
+                text_content = row.get("content_text") or row.get("attachment_name") or row.get("room_name") or ""
+                parsed = await ai_order_parser.parse_text(text_content, customer_hint)
 
         normalized = _normalize_order(parsed, customer_hint)
         db.execute(
@@ -740,6 +852,7 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
             {"id": review_id, "parsed_order_json": _json_dumps(normalized)},
         )
         db.commit()
+        logger.info("[AI Parse] review=%d 解析完成, items=%d", review_id, len(normalized.get("items") or []))
         return normalized
     except AttachmentContentRequiredError as exc:
         db.execute(

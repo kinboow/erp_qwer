@@ -28,6 +28,16 @@ def _safe_rows(db: Session, sql: str) -> list:
         return []
 
 
+@router.post("/refresh-wechat-health", summary="手动刷新企微健康状态")
+async def refresh_wechat_health() -> dict[str, Any]:
+    try:
+        from app.services.wechat_health import refresh_wechat_health_status
+        result = await refresh_wechat_health_status()
+        return {"code": 200, "data": result}
+    except Exception as exc:
+        return {"code": 500, "message": f"刷新失败: {exc}"}
+
+
 @router.get("/stats", summary="看板统计数据")
 def dashboard_stats(
     time_range: str = Query("7d", alias="range"),

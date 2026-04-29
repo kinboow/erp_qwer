@@ -16,10 +16,10 @@
           <el-option label="成功" value="success" />
           <el-option label="失败" value="error" />
         </el-select>
-        <el-button :icon="Refresh" circle @click="fetchLogs" :loading="loading" />
       </div>
       <div class="toolbar-right">
         <span class="total-hint">共 {{ total }} 条记录</span>
+        <el-button :icon="Refresh" @click="fetchLogs" :loading="loading">刷新</el-button>
       </div>
     </div>
 

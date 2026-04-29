@@ -215,7 +215,9 @@
     daily_shipments: [],
     recent_activities: [],
     wechat_online: false,
+    wechat_error: '',
     erp_online: false,
+    erp_error: '',
   })
 
 const activities = computed(() => stats.value.recent_activities || [])
@@ -412,6 +414,15 @@ async function fetchStats() {
   } catch (e) { console.error('fetchStats error', e) }
 }
 
+async function refreshWechatHealth() {
+  try {
+    const res = await request.post('/api/dashboard/refresh-wechat-health')
+    const d = res.data || {}
+    stats.value.wechat_online = !!d.online
+    stats.value.wechat_error = d.online ? '' : (d.last_error || '')
+  } catch { /* ignore */ }
+}
+
 onMounted(() => {
   updateTime()
   timer = setInterval(updateTime, 1000)
@@ -508,12 +519,12 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
   flex: 1;
   background: var(--lark-bg-base);
   border-radius: var(--lark-radius-lg);
+  cursor: pointer;
   padding: 16px 20px;
   display: flex;
   align-items: center;
   gap: 12px;
   transition: transform 0.2s, box-shadow 0.2s;
-  cursor: default;
 }
 
 .mini-status-card:hover { transform: translateY(-1px); box-shadow: var(--lark-shadow-hover); }

@@ -685,27 +685,34 @@ async def _process_order(
 
     db = SessionLocal()
     try:
+        from app.services.erp_sync import ensure_tables
+        from app.services.downstream_orders import query_product_context_for_nos
+        ensure_tables(db)
+
         mapping_hint = _build_name_mapping_hints(db)
         full_hint = f"{customer_hint}\n{mapping_hint}" if mapping_hint else customer_hint
 
-        parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=full_hint, db=db)
-        normalized = _normalize_order(parsed, customer_hint)
-        logger.info("%s: 第一次解析完成 room=%s items=%d", source_label, room_id, len(normalized.get("items") or []))
+        # === 步骤 1：智能体 A — 提取款号 ===
+        logger.info("%s: 步骤1 提取款号 room=%s", source_label, room_id)
+        product_nos = await ai_order_parser.extract_product_nos(ai_inputs, db=db)
+        logger.info("%s: 提取到款号: %s room=%s", source_label, product_nos, room_id)
 
-        from app.services.erp_sync import ensure_tables
-        ensure_tables(db)
-        validation = validate_order_against_inventory(db, normalized)
+        # === 步骤 2：查询库存可选颜色/尺码 ===
+        product_context = query_product_context_for_nos(db, product_nos) if product_nos else ""
+        logger.info("%s: 步骤2 库存上下文: %s room=%s", source_label, product_context[:200], room_id)
 
-        final_order = normalized
-        if not validation["all_valid"]:
-            logger.info("%s: 库存校验未通过，启动二次解析 room=%s", source_label, room_id)
-            try:
-                reparsed = await reparse_with_product_hints(
-                    ai_inputs, normalized, validation, customer_hint=customer_hint, db=db,
-                )
-                final_order = _normalize_order(reparsed, customer_hint)
-            except Exception as reparse_exc:
-                logger.warning("%s: 二次解析失败 room=%s: %s", source_label, room_id, reparse_exc)
+        # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
+        logger.info("%s: 步骤3 带上下文解析订单 room=%s", source_label, room_id)
+        if product_context:
+            parsed = await ai_order_parser.parse_with_product_context(
+                ai_inputs, product_context, customer_hint=full_hint, db=db,
+            )
+        else:
+            # 没有提取到款号时，回退到批量解析
+            parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=full_hint, db=db)
+
+        final_order = _normalize_order(parsed, customer_hint)
+        logger.info("%s: 解析完成 room=%s items=%d", source_label, room_id, len(final_order.get("items") or []))
 
         review_id = _write_review(
             db, final_order, customer, room_id, sender_id, instance_id, context_summary,

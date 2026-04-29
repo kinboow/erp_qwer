@@ -92,7 +92,7 @@ async def _check_once() -> None:
     if not host:
         _status.update({
             "online": False,
-            "last_checked_at": datetime.now().isoformat(),
+            "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "last_error": "未配置企微 API 地址",
         })
         return
@@ -118,7 +118,7 @@ async def _check_once() -> None:
     except Exception as exc:
         _status.update({
             "online": False,
-            "last_checked_at": datetime.now().isoformat(),
+            "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "last_error": f"API 服务不可达：{exc}",
         })
         return
@@ -131,7 +131,7 @@ async def _check_once() -> None:
         if not ok:
             _status.update({
                 "online": False,
-                "last_checked_at": datetime.now().isoformat(),
+                "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "last_error": reason,
             })
             return
@@ -139,7 +139,7 @@ async def _check_once() -> None:
     # 没有选中实例时，健康检查通过即算在线
     _status.update({
         "online": True,
-        "last_checked_at": datetime.now().isoformat(),
+        "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "last_error": None,
     })
 
