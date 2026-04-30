@@ -19,3 +19,15 @@ export const addNameMapping = (productNo, aliasName) => {
 export const deleteNameMapping = (mappingId) => {
   return request({ url: `/api/products/name-mappings/${mappingId}`, method: 'delete' })
 }
+
+export const setCurrentYear = (productId, isCurrentYear) => {
+  return request({ url: `/api/products/${productId}/current-year`, method: 'put', data: { is_current_year: isCurrentYear } })
+}
+
+export const batchSetCurrentYear = (ids, isCurrentYear) => {
+  return request({ url: '/api/products/batch-current-year', method: 'post', data: { ids, is_current_year: isCurrentYear } })
+}
+
+export const getCurrentYearProducts = (params) => {
+  return request({ url: '/api/products/current-year', method: 'get', params })
+}

@@ -180,11 +180,13 @@ CREATE TABLE IF NOT EXISTS erp_products (
     material        VARCHAR(200) DEFAULT '',
     image_url       VARCHAR(500) DEFAULT '',
     remark          TEXT NULL,
+    is_current_year TINYINT NOT NULL DEFAULT 0,
     synced_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_product_id (product_id),
-    INDEX idx_product_no (product_no)
+    INDEX idx_product_no (product_no),
+    INDEX idx_is_current_year (is_current_year)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """
 
@@ -264,6 +266,7 @@ def ensure_tables(db: Session) -> None:
         ("erp_sales_orders", "print_count", "INT DEFAULT 0"),
         ("erp_sales_orders", "product_no", "VARCHAR(255) DEFAULT ''"),
         ("erp_sales_order_items", "erp_item_id", "VARCHAR(100) DEFAULT '' AFTER order_no"),
+        ("erp_products", "is_current_year", "TINYINT NOT NULL DEFAULT 0 AFTER remark"),
     ]
     for tbl, col, defn in _alter_cmds:
         try:

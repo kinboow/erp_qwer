@@ -44,7 +44,7 @@ def api_list_products(
     offset = (page - 1) * page_size
     data_sql = f"""
         SELECT p.id, p.product_id, p.product_no, p.product_name, p.brand, p.category,
-               p.color, p.unit, p.price, p.spec, p.material, p.image_url, p.remark, p.synced_at,
+               p.color, p.unit, p.price, p.spec, p.material, p.image_url, p.remark, p.is_current_year, p.synced_at,
                (SELECT COUNT(*) FROM product_name_mappings m WHERE m.product_no = p.product_no) AS mapping_count
         FROM erp_products p
         WHERE {where}
@@ -71,6 +71,120 @@ def api_list_products(
             "material": r["material"] or "",
             "image_url": r["image_url"] or "",
             "remark": r["remark"] or "",
+            "is_current_year": bool(r.get("is_current_year")),
+            "synced_at": str(r["synced_at"] or ""),
+            "mapping_count": r["mapping_count"] or 0,
+        })
+
+    return {
+        "code": 200,
+        "data": {
+            "list": products,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# 设为本年款 / 取消本年款
+# ---------------------------------------------------------------------------
+
+class CurrentYearPayload(BaseModel):
+    is_current_year: bool
+
+
+@router.put("/{product_id}/current-year", summary="设置/取消本年款")
+def api_set_current_year(
+    product_id: int,
+    payload: CurrentYearPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    ensure_tables(db)
+    db.execute(
+        text("UPDATE erp_products SET is_current_year = :val WHERE id = :id"),
+        {"val": 1 if payload.is_current_year else 0, "id": product_id},
+    )
+    db.commit()
+    return {"code": 200, "message": "设置成功"}
+
+
+@router.post("/batch-current-year", summary="批量设置/取消本年款")
+def api_batch_set_current_year(
+    payload: dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    ensure_tables(db)
+    ids = payload.get("ids") or []
+    is_current_year = payload.get("is_current_year", True)
+    if not ids:
+        return {"code": 400, "message": "未选择产品"}
+    placeholders = ",".join(str(int(i)) for i in ids)
+    db.execute(
+        text(f"UPDATE erp_products SET is_current_year = :val WHERE id IN ({placeholders})"),
+        {"val": 1 if is_current_year else 0},
+    )
+    db.commit()
+    return {"code": 200, "message": f"已更新 {len(ids)} 个产品"}
+
+
+@router.get("/current-year", summary="本年产品库（分页 + 搜索）")
+def api_list_current_year_products(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+    keyword: Optional[str] = Query(None, description="货号/品名模糊搜索"),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    ensure_tables(db)
+
+    conditions = ["p.is_current_year = 1"]
+    params: dict[str, Any] = {}
+
+    if keyword:
+        conditions.append(
+            "(p.product_no LIKE :kw OR p.product_name LIKE :kw OR p.brand LIKE :kw)"
+        )
+        params["kw"] = f"%{keyword}%"
+
+    where = " AND ".join(conditions)
+
+    count_sql = f"SELECT COUNT(*) AS cnt FROM erp_products p WHERE {where}"
+    total = db.execute(text(count_sql), params).scalar() or 0
+
+    offset = (page - 1) * page_size
+    data_sql = f"""
+        SELECT p.id, p.product_id, p.product_no, p.product_name, p.brand, p.category,
+               p.color, p.unit, p.price, p.spec, p.material, p.image_url, p.remark, p.is_current_year, p.synced_at,
+               (SELECT COUNT(*) FROM product_name_mappings m WHERE m.product_no = p.product_no) AS mapping_count
+        FROM erp_products p
+        WHERE {where}
+        ORDER BY p.product_no ASC, p.id ASC
+        LIMIT :limit OFFSET :offset
+    """
+    params["limit"] = page_size
+    params["offset"] = offset
+    rows = db.execute(text(data_sql), params).mappings().all()
+
+    products = []
+    for r in rows:
+        products.append({
+            "id": r["id"],
+            "product_id": r["product_id"] or "",
+            "product_no": r["product_no"] or "",
+            "product_name": r["product_name"] or "",
+            "brand": r["brand"] or "",
+            "category": r["category"] or "",
+            "color": r["color"] or "",
+            "unit": r["unit"] or "",
+            "price": float(r["price"] or 0),
+            "spec": r["spec"] or "",
+            "material": r["material"] or "",
+            "image_url": r["image_url"] or "",
+            "remark": r["remark"] or "",
+            "is_current_year": bool(r.get("is_current_year")),
             "synced_at": str(r["synced_at"] or ""),
             "mapping_count": r["mapping_count"] or 0,
         })

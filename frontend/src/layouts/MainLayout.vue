@@ -34,6 +34,10 @@
               <el-icon><Goods /></el-icon>
               <template #title>产品列表</template>
             </el-menu-item>
+            <el-menu-item index="/products-current-year">
+              <el-icon><Star /></el-icon>
+              <template #title>本年产品库</template>
+            </el-menu-item>
             <el-menu-item index="/sales">
               <el-icon><List /></el-icon>
               <template #title>销售订单</template>
@@ -243,7 +247,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   DataLine, User, Setting, Fold, Expand, Box, UserFilled,
   Search, Bell, SwitchButton, Stamp, Management, Goods, List, QuestionFilled,
-  ChatDotRound, Monitor, Link, Document, DocumentChecked
+  ChatDotRound, Monitor, Link, Document, DocumentChecked, Star
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import request from '@/utils/request'

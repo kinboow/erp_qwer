@@ -99,6 +99,12 @@ const routes = [
         meta: { title: '产品列表' }
       },
       {
+        path: 'products-current-year',
+        name: 'CurrentYearProducts',
+        component: () => import('@/views/business/CurrentYearProducts.vue'),
+        meta: { title: '本年产品库' }
+      },
+      {
         path: 'sales',
         name: 'SalesOrders',
         component: () => import('@/views/business/SalesOrders.vue'),
