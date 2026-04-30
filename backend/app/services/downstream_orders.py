@@ -952,16 +952,22 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
                 context_messages, context_data, customer_hint=customer_hint, db=db,
             )
         else:
-            # 没有提取到款号时，回退到原始解析
-            if is_excel:
-                parsed = await ai_order_parser.parse_excel_summary(row.get("attachment_name") or "", excel_summary, customer_hint)
-            elif is_image:
-                parsed = await ai_order_parser.parse_image_base64(row.get("attachment_base64") or "", row.get("attachment_mime") or "image/png", row.get("content_text") or "")
-            else:
-                text_content = row.get("content_text") or row.get("attachment_name") or row.get("room_name") or ""
-                parsed = await ai_order_parser.parse_text(text_content, customer_hint)
+            # 没有提取到款号时，回退到批量解析（也带目录约束）
+            parsed = await ai_order_parser.parse_batch(context_messages, customer_hint=customer_hint, db=db, catalog=catalog)
 
         normalized = _normalize_order(parsed, customer_hint)
+
+        # 硬校验：最终订单中的 product_no 必须在本年产品目录中
+        if catalog:
+            valid_pnos = {item["product_no"] for item in catalog}
+            original_count = len(normalized.get("items") or [])
+            normalized["items"] = [
+                it for it in (normalized.get("items") or [])
+                if it.get("product_no") in valid_pnos
+            ]
+            if len(normalized["items"]) < original_count:
+                logger.info("[AI Parse] review=%d 硬校验过滤订单items: %d -> %d",
+                            review_id, original_count, len(normalized["items"]))
         db.execute(
             text("UPDATE downstream_order_reviews SET parse_status = 'success', ai_error = '', parsed_order_json = :parsed_order_json, updated_at = NOW() WHERE id = :id"),
             {"id": review_id, "parsed_order_json": _json_dumps(normalized)},

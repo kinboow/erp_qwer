@@ -765,10 +765,23 @@ async def _process_order(
                 ai_inputs, context_data, customer_hint=customer_hint, db=db,
             )
         else:
-            # 没有提取到款号或无产品信息时，回退到批量解析
-            parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=customer_hint, db=db)
+            # 没有提取到款号或无产品信息时，回退到批量解析（也带目录约束）
+            parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=customer_hint, db=db, catalog=catalog)
 
         final_order = _normalize_order(parsed, customer_hint)
+
+        # 硬校验：最终订单中的 product_no 必须在本年产品目录中
+        if catalog:
+            valid_pnos = {item["product_no"] for item in catalog}
+            original_count = len(final_order.get("items") or [])
+            final_order["items"] = [
+                it for it in (final_order.get("items") or [])
+                if it.get("product_no") in valid_pnos
+            ]
+            if len(final_order["items"]) < original_count:
+                logger.info("%s: 硬校验过滤订单items: %d -> %d room=%s",
+                            source_label, original_count, len(final_order["items"]), room_id)
+
         logger.info("%s: 解析完成 room=%s items=%d", source_label, room_id, len(final_order.get("items") or []))
 
         review_id = _write_review(

@@ -93,6 +93,15 @@ ORDER_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客
 }
 """
 
+_ORDER_PARSER_CATALOG_SUFFIX = """
+
+【重要约束 — 本年产品目录】
+以下是本年产品目录，items 中的 product_no 字段**只能从此目录中选择**，绝对禁止输出不在目录中的款号。
+如果客户提到的款号/货号在目录中找不到匹配（包括别名匹配），则忽略该款，不要输出到 items 中。
+
+{catalog_text}
+"""
+
 
 class AIOrderParser:
     def __init__(self) -> None:
@@ -448,8 +457,12 @@ class AIOrderParser:
         context_messages: list[dict[str, Any]],
         customer_hint: str = "",
         db: Optional[Session] = None,
+        catalog: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """智能体2: 批量解析多条消息为结构化订单 JSON。
+
+        Args:
+            catalog: 本年产品目录，传入后会在 prompt 中注入目录约束。
 
         context_messages 每项结构:
         {
@@ -465,6 +478,13 @@ class AIOrderParser:
         cfg = self._load_config(db)
         has_image = any(m.get("type") == "image" for m in context_messages)
         model = cfg["vision_model"] if has_image else cfg["model"]
+
+        # 根据是否有目录选择提示词
+        if catalog:
+            catalog_text = _build_catalog_text(catalog)
+            system_prompt = ORDER_PARSER_SYSTEM_PROMPT + _ORDER_PARSER_CATALOG_SUFFIX.format(catalog_text=catalog_text)
+        else:
+            system_prompt = ORDER_PARSER_SYSTEM_PROMPT
 
         user_parts: list[dict[str, Any]] = []
         user_parts.append({"type": "text", "text": f"客户提示: {customer_hint or '无'}\n以下是客户在群聊中发的下单相关消息，请合并解析为一个完整订单："})
@@ -491,7 +511,7 @@ class AIOrderParser:
         return await self._chat(
             model,
             [
-                {"role": "system", "content": ORDER_PARSER_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_parts},
             ],
             db=db,
@@ -532,29 +552,68 @@ class AIOrderParser:
         else:
             system_prompt = PRODUCT_NO_EXTRACT_SYSTEM_PROMPT
 
-        try:
-            result = await self._chat(
-                model,
-                [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                db=db,
-                caller="extract_product_nos",
-            )
-            nos = result.get("product_nos") or []
-            filtered_nos = [str(n).strip() for n in nos if str(n).strip().isdigit()]
-            # 旋转角度：正数=顺时针，负数=逆时针，只接受 ±90/±180/±270
+        max_attempts = 3 if catalog else 1
+        valid_pnos = {item["product_no"] for item in catalog} if catalog else None
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ]
+        rotation_angle = 0
+
+        for attempt in range(1, max_attempts + 1):
             try:
-                angle = int(result.get("rotation_angle") or 0)
-            except (ValueError, TypeError):
-                angle = 0
-            if angle not in (0, 90, -90, 180, -180, 270, -270):
-                angle = 0
-            return {"product_nos": filtered_nos, "rotation_angle": angle}
-        except Exception as exc:
-            logger.warning("智能体A(款号提取)失败: %s", exc)
-            return {"product_nos": [], "rotation_angle": 0}
+                result = await self._chat(
+                    model, messages, db=db,
+                    caller=f"extract_product_nos_attempt{attempt}",
+                )
+                nos = result.get("product_nos") or []
+                all_nos = [str(n).strip() for n in nos if str(n).strip()]
+
+                # 首次提取旋转角度
+                if attempt == 1:
+                    try:
+                        rotation_angle = int(result.get("rotation_angle") or 0)
+                    except (ValueError, TypeError):
+                        rotation_angle = 0
+                    if rotation_angle not in (0, 90, -90, 180, -180, 270, -270):
+                        rotation_angle = 0
+
+                # 无目录约束或无结果时直接返回
+                if valid_pnos is None:
+                    return {"product_nos": all_nos, "rotation_angle": rotation_angle}
+
+                good_nos = [n for n in all_nos if n in valid_pnos]
+                bad_nos = [n for n in all_nos if n not in valid_pnos]
+
+                if not bad_nos:
+                    # 全部合法，直接返回
+                    logger.info("智能体A 第%d次尝试: 返回%d个款号全部合法", attempt, len(good_nos))
+                    return {"product_nos": good_nos, "rotation_angle": rotation_angle}
+
+                logger.info("智能体A 第%d次尝试: 返回%d个款号, 其中%d个不在目录中: %s",
+                            attempt, len(all_nos), len(bad_nos), bad_nos)
+
+                if attempt < max_attempts:
+                    # 将错误结果反馈给 AI，要求重新选择
+                    messages.append({"role": "assistant", "content": json.dumps(result, ensure_ascii=False)})
+                    messages.append({"role": "user", "content": (
+                        f"你上次返回的款号中，以下款号不在本年产品目录中，是错误的：{', '.join(bad_nos)}\n"
+                        f"请重新从【本年产品目录】中匹配正确的款号。"
+                        f"如果客户提到的内容确实无法匹配到目录中的任何款号，请返回空数组。\n"
+                        f"请严格只返回目录中存在的 product_no。"
+                    )})
+                else:
+                    # 最后一次尝试，只保留合法的
+                    logger.warning("智能体A 已达最大重试次数%d, 保留合法款号%d个, 丢弃%d个",
+                                   max_attempts, len(good_nos), len(bad_nos))
+                    return {"product_nos": good_nos, "rotation_angle": rotation_angle}
+
+            except Exception as exc:
+                logger.warning("智能体A(款号提取)第%d次尝试失败: %s", attempt, exc)
+                if attempt >= max_attempts:
+                    return {"product_nos": [], "rotation_angle": rotation_angle}
+
+        return {"product_nos": [], "rotation_angle": rotation_angle}
 
     async def extract_product_nos_from_text(
         self, text_content: str, db: Optional[Session] = None,
