@@ -648,18 +648,23 @@ def query_current_year_catalog(db: Session) -> list[dict[str, str]]:
 
 
 def query_product_context_structured(db: Session, product_nos: list[str]) -> dict[str, Any]:
-    """根据款号列表查询产品表，返回结构化的可选尺码、颜色和款号映射。
+    """根据款号列表查询产品表，返回按款号分组的可选尺码、颜色和款号映射。
 
     返回:
         {
-            "sizes": ["M", "L", "XL", ...],
-            "colors": ["黑色", "白色", ...],
+            "products": {
+                "1234": {"sizes": ["M", "L", "XL"], "colors": ["黑色", "白色"]},
+                "5678": {"sizes": ["S", "M"], "colors": ["红色"]},
+            },
+            "sizes": ["M", "L", "XL", "S", ...],       # 所有款号的尺码并集（向后兼容）
+            "colors": ["黑色", "白色", "红色", ...],    # 所有款号的颜色并集（向后兼容）
             "mappings": {"原始款号": "目标款号", ...},
         }
     """
     from app.services.erp_sync import ensure_tables
     ensure_tables(db)
 
+    products: dict[str, dict[str, list[str]]] = {}
     all_sizes: list[str] = []
     all_colors: list[str] = []
     seen_sizes: set[str] = set()
@@ -673,16 +678,23 @@ def query_product_context_structured(db: Session, product_nos: list[str]) -> dic
         ).mappings().first()
         if not product_row:
             continue
+        pno_colors: list[str] = []
+        pno_sizes: list[str] = []
         for c in (product_row["color"] or "").split(","):
             c = c.strip()
-            if c and c not in seen_colors:
-                seen_colors.add(c)
-                all_colors.append(c)
+            if c:
+                pno_colors.append(c)
+                if c not in seen_colors:
+                    seen_colors.add(c)
+                    all_colors.append(c)
         for s in (product_row["spec"] or "").split(","):
             s = s.strip()
-            if s and s not in seen_sizes:
-                seen_sizes.add(s)
-                all_sizes.append(s)
+            if s:
+                pno_sizes.append(s)
+                if s not in seen_sizes:
+                    seen_sizes.add(s)
+                    all_sizes.append(s)
+        products[pno] = {"sizes": pno_sizes, "colors": pno_colors}
 
     # 款号映射：alias_name（图片中原始款号） → product_no（目标款号）
     mappings: dict[str, str] = {}
@@ -698,7 +710,7 @@ def query_product_context_structured(db: Session, product_nos: list[str]) -> dic
     except Exception:
         pass
 
-    return {"sizes": all_sizes, "colors": all_colors, "mappings": mappings}
+    return {"products": products, "sizes": all_sizes, "colors": all_colors, "mappings": mappings}
 
 
 def _normalize_discount(value: Any) -> int:
@@ -947,7 +959,7 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
 
         # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
         logger.info("[AI Parse] review=%d 步骤3: 带上下文解析订单...", review_id)
-        if context_data and (context_data.get("sizes") or context_data.get("colors")):
+        if context_data and context_data.get("products"):
             parsed = await ai_order_parser.parse_with_product_context(
                 context_messages, context_data, customer_hint=customer_hint, db=db,
             )

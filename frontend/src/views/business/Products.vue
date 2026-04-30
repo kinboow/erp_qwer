@@ -20,6 +20,15 @@
           />
         </div>
         <div class="toolbar-right">
+          <el-dropdown @command="handleExportImport" trigger="click">
+            <el-button>导入/导出<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="export" :icon="Download">导出 Excel</el-dropdown-item>
+                <el-dropdown-item command="import" :icon="Upload">导入 Excel</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? `同步产品中${trigger === 'scheduled' ? '（定时）' : ''}...` : '同步产品列表' }}</el-button>
         </div>
       </div>
@@ -157,6 +166,47 @@
         <el-button @click="detailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+    <!-- 导入弹窗 -->
+    <el-dialog v-model="importVisible" title="导入产品 Excel" width="520px" destroy-on-close>
+      <el-alert type="info" :closable="false" style="margin-bottom: 16px">
+        <template #title>
+          <div>请先导出 Excel 进行编辑，再导入。可修改的列（<span style="color:#375623;font-weight:600">绿色表头</span>）：</div>
+        </template>
+        <template #default>
+          <ul style="margin: 6px 0 0; padding-left: 18px; line-height: 1.8">
+            <li><strong>本年款</strong> — 填「是」或留空</li>
+            <li><strong>名称映射1, 2, 3...</strong> — 可增加列（如名称映射4），每列填一个映射名称</li>
+          </ul>
+        </template>
+      </el-alert>
+      <el-upload
+        ref="uploadRef"
+        :auto-upload="false"
+        :limit="1"
+        accept=".xlsx,.xls"
+        :on-change="handleImportFileChange"
+        :on-remove="() => importFile = null"
+        drag
+      >
+        <el-icon style="font-size: 40px; color: #c0c4cc"><Upload /></el-icon>
+        <div style="margin-top: 8px; color: #606266">将 Excel 文件拖到此处，或<em>点击上传</em></div>
+      </el-upload>
+      <div v-if="importResult" style="margin-top: 16px">
+        <el-alert :type="importResult.errors?.length ? 'warning' : 'success'" :closable="false">
+          <template #title>{{ importResult.message }}</template>
+          <template #default v-if="importResult.errors?.length">
+            <div style="max-height: 160px; overflow-y: auto; margin-top: 6px; font-size: 12px; line-height: 1.6">
+              <div v-for="(err, idx) in importResult.errors" :key="idx">{{ err }}</div>
+            </div>
+          </template>
+        </el-alert>
+      </div>
+      <template #footer>
+        <el-button @click="importVisible = false">{{ importResult ? '关闭' : '取消' }}</el-button>
+        <el-button v-if="!importResult" type="primary" :loading="importing" :disabled="!importFile" @click="handleImport">开始导入</el-button>
+        <el-button v-else type="primary" @click="importVisible = false; importResult = null">完成</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -164,8 +214,8 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Search, Refresh, ArrowDown } from '@element-plus/icons-vue'
-import { getProducts, syncProducts, getNameMappings, addNameMapping, deleteNameMapping, setCurrentYear } from '@/api/products'
+import { Search, Refresh, ArrowDown, Download, Upload } from '@element-plus/icons-vue'
+import { getProducts, syncProducts, getNameMappings, addNameMapping, deleteNameMapping, setCurrentYear, exportProducts, importProducts } from '@/api/products'
 import { useSyncStatus } from '@/composables/useSyncStatus'
 
 const route = useRoute()
@@ -183,6 +233,13 @@ const mappingList = ref([])
 const mappingLoading = ref(false)
 const newAliasName = ref('')
 const addingMapping = ref(false)
+
+const exporting = ref(false)
+const importVisible = ref(false)
+const importing = ref(false)
+const importFile = ref(null)
+const importResult = ref(null)
+const uploadRef = ref(null)
 
 const filter = reactive({
   keyword: '',
@@ -349,6 +406,60 @@ function fallbackCopy(text) {
   document.body.removeChild(ta)
 }
 
+function handleExportImport(cmd) {
+  if (cmd === 'export') handleExport()
+  else if (cmd === 'import') openImportDialog()
+}
+
+function openImportDialog() {
+  importFile.value = null
+  importResult.value = null
+  importVisible.value = true
+}
+
+async function handleExport() {
+  exporting.value = true
+  try {
+    const res = await exportProducts()
+    const blob = new Blob([res], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'products_export.xlsx'
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('导出成功')
+  } catch {
+    ElMessage.error('导出失败')
+  } finally {
+    exporting.value = false
+  }
+}
+
+function handleImportFileChange(uploadFile) {
+  importFile.value = uploadFile.raw
+  importResult.value = null
+}
+
+async function handleImport() {
+  if (!importFile.value) return
+  importing.value = true
+  importResult.value = null
+  try {
+    const res = await importProducts(importFile.value)
+    if (res.code === 200) {
+      importResult.value = { message: res.message, errors: res.data?.errors || [] }
+      fetchProducts()
+    } else {
+      importResult.value = { message: res.message || '导入失败', errors: [] }
+    }
+  } catch (e) {
+    importResult.value = { message: e?.message || '导入失败', errors: [] }
+  } finally {
+    importing.value = false
+  }
+}
+
 onMounted(() => {
   if (route.query.keyword) {
     filter.keyword = String(route.query.keyword)
@@ -397,6 +508,13 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .summary-bar {

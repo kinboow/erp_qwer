@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from typing import Any
 
@@ -8,6 +10,12 @@ import httpx
 from app.ncloud.client.erp_auth import ERPAuthManager, FORM_HEADERS
 from app.ncloud.config import settings
 from app.ncloud.exceptions import ERPAuthError, ERPBusinessError, ERPUpstreamError
+
+logger = logging.getLogger(__name__)
+
+# 网络瞬时错误最大重试次数
+_MAX_NETWORK_RETRIES = 2
+_RETRY_DELAY_SECONDS = 2
 
 _LOGIN_MESSAGE_PATTERN = re.compile(r"登录|login|session|expired|unauthorized", re.IGNORECASE)
 
@@ -43,21 +51,31 @@ class ERPClient:
         self._auth = ERPAuthManager(http_client)
 
     async def post_form(self, path: str, data: dict[str, Any]) -> dict[str, Any]:
-        """POST form data to ERP. Retries once after session re-login if needed."""
+        """POST form data to ERP. Retries on network errors and session expiry."""
         base_url = settings.NCLOUD_BASE_URL.rstrip("/")
         url = f"{base_url}{path}"
 
         await self._auth.login()
 
-        try:
-            response = await self._http.post(
-                url,
-                headers=FORM_HEADERS,
-                data=data,
-                timeout=300,
-            )
-        except httpx.RequestError as exc:
-            raise ERPUpstreamError(f"ERP request failed: {exc}") from exc
+        # 网络瞬时错误重试
+        last_exc: Exception | None = None
+        for attempt in range(1, _MAX_NETWORK_RETRIES + 2):  # 1次正常 + N次重试
+            try:
+                response = await self._http.post(
+                    url,
+                    headers=FORM_HEADERS,
+                    data=data,
+                    timeout=300,
+                )
+                last_exc = None
+                break
+            except httpx.RequestError as exc:
+                last_exc = exc
+                if attempt <= _MAX_NETWORK_RETRIES:
+                    logger.warning("ERP 网络错误(第%d次), %d秒后重试: %s", attempt, _RETRY_DELAY_SECONDS, exc)
+                    await asyncio.sleep(_RETRY_DELAY_SECONDS)
+                else:
+                    raise ERPUpstreamError(f"ERP request failed after {attempt} attempts: {exc}") from exc
 
         if _is_session_expired(response):
             # Session expired — re-login once and retry

@@ -740,11 +740,12 @@ async def _process_order(
         # === 步骤 1：智能体 A — 从本年产品目录匹配款号 + 判断旋转角度 ===
         logger.info("%s: 步骤1 加载本年产品目录并匹配款号 room=%s", source_label, room_id)
         catalog = await run_in_threadpool(query_current_year_catalog, db)
-        logger.info("%s: 本年产品目录: %d 个产品 room=%s", source_label, len(catalog), room_id)
+        catalog_pnos_sample = [item["product_no"] for item in catalog[:10]]
+        logger.info("%s: 本年产品目录: %d 个产品, 前10个: %s room=%s", source_label, len(catalog), catalog_pnos_sample, room_id)
         extract_result = await ai_order_parser.extract_product_nos(ai_inputs, db=db, catalog=catalog)
         product_nos = extract_result.get("product_nos") or []
         rotation_angle = extract_result.get("rotation_angle") or 0
-        logger.info("%s: 提取到款号: %s rotation=%d° room=%s", source_label, product_nos, rotation_angle, room_id)
+        logger.info("%s: 步骤1结果 提取到款号: %s rotation=%d° room=%s", source_label, product_nos, rotation_angle, room_id)
 
         # === 步骤 1.5：根据 AI 判断的角度旋转图片 ===
         if rotation_angle and rotation_angle != 0:
@@ -754,21 +755,26 @@ async def _process_order(
 
         # === 步骤 2：查询产品表可选颜色/尺码/映射 ===
         context_data = await run_in_threadpool(query_product_context_structured, db, product_nos) if product_nos else {}
-        logger.info("%s: 步骤2 产品上下文 sizes=%s colors=%d mappings=%d room=%s",
-                     source_label, context_data.get("sizes"), len(context_data.get("colors", [])),
-                     len(context_data.get("mappings", {})), room_id)
+        products_ctx = context_data.get("products") or {}
+        logger.info("%s: 步骤2 产品上下文 products=%d个款号 mappings=%d room=%s",
+                     source_label, len(products_ctx), len(context_data.get("mappings", {})), room_id)
+        for pno, info in products_ctx.items():
+            logger.info("%s:   款号 %s: 颜色%s 尺码%s", source_label, pno, info.get("colors"), info.get("sizes"))
 
         # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
-        logger.info("%s: 步骤3 带上下文解析订单 room=%s", source_label, room_id)
-        if context_data and (context_data.get("sizes") or context_data.get("colors")):
+        if context_data and context_data.get("products"):
+            logger.info("%s: 步骤3 走 parse_with_product_context(有上下文) room=%s", source_label, room_id)
             parsed = await ai_order_parser.parse_with_product_context(
                 ai_inputs, context_data, customer_hint=customer_hint, db=db,
             )
         else:
-            # 没有提取到款号或无产品信息时，回退到批量解析（也带目录约束）
+            logger.info("%s: 步骤3 走 parse_batch(无上下文, 带目录约束) room=%s", source_label, room_id)
             parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=customer_hint, db=db, catalog=catalog)
 
+        logger.info("%s: 步骤3 AI原始返回keys=%s room=%s", source_label, list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__, room_id)
         final_order = _normalize_order(parsed, customer_hint)
+        logger.info("%s: 步骤3 normalize后 items=%s room=%s", source_label,
+                     [{"pno": it.get("product_no"), "color": it.get("color")} for it in (final_order.get("items") or [])], room_id)
 
         # 硬校验：最终订单中的 product_no 必须在本年产品目录中
         if catalog:

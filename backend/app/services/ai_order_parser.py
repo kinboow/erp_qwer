@@ -64,15 +64,12 @@ missing_fields 只能包含这四个值：款号、颜色、尺码、数量
 # ==========================================================================
 ORDER_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客户通过企微发送的文本、图片、表格内容解析成结构化订单 JSON。
 要求：
-1. 尽可能识别客户名、联系人、备注、下单日期。
+1. 不需要识别客户名、联系人、下单日期，这些字段留空即可。
 2. items 中每个款号单独成行，并识别颜色、尺码数量。
 3. 如果信息不确定，保留在 uncertainties 数组中，不要编造。
 4. 严格返回 JSON，不要返回 markdown。
 返回结构：
 {
-  "customer_name": "",
-  "contact_person": "",
-  "order_date": "YYYY-MM-DD",
   "remark": "",
   "items": [
     {
@@ -141,23 +138,32 @@ class AIOrderParser:
     def _extract_json(text_content: str) -> dict[str, Any]:
         """从 AI 返回的文本中提取 JSON（兼容 markdown 代码块包裹）"""
         text_content = text_content.strip()
+
+        def _ensure_dict(obj: Any) -> dict[str, Any]:
+            """确保返回 dict；如果 AI 返回了 list，包装为 dict。"""
+            if isinstance(obj, dict):
+                return obj
+            if isinstance(obj, list):
+                return {"raw_texts": obj}
+            return {"raw_value": obj}
+
         # 1. 直接尝试解析
         try:
-            return json.loads(text_content)
+            return _ensure_dict(json.loads(text_content))
         except Exception:
             pass
         # 2. 尝试从 ```json ... ``` 代码块中提取
         m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", text_content, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group(1))
+                return _ensure_dict(json.loads(m.group(1)))
             except Exception:
                 pass
         # 3. 尝试提取第一个 { ... } 块
         m = re.search(r"(\{.*\})", text_content, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group(1))
+                return _ensure_dict(json.loads(m.group(1)))
             except Exception:
                 pass
         raise AIOrderParserError(f"AI 返回内容不是有效 JSON: {text_content[:300]}")
@@ -527,13 +533,18 @@ class AIOrderParser:
         db: Optional[Session] = None,
         catalog: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
-        """智能体A: 从本年产品目录中匹配款号，并判断图片旋转角度。
+        """智能体A: AI 提取原始文本 → 代码层精确匹配本年产品目录。
+
+        流程:
+            1. AI 从内容中提取所有可能的款号/货号原始文本 (raw_texts)
+            2. 代码将 raw_texts 与 catalog 中的 product_no 和 aliases 做精确匹配
+            3. 匹配到的 alias 自动映射回 product_no
 
         Args:
             catalog: 本年产品目录列表，由 query_current_year_catalog() 返回。
-                     如果为 None 则降级为无目录模式。
 
-        返回: {"product_nos": ["1234", "5678"], "rotation_angle": 0}
+        Returns:
+            {"product_nos": ["1234", "5678"], "rotation_angle": 0}
         """
         cfg = self._load_config(db)
         has_image = any(m.get("type") == "image" for m in context_messages)
@@ -545,75 +556,48 @@ class AIOrderParser:
 
         user_content: Any = user_parts if len(user_parts) > 1 else user_parts[0].get("text", "")
 
-        # 根据是否有目录选择提示词
-        if catalog is not None:
-            catalog_text = _build_catalog_text(catalog)
-            system_prompt = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE.format(catalog_text=catalog_text)
-        else:
-            system_prompt = PRODUCT_NO_EXTRACT_SYSTEM_PROMPT
+        # 提示词不再包含目录，AI 只负责提取原始文本
+        system_prompt = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE
 
-        max_attempts = 3 if catalog else 1
-        valid_pnos = {item["product_no"] for item in catalog} if catalog else None
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ]
+
         rotation_angle = 0
 
-        for attempt in range(1, max_attempts + 1):
+        try:
+            result = await self._chat(
+                model, messages, db=db,
+                caller="extract_product_nos",
+            )
+
+            # 解析旋转角度
             try:
-                result = await self._chat(
-                    model, messages, db=db,
-                    caller=f"extract_product_nos_attempt{attempt}",
-                )
-                nos = result.get("product_nos") or []
-                all_nos = [str(n).strip() for n in nos if str(n).strip()]
+                rotation_angle = int(result.get("rotation_angle") or 0)
+            except (ValueError, TypeError):
+                rotation_angle = 0
+            if rotation_angle not in (0, 90, -90, 180, -180, 270, -270):
+                rotation_angle = 0
 
-                # 首次提取旋转角度
-                if attempt == 1:
-                    try:
-                        rotation_angle = int(result.get("rotation_angle") or 0)
-                    except (ValueError, TypeError):
-                        rotation_angle = 0
-                    if rotation_angle not in (0, 90, -90, 180, -180, 270, -270):
-                        rotation_angle = 0
+            # AI 返回的原始文本列表
+            raw_texts = result.get("raw_texts") or result.get("product_nos") or []
+            raw_texts = [str(t).strip() for t in raw_texts if str(t).strip()]
+            logger.info("智能体A 提取到原始文本: %s", raw_texts)
 
-                # 无目录约束或无结果时直接返回
-                if valid_pnos is None:
-                    return {"product_nos": all_nos, "rotation_angle": rotation_angle}
+            # 代码层精确匹配
+            if catalog:
+                matched = _match_catalog(raw_texts, catalog)
+                logger.info("智能体A 精确匹配结果: %s (从 %d 条原始文本中匹配到 %d 个款号)",
+                            matched, len(raw_texts), len(matched))
+                return {"product_nos": matched, "rotation_angle": rotation_angle}
+            else:
+                # 无目录降级：直接返回 AI 提取的原始文本
+                return {"product_nos": raw_texts, "rotation_angle": rotation_angle}
 
-                good_nos = [n for n in all_nos if n in valid_pnos]
-                bad_nos = [n for n in all_nos if n not in valid_pnos]
-
-                if not bad_nos:
-                    # 全部合法，直接返回
-                    logger.info("智能体A 第%d次尝试: 返回%d个款号全部合法", attempt, len(good_nos))
-                    return {"product_nos": good_nos, "rotation_angle": rotation_angle}
-
-                logger.info("智能体A 第%d次尝试: 返回%d个款号, 其中%d个不在目录中: %s",
-                            attempt, len(all_nos), len(bad_nos), bad_nos)
-
-                if attempt < max_attempts:
-                    # 将错误结果反馈给 AI，要求重新选择
-                    messages.append({"role": "assistant", "content": json.dumps(result, ensure_ascii=False)})
-                    messages.append({"role": "user", "content": (
-                        f"你上次返回的款号中，以下款号不在本年产品目录中，是错误的：{', '.join(bad_nos)}\n"
-                        f"请重新从【本年产品目录】中匹配正确的款号。"
-                        f"如果客户提到的内容确实无法匹配到目录中的任何款号，请返回空数组。\n"
-                        f"请严格只返回目录中存在的 product_no。"
-                    )})
-                else:
-                    # 最后一次尝试，只保留合法的
-                    logger.warning("智能体A 已达最大重试次数%d, 保留合法款号%d个, 丢弃%d个",
-                                   max_attempts, len(good_nos), len(bad_nos))
-                    return {"product_nos": good_nos, "rotation_angle": rotation_angle}
-
-            except Exception as exc:
-                logger.warning("智能体A(款号提取)第%d次尝试失败: %s", attempt, exc)
-                if attempt >= max_attempts:
-                    return {"product_nos": [], "rotation_angle": rotation_angle}
-
-        return {"product_nos": [], "rotation_angle": rotation_angle}
+        except Exception as exc:
+            logger.warning("智能体A(款号提取)失败: %s", exc)
+            return {"product_nos": [], "rotation_angle": rotation_angle}
 
     async def extract_product_nos_from_text(
         self, text_content: str, db: Optional[Session] = None,
@@ -659,17 +643,16 @@ class AIOrderParser:
 
         Args:
             context_messages: 统一消息列表
-            product_context_data: {"sizes": [...], "colors": [...], "mappings": {...}}
+            product_context_data: {"products": {...}, "sizes": [...], "colors": [...], "mappings": {...}}
             customer_hint: 客户名称提示
         """
         cfg = self._load_config(db)
         has_image = any(m.get("type") == "image" for m in context_messages)
         model = cfg["vision_model"] if has_image else cfg["model"]
 
-        # 动态构建系统提示词
+        # 动态构建系统提示词（按款号分组的颜色/尺码）
         system_prompt = build_context_parser_prompt(
-            sizes=product_context_data.get("sizes") or [],
-            colors=product_context_data.get("colors") or [],
+            products=product_context_data.get("products") or {},
             mappings=product_context_data.get("mappings") or {},
         )
 
@@ -702,42 +685,61 @@ class AIOrderParser:
 # ==========================================================================
 # 智能体 A — 款号提取 Agent（从本年产品目录中匹配款号）
 # ==========================================================================
-_PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE = """你是一个服装行业款号匹配助手。
+_PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE = """你是一个服装行业订单内容提取助手。
 你有两个任务：
 
-任务1：从客户发来的内容（文字、图片、表格）中识别出提到的款号（货号），然后**严格从下方的【本年产品目录】中匹配**。
+任务1：从客户发来的内容（文字、图片、表格）中，提取出所有可能是款号/货号/卡号/编号的文本值。
+- 图片或表格中可能存在**多列**包含款号信息（例如"款号"列、"货号"列、"卡号"列、"编号"列等）
+- 凡是列名包含"款号"、"货号"、"卡号"、"编号"、"款"、"货"等关键词的列，里面的值都要提取
+- 文字消息中出现的类似款号/编号的字符串也要提取
+- 不要把价格、数量、尺码、日期等数字误认为款号
+- 将所有提取到的原始文本放入 raw_texts 数组
 
-任务2：如果输入包含图片，判断图片中的纸张/内容需要顺时针旋转多少度才能变成正向可读（文字从左到右、从上到下）。
+任务2：如果输入包含图片，判断图片中的纸张/内容需要顺时针旋转多少度才能变成正向可读。
+- rotation_angle 只能是：0, 90, -90, 180, -180, 270, -270
+- 0 表示图片已经是正的
+- 如果没有图片或无法判断，填 0
 
-【本年产品目录】
-{catalog_text}
-
-款号匹配规则：
-1. 客户内容中出现的数字、名称，需要与上方【本年产品目录】中的 product_no 或别名(aliases) 进行匹配
-2. **只能输出目录中存在的 product_no**，绝对禁止编造不在目录中的款号
-3. 如果客户写的是别名（aliases 中的值），请输出该别名对应的 product_no
-4. 不要把价格、数量、尺码、日期等数字误认为款号
-5. 如果内容中出现类似"款号"、"货号"、"款"等关键词后面的数字，优先尝试匹配
-6. 同一个 product_no 只输出一次，去重
-7. 如果客户提到的款号在目录中完全找不到匹配，不要输出该款号
-8. 如果完全没有匹配到任何款号，返回空数组
-
-图片旋转判断规则：
-1. 观察图片中手写文字/表格的朝向
-2. 判断需要旋转多少度才能让内容变成正向可读（文字从左到右、从上到下）
-3. rotation_angle 用正负数表示方向：正数=顺时针旋转，负数=逆时针旋转
-4. 只能是以下值之一：0, 90, -90, 180, -180, 270, -270
-5. 0 表示图片已经是正的，不需要旋转
-6. 例如：文字头朝左 → 需要顺时针旋转90度 → 填 90；文字头朝右 → 需要逆时针旋转90度 → 填 -90
-7. 如果没有图片或无法判断，填 0
+注意：你只需要提取原始文本和判断旋转角度，**不需要识别客户名、联系人、下单日期**，也**不需要判断款号是否正确**，只管把看到的款号/货号原样提取出来。
 
 严格只返回 JSON，不要返回 markdown：
 {{
-  "product_nos": ["1234", "5678"],
-  "rotation_angle": 0,
-  "reason": "简短说明匹配依据和旋转判断"
+  "raw_texts": ["1234", "AB-5678", "某某款名"],
+  "rotation_angle": 0
 }}
 """
+
+
+def _match_catalog(raw_texts: list[str], catalog: list[dict[str, Any]]) -> list[str]:
+    """将 AI 提取的原始文本与产品目录做精确匹配。
+
+    匹配规则:
+        1. raw_text 完全等于某个 product_no → 匹配
+        2. raw_text 完全等于某个 alias → 映射到对应的 product_no
+        3. 去重，同一个 product_no 只返回一次
+    """
+    # 构建查找表: text -> product_no
+    lookup: dict[str, str] = {}
+    for item in catalog:
+        pno = item.get("product_no", "").strip()
+        if not pno:
+            continue
+        # product_no 本身
+        lookup[pno] = pno
+        # 所有别名
+        for alias in (item.get("aliases") or []):
+            alias = alias.strip()
+            if alias:
+                lookup[alias] = pno
+
+    matched: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_texts:
+        pno = lookup.get(raw)
+        if pno and pno not in seen:
+            seen.add(pno)
+            matched.append(pno)
+    return matched
 
 
 def _build_catalog_text(catalog: list[dict[str, Any]]) -> str:
@@ -754,80 +756,87 @@ def _build_catalog_text(catalog: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# 向后兼容：无目录时的降级提示词
-PRODUCT_NO_EXTRACT_SYSTEM_PROMPT = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE.replace("{catalog_text}", "（无目录信息，请尽可能从内容中提取纯数字款号）")
+# 向后兼容：无目录时也使用同一提示词（AI 只提取原始文本，不再注入目录）
+PRODUCT_NO_EXTRACT_SYSTEM_PROMPT = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE
 
 # ==========================================================================
 # 智能体 B — 带库存上下文的详细解析 Agent（动态提示词模板）
 # ==========================================================================
-_CONTEXT_PARSER_PROMPT_TEMPLATE = """【⚠️ 固定配置】
-1. 可选尺码列表：{sizes_list}
-2. 可选颜色列表：{colors_list}
-3. 款号映射关系：{style_mapping}
+_CONTEXT_PARSER_PROMPT_TEMPLATE = """【⚠️ 固定配置 — 各款号可选颜色和尺码】
+{products_config}
+
+款号映射关系：{style_mapping}
 
 【核心执行规则（AI必须100%严格遵守，不得修改）】
 1. 图片解析核心要求
-你是专业的手写服装库存数据解析工具，仅识别图片中与服装款号、颜色、尺码、对应数量相关的手写内容，其余无关信息全部忽略。针对手写内容，优先做语义精准匹配，所有识别结果必须严格限定在上方填写的可选尺码、可选颜色范围内，超出范围的内容直接丢弃，绝对禁止编造、臆造任何不在可选列表里的颜色、尺码、数量。
+你是专业的手写服装订单数据解析工具，仅识别内容中与服装款号、颜色、尺码、对应数量相关的信息，其余无关信息全部忽略。针对手写内容，优先做语义精准匹配。
 
-2. 多颜色多尺码适配规则
-- 无论图片中有多少个颜色、单个颜色对应多少个尺码，都必须先匹配【可选颜色列表】中的标准颜色名称，手写简写/俗称必须对应到列表内的标准名（如手写"黑"匹配列表内的"黑色"，手写"茶"匹配列表内的"茶色"），无法匹配的颜色直接丢弃。
-- 每个匹配到的有效颜色，必须单独生成一条库存记录；单条颜色记录下的size_stock对象，必须完整包含【可选尺码列表】里的**全部尺码**，识别到有效数量的填对应阿拉伯数字，无标注、无法识别、未匹配到的尺码，统一填0，不允许遗漏任何可选尺码，也不允许出现列表外的尺码。
+2. 按款号匹配颜色和尺码（极其重要）
+- 每个款号有**独立的**可选颜色列表和可选尺码列表（见上方配置）
+- 识别到某款号的报货数据时，颜色必须从**该款号自己的可选颜色列表**中匹配，尺码必须从**该款号自己的可选尺码列表**中匹配
+- 手写简写/俗称必须对应到列表内的标准名（如手写"黑"匹配"黑色"，手写"茶"匹配"茶色"）
+- 颜色或尺码无法匹配到该款号的可选列表时，直接丢弃，绝对禁止编造
+- 每个匹配到的有效颜色，单独生成一条记录；size_stock 必须完整包含**该款号**可选尺码列表里的全部尺码，识别到数量的填阿拉伯数字，无标注/无法识别的填0
 
-3. 款号映射转换规则（极其重要）
-- 先识别图片中的原始手写款号，再严格按照【款号映射关系】做一对一转换，原始款号完全匹配映射键的，输出对应目标款号。
-- 若识别到的原始款号不在映射关系中，说明该款号不属于当前供应商，必须完全忽略该款号及其对应的所有颜色、尺码、数量信息，不要输出到结果中。
-- 图片中可能同时包含多个供应商的款号信息，你只需要解析在【款号映射关系】中能匹配到的款号，其余全部忽略。
-- 如果图片中所有款号都不在映射关系中，inventory返回空数组，remarks标注“图片中的款号均不在当前供应商的款号映射中”。
+3. 款号映射转换规则
+- 先识别内容中的原始款号，再按【款号映射关系】做转换，原始款号完全匹配映射键的，输出对应目标款号
+- 若原始款号不在映射关系中，但直接匹配上方配置中的某个款号，则直接使用该款号
+- 若原始款号既不在映射关系中，也不在上方款号配置中，则忽略该款号及其所有数据
 
 4. 异常处理规则
-- 手写内容模糊、涂改、无法辨认的数量，统一填0。
-- 识别到的颜色/尺码无法匹配到可选列表的，直接丢弃该条内容，不纳入最终结果。
-- 未识别到任何有效库存数据的，inventory为空数组，remarks标注"未识别到有效库存数据"。
+- 手写内容模糊、涂改、无法辨认的数量，统一填0
+- 识别到的颜色/尺码无法匹配到该款号可选列表的，直接丢弃
+- 未识别到任何有效数据的，items为空数组，remark标注原因
 
 5. 输出格式铁则
-必须只输出纯JSON字符串，不允许添加任何额外的文字、解释、注释、markdown格式、符号，不得增减字段、修改字段名、变更结构层级，严格遵循下方固定结构输出。
+必须只输出纯JSON字符串，不允许添加任何额外的文字、解释、注释、markdown格式。严格遵循下方结构输出。
 
 【固定输出JSON结构】
-{size_stock_template}
+{{
+  "items": [
+    {{
+      "product_no": "款号",
+      "product_name": "",
+      "color": "颜色",
+      "brand": "",
+      "unit": "件",
+      "price": 0,
+      "discount": 1,
+      "sizes": [{{"size": "尺码", "qty": 数量}}],
+      "remark": ""
+    }}
+  ],
+  "remark": "备注或异常说明"
+}}
 """
 
 
 def build_context_parser_prompt(
-    sizes: list[str],
-    colors: list[str],
+    products: dict[str, dict[str, list[str]]],
     mappings: dict[str, str],
 ) -> str:
-    """根据实际产品数据构建智能体 B 的系统提示词。"""
-    sizes_str = json.dumps(sizes, ensure_ascii=False) if sizes else '["暂无可选尺码"]'
-    colors_str = json.dumps(colors, ensure_ascii=False) if colors else '["暂无可选颜色"]'
+    """根据按款号分组的产品数据构建智能体 B 的系统提示词。
+
+    Args:
+        products: {"款号": {"sizes": [...], "colors": [...]}, ...}
+        mappings: {"别名": "目标款号", ...}
+    """
+    # 构建按款号分组的配置文本
+    if products:
+        lines: list[str] = []
+        for pno, info in products.items():
+            colors = json.dumps(info.get("colors") or [], ensure_ascii=False)
+            sizes = json.dumps(info.get("sizes") or [], ensure_ascii=False)
+            lines.append(f"款号 {pno}:\n  可选颜色: {colors}\n  可选尺码: {sizes}")
+        products_config = "\n".join(lines)
+    else:
+        products_config = "（无款号配置信息）"
+
     mapping_str = json.dumps(mappings, ensure_ascii=False) if mappings else '{}'
 
-    # 动态构建 size_stock 示例：所有可选尺码都出现在模板中
-    if sizes:
-        size_stock_entries = ", ".join(f'"{s}": "数量或0"' for s in sizes)
-        size_stock_example = "{ " + size_stock_entries + " }"
-    else:
-        size_stock_example = '{ "尺码名": "数量或0" }'
-
-    template_json = (
-        "{\n"
-        '  "style_code": "转换后的目标款号，无匹配填null",\n'
-        '  "original_style_code": "图片中识别到的原始手写款号，未识别填null",\n'
-        '  "inventory": [\n'
-        "    {\n"
-        '      "color": "匹配到的可选颜色标准名称",\n'
-        f'      "size_stock": {size_stock_example}\n'
-        "    }\n"
-        "  ],\n"
-        '  "remarks": "异常说明，无异常填无"\n'
-        "}"
-    )
-
     return _CONTEXT_PARSER_PROMPT_TEMPLATE.format(
-        sizes_list=sizes_str,
-        colors_list=colors_str,
+        products_config=products_config,
         style_mapping=mapping_str,
-        size_stock_template=template_json,
     )
 
 

@@ -40,6 +40,10 @@ request.interceptors.request.use(
 // 响应拦截器
 request.interceptors.response.use(
   response => {
+    // blob 类型直接返回，不走 code 检查
+    if (response.config.responseType === 'blob') {
+      return response.data
+    }
     const res = response.data
     const silentError = !!response.config?.silentError
     if (res.code && res.code !== 200) {

@@ -31,3 +31,13 @@ export const batchSetCurrentYear = (ids, isCurrentYear) => {
 export const getCurrentYearProducts = (params) => {
   return request({ url: '/api/products/current-year', method: 'get', params })
 }
+
+export const exportProducts = () => {
+  return request({ url: '/api/products/export', method: 'get', responseType: 'blob' })
+}
+
+export const importProducts = (file) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request({ url: '/api/products/import', method: 'post', data: formData, headers: { 'Content-Type': 'multipart/form-data' }, timeout: 120000 })
+}
