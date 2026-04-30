@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 from typing import Dict, Optional
 from urllib.parse import quote
 
@@ -9,6 +10,8 @@ from sqlalchemy import text
 
 from app.database import SessionLocal
 from app.services.message_logs import record_message_log_background
+
+logger = logging.getLogger(__name__)
 
 
 class WechatWsService:
@@ -114,7 +117,7 @@ class WechatWsService:
                     async for message in websocket:
                         normalized = self._normalize_message(message)
                         state["lastMessage"] = normalized
-                        record_message_log_background(normalized, source="websocket", instance_id=instance_id)
+                        asyncio.create_task(self._ingest_ws_message(normalized, instance_id))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -124,6 +127,25 @@ class WechatWsService:
                 state["readyState"] = "closed"
                 state["lastError"] = str(exc)
                 await asyncio.sleep(5)
+
+    @staticmethod
+    async def _ingest_ws_message(normalized: any, instance_id: str):
+        """通过完整的 ingest_runtime_message 流程处理 WS 消息（含 @检测、AI 解析等）"""
+        try:
+            from app.services.wechat_runtime_compat import ingest_runtime_message
+            from app.services import ws_notify
+            db = SessionLocal()
+            try:
+                await ingest_runtime_message(
+                    db, normalized,
+                    source="websocket",
+                    instance_id=instance_id,
+                )
+                await ws_notify.broadcast("new_message_log")
+            finally:
+                db.close()
+        except Exception as exc:
+            logger.warning("WS 消息处理异常: %s", exc)
 
     def _serialize(self, state: dict):
         return {

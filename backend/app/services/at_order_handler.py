@@ -42,6 +42,20 @@ MEDIA_DEDUP_WINDOW = 15           # 同一条媒体消息防重复窗口（秒�
 # 正在采集中的 (room_id, sender_id) → 启动时间，防重复触发
 _active_sessions: dict[tuple[str, str], float] = {}
 
+
+def _mark_msg_recognized(msg_log_id: int) -> None:
+    """标记消息日志已被 AI 识别"""
+    if not msg_log_id:
+        return
+    db = SessionLocal()
+    try:
+        from app.services.message_logs import mark_ai_recognized
+        mark_ai_recognized(db, msg_log_id)
+    except Exception as exc:
+        logger.warning("标记 ai_recognized 失败 id=%d: %s", msg_log_id, exc)
+    finally:
+        db.close()
+
 # ---------------------------------------------------------------------------
 # 建表
 # ---------------------------------------------------------------------------
@@ -330,8 +344,30 @@ async def _download_attachment_for_msg(db: Session, ai_input: dict[str, Any], ro
             )
             resp.raise_for_status()
 
+        # 解析响应，检查 bot API 返回的实际保存路径
+        response_payload: dict[str, Any] = {}
+        try:
+            response_payload = resp.json()
+            resp_data = response_payload.get("data") if isinstance(response_payload.get("data"), dict) else {}
+            if response_payload.get("code") not in (0, None):
+                logger.warning("附件下载: API 返回错误 code=%s msg=%s",
+                               response_payload.get("code"), response_payload.get("msg"))
+                return
+        except Exception:
+            pass
+
         if not save_path.is_file():
-            logger.warning("附件下载: 文件未出现 %s", save_path)
+            # bot API 可能将文件保存到了不同的路径，从响应中查找真实路径
+            resp_data = response_payload.get("data") if isinstance(response_payload.get("data"), dict) else {}
+            for key in ("save_path", "path", "file_path"):
+                possible = str(resp_data.get(key) or "").strip()
+                if possible and Path(possible).is_file():
+                    save_path = Path(possible)
+                    logger.info("附件下载: 使用响应中的路径 %s", save_path)
+                    break
+        if not save_path.is_file():
+            logger.warning("附件下载: 文件未出现 requested=%s response=%s",
+                           cdn_params.get("save_path"), response_payload)
             return
 
         file_bytes = save_path.read_bytes()
@@ -698,30 +734,37 @@ async def _process_order(
     db = SessionLocal()
     try:
         from app.services.erp_sync import ensure_tables
-        from app.services.downstream_orders import query_product_context_for_nos
+        from app.services.downstream_orders import query_product_context_structured
         await run_in_threadpool(ensure_tables, db)
 
-        mapping_hint = await run_in_threadpool(_build_name_mapping_hints, db)
-        full_hint = f"{customer_hint}\n{mapping_hint}" if mapping_hint else customer_hint
-
-        # === 步骤 1：智能体 A — 提取款号 ===
+        # === 步骤 1：智能体 A — 提取款号 + 判断旋转角度 ===
         logger.info("%s: 步骤1 提取款号 room=%s", source_label, room_id)
-        product_nos = await ai_order_parser.extract_product_nos(ai_inputs, db=db)
-        logger.info("%s: 提取到款号: %s room=%s", source_label, product_nos, room_id)
+        extract_result = await ai_order_parser.extract_product_nos(ai_inputs, db=db)
+        product_nos = extract_result.get("product_nos") or []
+        rotation_angle = extract_result.get("rotation_angle") or 0
+        logger.info("%s: 提取到款号: %s rotation=%d° room=%s", source_label, product_nos, rotation_angle, room_id)
 
-        # === 步骤 2：查询产品表可选颜色/尺码 ===
-        product_context = await run_in_threadpool(query_product_context_for_nos, db, product_nos) if product_nos else ""
-        logger.info("%s: 步骤2 产品上下文: %s room=%s", source_label, product_context[:200], room_id)
+        # === 步骤 1.5：根据 AI 判断的角度旋转图片 ===
+        if rotation_angle and rotation_angle != 0:
+            from app.services.ai_order_parser import rotate_images_in_messages
+            ai_inputs = rotate_images_in_messages(ai_inputs, rotation_angle)
+            logger.info("%s: 图片已旋转 %d° room=%s", source_label, rotation_angle, room_id)
+
+        # === 步骤 2：查询产品表可选颜色/尺码/映射 ===
+        context_data = await run_in_threadpool(query_product_context_structured, db, product_nos) if product_nos else {}
+        logger.info("%s: 步骤2 产品上下文 sizes=%s colors=%d mappings=%d room=%s",
+                     source_label, context_data.get("sizes"), len(context_data.get("colors", [])),
+                     len(context_data.get("mappings", {})), room_id)
 
         # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
         logger.info("%s: 步骤3 带上下文解析订单 room=%s", source_label, room_id)
-        if product_context:
+        if context_data and (context_data.get("sizes") or context_data.get("colors")):
             parsed = await ai_order_parser.parse_with_product_context(
-                ai_inputs, product_context, customer_hint=full_hint, db=db,
+                ai_inputs, context_data, customer_hint=customer_hint, db=db,
             )
         else:
-            # 没有提取到款号时，回退到批量解析
-            parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=full_hint, db=db)
+            # 没有提取到款号或无产品信息时，回退到批量解析
+            parsed = await ai_order_parser.parse_batch(ai_inputs, customer_hint=customer_hint, db=db)
 
         final_order = _normalize_order(parsed, customer_hint)
         logger.info("%s: 解析完成 room=%s items=%d", source_label, room_id, len(final_order.get("items") or []))
@@ -840,6 +883,7 @@ async def handle_at_order(
 
         if not validation.get("is_order"):
             logger.info("@接单: 智能体1判定非报单 room=%s reason=%s", room_id, validation.get("reason"))
+            _mark_msg_recognized(trigger_msg_id)
             return
 
         logger.info("@接单: 智能体1判定为报单 room=%s complete=%s missing=%s reason=%s",
@@ -856,6 +900,7 @@ async def handle_at_order(
                     at_list=[sender_id])
             finally:
                 db.close()
+            _mark_msg_recognized(trigger_msg_id)
             return
 
         # 2. 智能体2：完整解析
@@ -864,6 +909,7 @@ async def handle_at_order(
             valid_inputs, customer, room_id, sender_id, instance_id, trigger_msg_id,
             source_label="@接单",
         )
+        _mark_msg_recognized(trigger_msg_id)
 
     except Exception as exc:
         logger.exception("@接单: 未知错误 room=%s sender=%s: %s", room_id, sender_id, exc)
@@ -949,6 +995,8 @@ async def handle_media_order(
         if not validation.get("is_order"):
             logger.info("媒体接单: 智能体1判定非报单 room=%s log_id=%d reason=%s",
                          room_id, msg_log_id, validation.get("reason"))
+            # 即使非报单也标记为已识别，避免启动时重复触发
+            _mark_msg_recognized(msg_log_id)
             return
 
         logger.info("媒体接单: 智能体1判定为报单 room=%s log_id=%d complete=%s missing=%s reason=%s",
@@ -993,6 +1041,123 @@ async def handle_media_order(
             [ai_input], customer, room_id, sender_id, instance_id, msg_log_id,
             source_label="媒体接单",
         )
+        # 解析完成，标记消息已识别
+        _mark_msg_recognized(msg_log_id)
 
     except Exception as exc:
         logger.exception("媒体接单: 未知错误 room=%s log_id=%d: %s", room_id, msg_log_id, exc)
+
+
+# ---------------------------------------------------------------------------
+# 启动时补扫未识别的消息（图片/文件 + @bot）
+# ---------------------------------------------------------------------------
+def _restore_payload(msg: dict[str, Any]) -> dict[str, Any]:
+    """从 message_logs 行恢复原始 payload dict"""
+    payload_str = msg.get("payload_json") or msg.get("payload") or "{}"
+    if isinstance(payload_str, str):
+        try:
+            return json.loads(payload_str)
+        except Exception:
+            return {}
+    return payload_str if isinstance(payload_str, dict) else {}
+
+
+async def rescan_unrecognized_messages() -> None:
+    """扫描最近未被 AI 识别的图片/文件消息和 @bot 消息，重新触发识别流程。"""
+    from app.services.message_logs import get_unrecognized_media_messages, get_unrecognized_at_messages
+
+    db = SessionLocal()
+    try:
+        pending_media = get_unrecognized_media_messages(db, limit=15)
+        pending_at = get_unrecognized_at_messages(db, limit=15)
+    finally:
+        db.close()
+
+    # --- 补扫图片/文件消息 ---
+    if pending_media:
+        logger.info("[启动补扫] 发现 %d 条未识别的图片/文件消息", len(pending_media))
+        for msg in pending_media:
+            msg_id = msg.get("id") or 0
+            room_id = str(msg.get("room_id") or "").strip()
+            sender_id = str(msg.get("sender_id") or "").strip()
+            instance_id = str(msg.get("instance_id") or "").strip()
+            message_type = str(msg.get("message_type") or "").lower()
+
+            if not room_id:
+                _mark_msg_recognized(msg_id)
+                continue
+
+            payload = _restore_payload(msg)
+            if not payload:
+                _mark_msg_recognized(msg_id)
+                continue
+
+            db2 = SessionLocal()
+            try:
+                customer = resolve_customer_by_room(db2, room_id, instance_id)
+            finally:
+                db2.close()
+
+            if not customer:
+                logger.info("[启动补扫] 跳过媒体 id=%d: room=%s 无绑定客户", msg_id, room_id)
+                _mark_msg_recognized(msg_id)
+                continue
+
+            logger.info("[启动补扫] 重新触发媒体 id=%d room=%s type=%s", msg_id, room_id, message_type)
+            asyncio.create_task(handle_media_order(
+                room_id=room_id,
+                sender_id=sender_id,
+                customer=dict(customer),
+                msg_log_id=msg_id,
+                instance_id=instance_id,
+                payload=payload,
+                message_type=message_type if message_type in ("image", "file") else "image",
+            ))
+    else:
+        logger.info("[启动补扫] 没有未识别的图片/文件消息")
+
+    # --- 补扫 @bot 消息 ---
+    if pending_at:
+        logger.info("[启动补扫] 发现 %d 条未识别的 @bot 消息", len(pending_at))
+        for msg in pending_at:
+            msg_id = msg.get("id") or 0
+            room_id = str(msg.get("room_id") or "").strip()
+            sender_id = str(msg.get("sender_id") or "").strip()
+            instance_id = str(msg.get("instance_id") or "").strip()
+            content = str(msg.get("content_preview") or "").strip()
+
+            if not room_id or not content:
+                _mark_msg_recognized(msg_id)
+                continue
+
+            payload = _restore_payload(msg)
+            # 从 payload 提取触发信息
+            trigger_info = extract_trigger_info(payload, instance_id)
+            trigger_content = trigger_info.get("content") or content
+
+            if not trigger_content.strip():
+                _mark_msg_recognized(msg_id)
+                continue
+
+            db2 = SessionLocal()
+            try:
+                customer = resolve_customer_by_room(db2, room_id, instance_id)
+            finally:
+                db2.close()
+
+            if not customer:
+                logger.info("[启动补扫] 跳过@消息 id=%d: room=%s 无绑定客户", msg_id, room_id)
+                _mark_msg_recognized(msg_id)
+                continue
+
+            logger.info("[启动补扫] 重新触发@消息 id=%d room=%s content=%s", msg_id, room_id, trigger_content[:50])
+            asyncio.create_task(handle_at_order(
+                room_id=room_id,
+                sender_id=sender_id,
+                customer=dict(customer),
+                trigger_msg_id=msg_id,
+                instance_id=instance_id,
+                trigger_content=trigger_content,
+            ))
+    else:
+        logger.info("[启动补扫] 没有未识别的 @bot 消息")

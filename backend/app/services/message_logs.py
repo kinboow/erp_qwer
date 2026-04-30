@@ -1,4 +1,5 @@
 import json
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
@@ -23,6 +24,7 @@ def ensure_message_logs_table(db: Session):
     db.execute(text(
         "CREATE TABLE IF NOT EXISTS message_logs ("
         "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
+        "msg_uid VARCHAR(36) NOT NULL DEFAULT '', "
         "source VARCHAR(50) NOT NULL DEFAULT 'http_callback', "
         "instance_id VARCHAR(100) DEFAULT '', "
         "room_id VARCHAR(100) DEFAULT '', "
@@ -32,7 +34,10 @@ def ensure_message_logs_table(db: Session):
         "message_type VARCHAR(50) DEFAULT '', "
         "content_preview TEXT NULL, "
         "payload_json LONGTEXT NULL, "
+        "ai_recognized TINYINT NOT NULL DEFAULT 0, "
+        "is_at_bot TINYINT NOT NULL DEFAULT 0, "
         "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+        "UNIQUE INDEX idx_msg_uid (msg_uid), "
         "INDEX idx_source (source), "
         "INDEX idx_instance_id (instance_id), "
         "INDEX idx_room_id (room_id), "
@@ -40,6 +45,17 @@ def ensure_message_logs_table(db: Session):
         "INDEX idx_created_at (created_at)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     ))
+    # 兼容已有表：补充缺失字段
+    for col_sql in (
+        "ALTER TABLE message_logs ADD COLUMN msg_uid VARCHAR(36) NOT NULL DEFAULT '' AFTER id",
+        "ALTER TABLE message_logs ADD UNIQUE INDEX idx_msg_uid (msg_uid)",
+        "ALTER TABLE message_logs ADD COLUMN ai_recognized TINYINT NOT NULL DEFAULT 0 AFTER payload_json",
+        "ALTER TABLE message_logs ADD COLUMN is_at_bot TINYINT NOT NULL DEFAULT 0 AFTER ai_recognized",
+    ):
+        try:
+            db.execute(text(col_sql))
+        except Exception:
+            pass
     db.commit()
 
 
@@ -172,12 +188,13 @@ def _extract_log_item(payload: Any, source: str, instance_id: Optional[str] = No
 def record_message_log(db: Session, payload: Any, *, source: str, instance_id: Optional[str] = None) -> dict[str, Any]:
     ensure_message_logs_table(db)
     item = _extract_log_item(payload, source, instance_id)
+    item["msg_uid"] = str(uuid.uuid4())
     result = db.execute(
         text(
             "INSERT INTO message_logs ("
-            "source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json"
+            "msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json"
             ") VALUES ("
-            ":source, :instance_id, :room_id, :room_name, :sender_id, :sender_name, :message_type, :content_preview, :payload_json"
+            ":msg_uid, :source, :instance_id, :room_id, :room_name, :sender_id, :sender_name, :message_type, :content_preview, :payload_json"
             ")"
         ),
         item,
@@ -193,6 +210,50 @@ def record_message_log_background(payload: Any, *, source: str, instance_id: Opt
         record_message_log(db, payload, source=source, instance_id=instance_id)
     finally:
         db.close()
+
+
+def mark_ai_recognized(db: Session, msg_log_id: int, recognized: bool = True) -> None:
+    """标记消息已被 AI 识别处理"""
+    try:
+        db.execute(
+            text("UPDATE message_logs SET ai_recognized = :val WHERE id = :id"),
+            {"val": 1 if recognized else 0, "id": msg_log_id},
+        )
+        db.commit()
+    except Exception:
+        pass
+
+
+def get_unrecognized_media_messages(db: Session, limit: int = 15) -> list[dict[str, Any]]:
+    """获取最近 N 条未被 AI 识别的图片/文件消息，用于启动时补扫。"""
+    ensure_message_logs_table(db)
+    rows = db.execute(
+        text(
+            "SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, "
+            "message_type, content_preview, payload_json, ai_recognized, created_at "
+            "FROM message_logs "
+            "WHERE message_type IN ('image', 'file') AND ai_recognized = 0 "
+            "ORDER BY id DESC LIMIT :limit"
+        ),
+        {"limit": limit},
+    ).mappings().all()
+    return [_fmt_row(r) for r in rows]
+
+
+def get_unrecognized_at_messages(db: Session, limit: int = 15) -> list[dict[str, Any]]:
+    """获取最近 N 条未被 AI 识别的 @bot 消息，用于启动时补扫。"""
+    ensure_message_logs_table(db)
+    rows = db.execute(
+        text(
+            "SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, "
+            "message_type, content_preview, payload_json, ai_recognized, is_at_bot, created_at "
+            "FROM message_logs "
+            "WHERE is_at_bot = 1 AND ai_recognized = 0 "
+            "ORDER BY id DESC LIMIT :limit"
+        ),
+        {"limit": limit},
+    ).mappings().all()
+    return [_fmt_row(r) for r in rows]
 
 
 def list_message_logs(
@@ -226,7 +287,7 @@ def list_message_logs(
         params["end_date"] = f"{end_date} 23:59:59"
     where_sql = " AND ".join(conditions)
     rows = db.execute(
-        text(f"SELECT id, source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json, created_at FROM message_logs WHERE {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+        text(f"SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json, ai_recognized, is_at_bot, created_at FROM message_logs WHERE {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
         params,
     ).mappings().all()
     count_params = {key: value for key, value in params.items() if key not in {"limit", "offset"}}

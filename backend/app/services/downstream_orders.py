@@ -603,6 +603,60 @@ def query_product_context_for_nos(db: Session, product_nos: list[str]) -> str:
     return "\n".join(lines)
 
 
+def query_product_context_structured(db: Session, product_nos: list[str]) -> dict[str, Any]:
+    """根据款号列表查询产品表，返回结构化的可选尺码、颜色和款号映射。
+
+    返回:
+        {
+            "sizes": ["M", "L", "XL", ...],
+            "colors": ["黑色", "白色", ...],
+            "mappings": {"原始款号": "目标款号", ...},
+        }
+    """
+    from app.services.erp_sync import ensure_tables
+    ensure_tables(db)
+
+    all_sizes: list[str] = []
+    all_colors: list[str] = []
+    seen_sizes: set[str] = set()
+    seen_colors: set[str] = set()
+
+    for pno in (product_nos or []):
+        resolved_pno = _resolve_product_no_for_context(db, pno)
+        product_row = db.execute(
+            text("SELECT color, spec FROM erp_products WHERE product_no = :pno LIMIT 1"),
+            {"pno": resolved_pno},
+        ).mappings().first()
+        if not product_row:
+            continue
+        for c in (product_row["color"] or "").split(","):
+            c = c.strip()
+            if c and c not in seen_colors:
+                seen_colors.add(c)
+                all_colors.append(c)
+        for s in (product_row["spec"] or "").split(","):
+            s = s.strip()
+            if s and s not in seen_sizes:
+                seen_sizes.add(s)
+                all_sizes.append(s)
+
+    # 款号映射：alias_name（图片中原始款号） → product_no（目标款号）
+    mappings: dict[str, str] = {}
+    try:
+        rows = db.execute(
+            text("SELECT product_no, alias_name FROM product_name_mappings ORDER BY product_no"),
+        ).mappings().all()
+        for r in rows:
+            alias = (r["alias_name"] or "").strip()
+            target = (r["product_no"] or "").strip()
+            if alias and target:
+                mappings[alias] = target
+    except Exception:
+        pass
+
+    return {"sizes": all_sizes, "colors": all_colors, "mappings": mappings}
+
+
 def _normalize_discount(value: Any) -> int:
     try:
         number = float(value)
@@ -826,20 +880,30 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
             text_content = row.get("content_text") or row.get("attachment_name") or row.get("room_name") or ""
             context_messages.append({"type": "text", "content": text_content})
 
-        # === 步骤 1：智能体 A — 提取款号 ===
+        # === 步骤 1：智能体 A — 提取款号 + 判断旋转角度 ===
         logger.info("[AI Parse] review=%d 步骤1: 提取款号...", review_id)
-        product_nos = await ai_order_parser.extract_product_nos(context_messages, db=db)
-        logger.info("[AI Parse] review=%d 提取到款号: %s", review_id, product_nos)
+        extract_result = await ai_order_parser.extract_product_nos(context_messages, db=db)
+        product_nos = extract_result.get("product_nos") or []
+        rotation_angle = extract_result.get("rotation_angle") or 0
+        logger.info("[AI Parse] review=%d 提取到款号: %s rotation=%d°", review_id, product_nos, rotation_angle)
 
-        # === 步骤 2：查询产品表可选颜色/尺码 ===
-        product_context = await run_in_threadpool(query_product_context_for_nos, db, product_nos) if product_nos else ""
-        logger.info("[AI Parse] review=%d 步骤2: 产品上下文: %s", review_id, product_context[:200])
+        # === 步骤 1.5：根据 AI 判断的角度旋转图片 ===
+        if rotation_angle and rotation_angle != 0:
+            from app.services.ai_order_parser import rotate_images_in_messages
+            context_messages = rotate_images_in_messages(context_messages, rotation_angle)
+            logger.info("[AI Parse] review=%d 图片已旋转 %d°", review_id, rotation_angle)
+
+        # === 步骤 2：查询产品表可选颜色/尺码/映射 ===
+        context_data = await run_in_threadpool(query_product_context_structured, db, product_nos) if product_nos else {}
+        logger.info("[AI Parse] review=%d 步骤2: sizes=%s colors=%d mappings=%d",
+                     review_id, context_data.get("sizes"), len(context_data.get("colors", [])),
+                     len(context_data.get("mappings", {})))
 
         # === 步骤 3：智能体 B — 带上下文解析完整订单 ===
         logger.info("[AI Parse] review=%d 步骤3: 带上下文解析订单...", review_id)
-        if product_context:
+        if context_data and (context_data.get("sizes") or context_data.get("colors")):
             parsed = await ai_order_parser.parse_with_product_context(
-                context_messages, product_context, customer_hint=customer_hint, db=db,
+                context_messages, context_data, customer_hint=customer_hint, db=db,
             )
         else:
             # 没有提取到款号时，回退到原始解析

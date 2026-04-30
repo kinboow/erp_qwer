@@ -221,12 +221,18 @@ class AIOrderParser:
         api_key = cfg["api_key"]
         temperature = cfg.get("temperature", 0.1)
 
+        provider = cfg.get("provider", "qwen")
         request_body: dict[str, Any] = {
             "model": model,
             "temperature": temperature,
-            "response_format": {"type": "json_object"},
             "messages": messages,
         }
+        # response_format json_object 仅部分供应商/模型支持
+        if provider == "qwen":
+            request_body["response_format"] = {"type": "json_object"}
+        # 字节跳动豆包模型开启深度思考
+        if provider == "bytedance":
+            request_body["thinking"] = {"type": "enabled"}
 
         headers: dict[str, str] = {
             "Authorization": f"Bearer {api_key}",
@@ -238,14 +244,21 @@ class AIOrderParser:
         # 构建请求摘要
         req_summary = self._build_request_summary(messages)
 
+        # 深度思考模型需要更长超时
+        timeout = 240 if provider == "bytedance" else 180
+
         t0 = time.time()
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 response = await client.post(
                     f"{base_url}/chat/completions",
                     headers=headers,
                     json=request_body,
                 )
+            if response.status_code >= 400:
+                error_body = response.text
+                logger.error("AI API 请求失败 [%s %s]: status=%d body=%s",
+                             provider, model, response.status_code, error_body[:1000])
             response.raise_for_status()
             payload = response.json()
             duration_ms = int((time.time() - t0) * 1000)
@@ -278,7 +291,7 @@ class AIOrderParser:
                     caller=caller or "ai_order_parser",
                     duration_ms=duration_ms,
                     status="error",
-                    error_message=str(exc)[:2000],
+                    error_message=f"{type(exc).__name__}: {exc}"[:2000],
                     request_summary=req_summary,
                 )
             raise
@@ -486,16 +499,16 @@ class AIOrderParser:
         )
 
     # ------------------------------------------------------------------
-    # 智能体 A：款号提取 — 从内容中提取所有纯数字款号
+    # 智能体 A：款号提取 + 图片旋转角度判断
     # ------------------------------------------------------------------
     async def extract_product_nos(
         self,
         context_messages: list[dict[str, Any]],
         db: Optional[Session] = None,
-    ) -> list[str]:
-        """智能体A: 从消息内容中提取所有纯数字款号。
+    ) -> dict[str, Any]:
+        """智能体A: 从消息内容中提取所有纯数字款号，并判断图片旋转角度。
 
-        返回: ["1234", "5678", ...]
+        返回: {"product_nos": ["1234", "5678"], "rotation_angle": 0}
         """
         cfg = self._load_config(db)
         has_image = any(m.get("type") == "image" for m in context_messages)
@@ -503,7 +516,7 @@ class AIOrderParser:
 
         user_parts = self._build_multimodal_parts(context_messages)
         if not user_parts:
-            return []
+            return {"product_nos": [], "rotation_angle": 0}
 
         user_content: Any = user_parts if len(user_parts) > 1 else user_parts[0].get("text", "")
 
@@ -518,19 +531,27 @@ class AIOrderParser:
                 caller="extract_product_nos",
             )
             nos = result.get("product_nos") or []
-            # 过滤：只保留纯数字
-            return [str(n).strip() for n in nos if str(n).strip().isdigit()]
+            filtered_nos = [str(n).strip() for n in nos if str(n).strip().isdigit()]
+            # 旋转角度：正数=顺时针，负数=逆时针，只接受 ±90/±180/±270
+            try:
+                angle = int(result.get("rotation_angle") or 0)
+            except (ValueError, TypeError):
+                angle = 0
+            if angle not in (0, 90, -90, 180, -180, 270, -270):
+                angle = 0
+            return {"product_nos": filtered_nos, "rotation_angle": angle}
         except Exception as exc:
             logger.warning("智能体A(款号提取)失败: %s", exc)
-            return []
+            return {"product_nos": [], "rotation_angle": 0}
 
     async def extract_product_nos_from_text(
         self, text_content: str, db: Optional[Session] = None,
     ) -> list[str]:
         """从纯文本中提取款号的便捷方法"""
-        return await self.extract_product_nos(
+        result = await self.extract_product_nos(
             [{"type": "text", "content": text_content}], db=db,
         )
+        return result.get("product_nos") or []
 
     async def extract_product_nos_from_image(
         self, image_base64: str, mime_type: str = "image/png",
@@ -540,16 +561,18 @@ class AIOrderParser:
         msgs: list[dict[str, Any]] = [{"type": "image", "base64": image_base64, "mime": mime_type}]
         if extra_text:
             msgs.insert(0, {"type": "text", "content": extra_text})
-        return await self.extract_product_nos(msgs, db=db)
+        result = await self.extract_product_nos(msgs, db=db)
+        return result.get("product_nos") or []
 
     async def extract_product_nos_from_excel(
         self, file_name: str, text_summary: str, db: Optional[Session] = None,
     ) -> list[str]:
         """从 Excel 摘要中提取款号的便捷方法"""
-        return await self.extract_product_nos(
+        result = await self.extract_product_nos(
             [{"type": "text", "content": f"文件名: {file_name}\n表格摘要:\n{text_summary}"}],
             db=db,
         )
+        return result.get("product_nos") or []
 
     # ------------------------------------------------------------------
     # 智能体 B：带库存上下文的详细解析
@@ -557,7 +580,7 @@ class AIOrderParser:
     async def parse_with_product_context(
         self,
         context_messages: list[dict[str, Any]],
-        product_context: str,
+        product_context_data: dict[str, Any],
         customer_hint: str = "",
         db: Optional[Session] = None,
     ) -> dict[str, Any]:
@@ -565,134 +588,249 @@ class AIOrderParser:
 
         Args:
             context_messages: 统一消息列表
-            product_context: 款号→可选颜色/尺码的文本描述
+            product_context_data: {"sizes": [...], "colors": [...], "mappings": {...}}
             customer_hint: 客户名称提示
         """
         cfg = self._load_config(db)
         has_image = any(m.get("type") == "image" for m in context_messages)
         model = cfg["vision_model"] if has_image else cfg["model"]
 
-        user_parts: list[dict[str, Any]] = []
-        user_parts.append({
-            "type": "text",
-            "text": (
-                f"客户提示: {customer_hint or '无'}\n\n"
-                f"=== 产品表中各款号可选颜色和尺码 ===\n{product_context}\n\n"
-                f"请严格根据以上可选颜色和尺码信息，解析以下客户消息中的完整订单："
-            ),
-        })
+        # 动态构建系统提示词
+        system_prompt = build_context_parser_prompt(
+            sizes=product_context_data.get("sizes") or [],
+            colors=product_context_data.get("colors") or [],
+            mappings=product_context_data.get("mappings") or {},
+        )
 
-        for idx, msg in enumerate(context_messages, 1):
-            msg_type = msg.get("type", "text")
-            sender = msg.get("sender_name") or ""
-            sender_tag = f"({sender})" if sender else ""
-            if msg_type == "text":
-                user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} {msg.get('content', '')}"})
-            elif msg_type == "image":
+        # 构建用户消息：仅 "解析内容" + 图片，不附加多余文本
+        user_parts: list[dict[str, Any]] = [{"type": "text", "text": "解析内容"}]
+        for msg in context_messages:
+            if msg.get("type") == "image":
                 if msg.get("oss_url"):
-                    user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 图片:"})
                     user_parts.append({"type": "image_url", "image_url": {"url": msg["oss_url"]}})
                 elif msg.get("base64"):
                     mime = msg.get("mime") or "image/png"
-                    user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 图片:"})
                     user_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
-            elif msg_type == "file":
-                summary = msg.get("excel_summary") or msg.get("content") or ""
-                fname = msg.get("file_name") or "附件"
-                user_parts.append({"type": "text", "text": f"[消息{idx}]{sender_tag} 文件 {fname}:\n{summary}"})
+        if len(user_parts) == 1 and not any(m.get("type") == "image" for m in context_messages):
+            return {"style_code": None, "original_style_code": None, "inventory": [], "remarks": "无图片内容"}
 
-        return await self._chat(
+        user_content: Any = user_parts
+
+        raw_result = await self._chat(
             model,
             [
-                {"role": "system", "content": CONTEXT_PARSER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_parts},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
             ],
             db=db,
             caller="parse_with_context",
         )
+        return convert_inventory_result_to_standard(raw_result)
 
 
 # ==========================================================================
 # 智能体 A — 款号提取 Agent（从内容中提取所有纯数字款号）
 # ==========================================================================
 PRODUCT_NO_EXTRACT_SYSTEM_PROMPT = """你是一个服装行业款号提取助手。
-你的唯一任务是从客户发来的内容（文字、图片、表格）中提取所有出现的款号（货号）。
+你有两个任务：
 
-重要规则：
+任务1：从客户发来的内容（文字、图片、表格）中提取所有出现的款号（货号）。
+
+任务2：如果输入包含图片，判断图片中的纸张/内容需要顺时针旋转多少度才能变成正向可读（文字从左到右、从上到下）。
+
+款号提取规则：
 1. 款号只包含数字，不包含英文字母。例如：1234、56789、001122
 2. 不要把价格、数量、尺码、日期等数字误认为款号
 3. 如果内容中出现类似"款号"、"货号"、"款"等关键词后面的数字，优先作为款号
 4. 同一个款号只输出一次，去重
 5. 如果完全找不到款号，返回空数组
+6. 图片中可能包含多个供应商/客户的款号，全部提取出来，后续会由系统筛选
+
+图片旋转判断规则：
+1. 观察图片中手写文字/表格的朝向
+2. 判断需要旋转多少度才能让内容变成正向可读（文字从左到右、从上到下）
+3. rotation_angle 用正负数表示方向：正数=顺时针旋转，负数=逆时针旋转
+4. 只能是以下值之一：0, 90, -90, 180, -180, 270, -270
+5. 0 表示图片已经是正的，不需要旋转
+6. 例如：文字头朝左 → 需要顺时针旋转90度 → 填 90；文字头朝右 → 需要逆时针旋转90度 → 填 -90
+7. 如果没有图片或无法判断，填 0
 
 严格只返回 JSON，不要返回 markdown：
 {
   "product_nos": ["1234", "5678"],
-  "reason": "简短说明提取依据"
+  "rotation_angle": 0,
+  "reason": "简短说明提取依据和旋转判断"
 }
 """
 
 # ==========================================================================
-# 智能体 B — 带库存上下文的详细解析 Agent
+# 智能体 B — 带库存上下文的详细解析 Agent（动态提示词模板）
 # ==========================================================================
-CONTEXT_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。现在已经知道客户下单涉及的款号，以及每个款号在产品表中的可选颜色和可选尺码。
-请根据这些已知信息，精确解析客户的完整订单。
+_CONTEXT_PARSER_PROMPT_TEMPLATE = """【⚠️ 固定配置】
+1. 可选尺码列表：{sizes_list}
+2. 可选颜色列表：{colors_list}
+3. 款号映射关系：{style_mapping}
 
-【核心原则 — 永远从可选项里选，不要编造，不要说找不到】
-你输出的每一个颜色和尺码，都【必须】是提供的可选项之一，一字不差地复制可选项的文字。
+【核心执行规则（AI必须100%严格遵守，不得修改）】
+1. 图片解析核心要求
+你是专业的手写服装库存数据解析工具，仅识别图片中与服装款号、颜色、尺码、对应数量相关的手写内容，其余无关信息全部忽略。针对手写内容，优先做语义精准匹配，所有识别结果必须严格限定在上方填写的可选尺码、可选颜色范围内，超出范围的内容直接丢弃，绝对禁止编造、臆造任何不在可选列表里的颜色、尺码、数量。
 
-【颜色匹配规则】
-- 客户写的颜色不需要和可选项一模一样，只要意思相近、表达的是同一种颜色就匹配上。
-- 近似匹配示例：
-  "绿"或"绿色" → 可选项里含"绿"字的，如"军绿"、"果绿"、"墨绿"，选最合理的
-  "白" → "米白"、"乳白"、"本白"等，选最合理的
-  "黑" → "黑色"
-  "灰" → "浅灰"、"深灰"、"烟灰"等，选最合理的
-  "粉" → "粉色"、"粉红"等
-  "蓝" → "天蓝"、"深蓝"、"宝蓝"等
-- 图片中的手写体模糊看不清时，根据笔画形状和可选颜色列表推测最像的那个。
-- 【禁止】输出不在可选项列表中的颜色名称，【禁止】说"找不到匹配"。永远选一个最接近的。
+2. 多颜色多尺码适配规则
+- 无论图片中有多少个颜色、单个颜色对应多少个尺码，都必须先匹配【可选颜色列表】中的标准颜色名称，手写简写/俗称必须对应到列表内的标准名（如手写"黑"匹配列表内的"黑色"，手写"茶"匹配列表内的"茶色"），无法匹配的颜色直接丢弃。
+- 每个匹配到的有效颜色，必须单独生成一条库存记录；单条颜色记录下的size_stock对象，必须完整包含【可选尺码列表】里的**全部尺码**，识别到有效数量的填对应阿拉伯数字，无标注、无法识别、未匹配到的尺码，统一填0，不允许遗漏任何可选尺码，也不允许出现列表外的尺码。
 
-【尺码匹配规则】
-- 同样做近似匹配："大"→"XL"，"中"→"M"，"小"→"S"，"加大"→"2XL"等。
-- 手写看不清时，根据可选尺码推测最接近的。
-- 如果客户写的尺码确实无法匹配到可选尺码中的任何一个（例如可选只有 S/M/L 但客户写了 "4XL"），则：
-  1. 仍然正常输出该行数据，size 字段填写客户原始写的尺码文字。
-  2. 在该 item 的 remark 中注明"尺码XXX不在可选范围内，请联系客服确认"。
-  3. 同时在 uncertainties 数组中添加一条描述，例如"款号XXXX的尺码XXX不在可选范围[S,M,L,XL]内"。
-- 只有确实完全无法匹配时才走上述流程；如果能通过近似匹配找到对应尺码，则正常匹配，不报错。
+3. 款号映射转换规则（极其重要）
+- 先识别图片中的原始手写款号，再严格按照【款号映射关系】做一对一转换，原始款号完全匹配映射键的，输出对应目标款号。
+- 若识别到的原始款号不在映射关系中，说明该款号不属于当前供应商，必须完全忽略该款号及其对应的所有颜色、尺码、数量信息，不要输出到结果中。
+- 图片中可能同时包含多个供应商的款号信息，你只需要解析在【款号映射关系】中能匹配到的款号，其余全部忽略。
+- 如果图片中所有款号都不在映射关系中，inventory返回空数组，remarks标注“图片中的款号均不在当前供应商的款号映射中”。
 
-【其他规则】
-- 如果某个款号不在提供的产品信息中，仍然正常解析。
-- 数量必须准确，不要编造。
-- 款号只包含数字，不包含英文字母。
-- uncertainties 在以下情况使用：(1) 完全无法辨认内容；(2) 客户尺码不在可选范围内。正常的近似匹配不需要加 uncertainty。
+4. 异常处理规则
+- 手写内容模糊、涂改、无法辨认的数量，统一填0。
+- 识别到的颜色/尺码无法匹配到可选列表的，直接丢弃该条内容，不纳入最终结果。
+- 未识别到任何有效库存数据的，inventory为空数组，remarks标注"未识别到有效库存数据"。
 
-严格只返回 JSON，不要返回 markdown。
-返回结构：
-{
-  "customer_name": "",
-  "contact_person": "",
-  "order_date": "YYYY-MM-DD",
-  "remark": "",
-  "items": [
-    {
-      "product_no": "",
-      "product_name": "",
-      "color": "",
-      "brand": "",
-      "unit": "件",
-      "price": 0,
-      "discount": 1,
-      "sizes": [
-        {"size": "S", "qty": 1}
-      ],
-      "remark": ""
+5. 输出格式铁则
+必须只输出纯JSON字符串，不允许添加任何额外的文字、解释、注释、markdown格式、符号，不得增减字段、修改字段名、变更结构层级，严格遵循下方固定结构输出。
+
+【固定输出JSON结构】
+{size_stock_template}
+"""
+
+
+def build_context_parser_prompt(
+    sizes: list[str],
+    colors: list[str],
+    mappings: dict[str, str],
+) -> str:
+    """根据实际产品数据构建智能体 B 的系统提示词。"""
+    sizes_str = json.dumps(sizes, ensure_ascii=False) if sizes else '["暂无可选尺码"]'
+    colors_str = json.dumps(colors, ensure_ascii=False) if colors else '["暂无可选颜色"]'
+    mapping_str = json.dumps(mappings, ensure_ascii=False) if mappings else '{}'
+
+    # 动态构建 size_stock 示例：所有可选尺码都出现在模板中
+    if sizes:
+        size_stock_entries = ", ".join(f'"{s}": "数量或0"' for s in sizes)
+        size_stock_example = "{ " + size_stock_entries + " }"
+    else:
+        size_stock_example = '{ "尺码名": "数量或0" }'
+
+    template_json = (
+        "{\n"
+        '  "style_code": "转换后的目标款号，无匹配填null",\n'
+        '  "original_style_code": "图片中识别到的原始手写款号，未识别填null",\n'
+        '  "inventory": [\n'
+        "    {\n"
+        '      "color": "匹配到的可选颜色标准名称",\n'
+        f'      "size_stock": {size_stock_example}\n'
+        "    }\n"
+        "  ],\n"
+        '  "remarks": "异常说明，无异常填无"\n'
+        "}"
+    )
+
+    return _CONTEXT_PARSER_PROMPT_TEMPLATE.format(
+        sizes_list=sizes_str,
+        colors_list=colors_str,
+        style_mapping=mapping_str,
+        size_stock_template=template_json,
+    )
+
+
+def convert_inventory_result_to_standard(ai_result: dict[str, Any]) -> dict[str, Any]:
+    """将智能体 B 新格式（style_code + inventory）转换为下游兼容的标准格式。
+
+    新格式:
+        {"style_code": "...", "original_style_code": "...", "inventory": [...], "remarks": "..."}
+    标准格式:
+        {"items": [{"product_no": "...", "color": "...", "sizes": [...]}], ...}
+    """
+    # 如果已经是旧格式（包含 items 字段），直接返回
+    if "items" in ai_result:
+        return ai_result
+
+    style_code = ai_result.get("style_code") or ""
+    original = ai_result.get("original_style_code") or ""
+    product_no = style_code or original or ""
+
+    items: list[dict[str, Any]] = []
+    for inv in ai_result.get("inventory") or []:
+        color = str(inv.get("color") or "").strip()
+        size_stock = inv.get("size_stock") or {}
+        sizes = []
+        for size_name, qty_val in size_stock.items():
+            try:
+                qty = int(qty_val)
+            except (ValueError, TypeError):
+                qty = 0
+            sizes.append({"size": str(size_name).strip(), "qty": qty})
+        if sizes and color:
+            items.append({
+                "product_no": product_no,
+                "product_name": "",
+                "color": color,
+                "brand": "",
+                "unit": "件",
+                "price": 0,
+                "discount": 1,
+                "sizes": sizes,
+                "remark": "",
+            })
+
+    remarks = str(ai_result.get("remarks") or "").strip()
+    return {
+        "customer_name": "",
+        "contact_person": "",
+        "order_date": "",
+        "remark": remarks if remarks and remarks != "无" else "",
+        "items": items,
+        "uncertainties": [],
     }
-  ],
-  "uncertainties": []
-}
-"""
+
+
+def rotate_images_in_messages(
+    context_messages: list[dict[str, Any]],
+    angle: int,
+) -> list[dict[str, Any]]:
+    """将消息列表中的所有图片按指定角度旋转。
+
+    angle: 正数=顺时针，负数=逆时针（如 90=顺时针90°, -90=逆时针90°）
+    为 0 时直接返回原列表。仅处理包含 base64 数据的图片消息。
+    """
+    if angle == 0:
+        return context_messages
+
+    import io
+    from PIL import Image
+
+    # PIL 的 rotate() 正数=逆时针，所以取反：
+    # AI 输出 90（顺时针90°）→ PIL rotate(-90) = 顺时针90°
+    # AI 输出 -90（逆时针90°）→ PIL rotate(90) = 逆时针90°
+    pil_angle = -angle
+
+    rotated: list[dict[str, Any]] = []
+    for msg in context_messages:
+        if msg.get("type") != "image" or not msg.get("base64"):
+            rotated.append(msg)
+            continue
+        try:
+            raw = base64.b64decode(msg["base64"])
+            img = Image.open(io.BytesIO(raw))
+            img_rotated = img.rotate(pil_angle, expand=True)
+            buf = io.BytesIO()
+            fmt = "PNG" if (msg.get("mime") or "").endswith("png") else "JPEG"
+            img_rotated.save(buf, format=fmt)
+            new_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            new_msg = dict(msg)
+            new_msg["base64"] = new_b64
+            # 清除 oss_url，旋转后的图片需要重新上传
+            new_msg.pop("oss_url", None)
+            rotated.append(new_msg)
+            logger.info("图片旋转: 顺时针 %d° 完成", angle)
+        except Exception as exc:
+            logger.warning("图片旋转失败 (angle=%d): %s", angle, exc)
+            rotated.append(msg)
+    return rotated
 
 
 ai_order_parser = AIOrderParser()

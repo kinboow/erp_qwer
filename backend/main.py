@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import httpx
@@ -143,6 +144,11 @@ async def startup_event():
     # 启动日志清理定时任务（15天）
     from app.services.log_cleanup import start_log_cleanup
     start_log_cleanup()
+
+    # 补扫未识别的图片/文件消息
+    from app.services.at_order_handler import rescan_unrecognized_messages
+    asyncio.create_task(rescan_unrecognized_messages())
+    logger.info("[Startup] 未识别消息补扫任务已启动")
 
 
 @app.on_event("shutdown")

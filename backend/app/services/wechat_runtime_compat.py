@@ -80,7 +80,16 @@ async def ingest_runtime_message(
 
     # 如果调用方未传 wxid，尝试从 payload 自动提取
     effective_wxid = _safe_text(wxid) or _extract_wxid_from_payload(normalized_payload)
-    resolved_instance_id = _safe_text(instance_id) or resolve_instance_id_by_wxid(db, effective_wxid) or ""
+
+    # 解析 instance_id：优先用传入参数，再从 payload body 取，最后根据 wxid 查 DB
+    _raw_instance_id = _safe_text(instance_id) or _safe_text(normalized_payload.get("instanceId")) or ""
+    # 如果传入的 instance_id 看起来是 wxid（长度 > 10 的纯数字），需要查 DB 转成实际的 DB id
+    if _raw_instance_id and len(_raw_instance_id) > 10 and _raw_instance_id.isdigit():
+        resolved_instance_id = resolve_instance_id_by_wxid(db, _raw_instance_id) or _raw_instance_id
+    elif _raw_instance_id:
+        resolved_instance_id = _raw_instance_id
+    else:
+        resolved_instance_id = resolve_instance_id_by_wxid(db, effective_wxid) or ""
 
     if resolved_instance_id and not normalized_payload.get("instanceId"):
         normalized_payload["instanceId"] = resolved_instance_id
@@ -139,6 +148,14 @@ async def ingest_runtime_message(
     try:
         bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
         if not sender_is_employee and (bot_wxid or resolved_instance_id) and is_at_bot(normalized_payload, bot_wxid, resolved_instance_id):
+            # 标记此消息为 @bot 消息
+            _log_id = (log_result or {}).get("id")
+            if _log_id:
+                try:
+                    db.execute(text("UPDATE message_logs SET is_at_bot = 1 WHERE id = :id"), {"id": _log_id})
+                    db.commit()
+                except Exception:
+                    pass
             trigger_info = extract_trigger_info(normalized_payload, resolved_instance_id)
             trigger_room_id = trigger_info.get("room_id") or ""
             trigger_sender_id = trigger_info.get("sender_id") or ""

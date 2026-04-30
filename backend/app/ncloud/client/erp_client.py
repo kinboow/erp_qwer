@@ -54,7 +54,7 @@ class ERPClient:
                 url,
                 headers=FORM_HEADERS,
                 data=data,
-                timeout=30,
+                timeout=300,
             )
         except httpx.RequestError as exc:
             raise ERPUpstreamError(f"ERP request failed: {exc}") from exc
@@ -68,7 +68,7 @@ class ERPClient:
                     url,
                     headers=FORM_HEADERS,
                     data=data,
-                    timeout=30,
+                    timeout=300,
                 )
             except httpx.RequestError as exc:
                 raise ERPUpstreamError(f"ERP request failed after re-login: {exc}") from exc
