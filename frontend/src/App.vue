@@ -5,7 +5,57 @@
 </template>
 
 <script setup>
+import { onMounted, onUnmounted } from 'vue'
 import { ElConfigProvider } from 'element-plus'
+
+/* 全局：监听 tooltip 弹出后修正位置，确保不超出视口 */
+let _tooltipObserver = null
+const _clamping = new WeakSet()
+onMounted(() => {
+  const pad = 8
+  function clampTooltip(el) {
+    if (!el || !el.classList.contains('is-dark') || _clamping.has(el)) return
+    _clamping.add(el)
+    requestAnimationFrame(() => {
+      const rect = el.getBoundingClientRect()
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      let dx = 0, dy = 0
+      if (rect.right > vw - pad) dx = vw - pad - rect.right
+      if (rect.left < pad) dx = pad - rect.left
+      if (rect.bottom > vh - pad) dy = vh - pad - rect.bottom
+      if (rect.top < pad) dy = pad - rect.top
+      if (dx || dy) {
+        const cur = window.getComputedStyle(el).transform
+        const m = cur && cur !== 'none' ? cur : 'matrix(1,0,0,1,0,0)'
+        const match = m.match(/matrix.*\((.+)\)/)
+        if (match) {
+          const vals = match[1].split(',').map(Number)
+          vals[4] = (vals[4] || 0) + dx
+          vals[5] = (vals[5] || 0) + dy
+          el.style.transform = `matrix(${vals.join(',')})`
+        }
+      }
+      setTimeout(() => _clamping.delete(el), 50)
+    })
+  }
+  _tooltipObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node.nodeType === 1 && node.classList && node.classList.contains('el-popper')) {
+          clampTooltip(node)
+        }
+      }
+      if (m.type === 'attributes' && m.target.classList && m.target.classList.contains('el-popper') && m.target.classList.contains('is-dark')) {
+        clampTooltip(m.target)
+      }
+    }
+  })
+  _tooltipObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-popper-placement'] })
+})
+onUnmounted(() => {
+  if (_tooltipObserver) _tooltipObserver.disconnect()
+})
 </script>
 
 <style>
@@ -102,20 +152,33 @@ html, body, #app {
   box-shadow: var(--lark-shadow-hover);
 }
 
-/* 表格溢出提示框：限制宽度，自动换行，超长可滚动（隐藏滚动条） */
+/* 全局表格单元格：超出省略 */
+.el-table .el-table__cell .cell {
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+}
+
+/* 表格溢出提示框：自适应视口、换行、超长可滚动 */
 .el-popper.is-dark {
-  max-width: 480px !important;
+  max-width: min(480px, calc(100vw - 24px)) !important;
+  max-height: min(320px, calc(100vh - 40px)) !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
   white-space: pre-wrap !important;
   word-break: break-word !important;
   line-height: 1.6 !important;
+  scrollbar-width: thin !important;
+  scrollbar-color: rgba(255,255,255,0.35) transparent !important;
 }
-.el-popper.is-dark .el-tooltip__content {
-  max-height: 60vh !important;
-  overflow-y: auto !important;
-  scrollbar-width: none !important;
-  -ms-overflow-style: none !important;
+.el-popper.is-dark::-webkit-scrollbar {
+  width: 5px !important;
 }
-.el-popper.is-dark .el-tooltip__content::-webkit-scrollbar {
-  display: none !important;
+.el-popper.is-dark::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.35) !important;
+  border-radius: 3px !important;
+}
+.el-popper.is-dark::-webkit-scrollbar-track {
+  background: transparent !important;
 }
 </style>

@@ -57,18 +57,25 @@
             <el-tag v-if="row.is_current_year" type="success" size="small">是</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="310" fixed="right" align="center">
+        <el-table-column label="操作" width="230" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button type="primary" link size="small" @click="viewDetail(row)">查看详情</el-button>
-            <el-button type="primary" link size="small" @click="viewInventory(row)">查看库存</el-button>
-            <el-button type="warning" link size="small" @click="openMappingDialog(row)">
-              名称映射<el-badge v-if="row.mapping_count" :value="row.mapping_count" :max="99" class="mapping-badge" />
-            </el-button>
-            <el-button
-              :type="row.is_current_year ? 'info' : 'success'"
-              link size="small"
-              @click="toggleCurrentYear(row)"
-            >{{ row.is_current_year ? '取消本年款' : '设为本年款' }}</el-button>
+            <div class="action-row">
+              <el-button type="primary" link size="small" @click="viewDetail(row)">查看详情</el-button>
+              <el-button type="warning" link size="small" @click="openMappingDialog(row)">
+                名称映射<el-badge v-if="row.mapping_count" :value="row.mapping_count" :max="99" class="mapping-badge" />
+              </el-button>
+              <el-dropdown trigger="hover" @command="(cmd) => handleMoreCommand(cmd, row)">
+                <el-button type="info" link size="small">更多<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="inventory">查看库存</el-dropdown-item>
+                    <el-dropdown-item :command="row.is_current_year ? 'unsetYear' : 'setYear'">
+                      {{ row.is_current_year ? '取消本年款' : '设为本年款' }}
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -157,7 +164,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Search, Refresh } from '@element-plus/icons-vue'
+import { Search, Refresh, ArrowDown } from '@element-plus/icons-vue'
 import { getProducts, syncProducts, getNameMappings, addNameMapping, deleteNameMapping, setCurrentYear } from '@/api/products'
 import { useSyncStatus } from '@/composables/useSyncStatus'
 
@@ -290,8 +297,14 @@ async function handleDeleteMapping(id) {
   }
 }
 
-async function toggleCurrentYear(row) {
-  const newVal = !row.is_current_year
+function handleMoreCommand(cmd, row) {
+  if (cmd === 'inventory') viewInventory(row)
+  else if (cmd === 'setYear') toggleCurrentYear(row, true)
+  else if (cmd === 'unsetYear') toggleCurrentYear(row, false)
+}
+
+async function toggleCurrentYear(row, forceVal) {
+  const newVal = forceVal !== undefined ? forceVal : !row.is_current_year
   try {
     const res = await setCurrentYear(row.id, newVal)
     if (res.code === 200) {
@@ -445,9 +458,17 @@ onMounted(() => {
   align-items: center;
 }
 
+.action-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
 .mapping-badge {
-  margin-left: 4px;
-  vertical-align: middle;
+  margin-left: 2px;
+  vertical-align: super;
+  line-height: 1;
 }
 
 :deep(.mapping-badge .el-badge__content) {
@@ -456,4 +477,5 @@ onMounted(() => {
   line-height: 16px;
   padding: 0 4px;
 }
+
 </style>

@@ -603,6 +603,50 @@ def query_product_context_for_nos(db: Session, product_nos: list[str]) -> str:
     return "\n".join(lines)
 
 
+def query_current_year_catalog(db: Session) -> list[dict[str, str]]:
+    """查询所有本年产品库的产品号及其名称映射，供 AI 第一步款号匹配使用。
+
+    返回:
+        [
+            {"product_no": "1234", "product_name": "...", "aliases": ["别名1", "别名2"]},
+            ...
+        ]
+    """
+    from app.services.erp_sync import ensure_tables
+    ensure_tables(db)
+
+    rows = db.execute(
+        text("SELECT product_no, product_name FROM erp_products WHERE is_current_year = 1 ORDER BY product_no"),
+    ).mappings().all()
+
+    catalog: list[dict[str, Any]] = []
+    pno_set: set[str] = set()
+    for r in rows:
+        pno = (r["product_no"] or "").strip()
+        if not pno or pno in pno_set:
+            continue
+        pno_set.add(pno)
+        catalog.append({"product_no": pno, "product_name": (r["product_name"] or "").strip(), "aliases": []})
+
+    # 加载映射关系
+    try:
+        mapping_rows = db.execute(
+            text("SELECT product_no, alias_name FROM product_name_mappings ORDER BY product_no"),
+        ).mappings().all()
+        alias_map: dict[str, list[str]] = {}
+        for mr in mapping_rows:
+            target = (mr["product_no"] or "").strip()
+            alias = (mr["alias_name"] or "").strip()
+            if target and alias:
+                alias_map.setdefault(target, []).append(alias)
+        for item in catalog:
+            item["aliases"] = alias_map.get(item["product_no"], [])
+    except Exception:
+        pass
+
+    return catalog
+
+
 def query_product_context_structured(db: Session, product_nos: list[str]) -> dict[str, Any]:
     """根据款号列表查询产品表，返回结构化的可选尺码、颜色和款号映射。
 
@@ -880,9 +924,11 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
             text_content = row.get("content_text") or row.get("attachment_name") or row.get("room_name") or ""
             context_messages.append({"type": "text", "content": text_content})
 
-        # === 步骤 1：智能体 A — 提取款号 + 判断旋转角度 ===
-        logger.info("[AI Parse] review=%d 步骤1: 提取款号...", review_id)
-        extract_result = await ai_order_parser.extract_product_nos(context_messages, db=db)
+        # === 步骤 1：智能体 A — 从本年产品目录匹配款号 + 判断旋转角度 ===
+        logger.info("[AI Parse] review=%d 步骤1: 加载本年产品目录并匹配款号...", review_id)
+        catalog = query_current_year_catalog(db)
+        logger.info("[AI Parse] review=%d 本年产品目录: %d 个产品", review_id, len(catalog))
+        extract_result = await ai_order_parser.extract_product_nos(context_messages, db=db, catalog=catalog)
         product_nos = extract_result.get("product_nos") or []
         rotation_angle = extract_result.get("rotation_angle") or 0
         logger.info("[AI Parse] review=%d 提取到款号: %s rotation=%d°", review_id, product_nos, rotation_angle)

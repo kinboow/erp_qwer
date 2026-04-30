@@ -505,8 +505,13 @@ class AIOrderParser:
         self,
         context_messages: list[dict[str, Any]],
         db: Optional[Session] = None,
+        catalog: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
-        """智能体A: 从消息内容中提取所有纯数字款号，并判断图片旋转角度。
+        """智能体A: 从本年产品目录中匹配款号，并判断图片旋转角度。
+
+        Args:
+            catalog: 本年产品目录列表，由 query_current_year_catalog() 返回。
+                     如果为 None 则降级为无目录模式。
 
         返回: {"product_nos": ["1234", "5678"], "rotation_angle": 0}
         """
@@ -520,11 +525,18 @@ class AIOrderParser:
 
         user_content: Any = user_parts if len(user_parts) > 1 else user_parts[0].get("text", "")
 
+        # 根据是否有目录选择提示词
+        if catalog is not None:
+            catalog_text = _build_catalog_text(catalog)
+            system_prompt = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE.format(catalog_text=catalog_text)
+        else:
+            system_prompt = PRODUCT_NO_EXTRACT_SYSTEM_PROMPT
+
         try:
             result = await self._chat(
                 model,
                 [
-                    {"role": "system", "content": PRODUCT_NO_EXTRACT_SYSTEM_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 db=db,
@@ -629,22 +641,27 @@ class AIOrderParser:
 
 
 # ==========================================================================
-# 智能体 A — 款号提取 Agent（从内容中提取所有纯数字款号）
+# 智能体 A — 款号提取 Agent（从本年产品目录中匹配款号）
 # ==========================================================================
-PRODUCT_NO_EXTRACT_SYSTEM_PROMPT = """你是一个服装行业款号提取助手。
+_PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE = """你是一个服装行业款号匹配助手。
 你有两个任务：
 
-任务1：从客户发来的内容（文字、图片、表格）中提取所有出现的款号（货号）。
+任务1：从客户发来的内容（文字、图片、表格）中识别出提到的款号（货号），然后**严格从下方的【本年产品目录】中匹配**。
 
 任务2：如果输入包含图片，判断图片中的纸张/内容需要顺时针旋转多少度才能变成正向可读（文字从左到右、从上到下）。
 
-款号提取规则：
-1. 款号只包含数字，不包含英文字母。例如：1234、56789、001122
-2. 不要把价格、数量、尺码、日期等数字误认为款号
-3. 如果内容中出现类似"款号"、"货号"、"款"等关键词后面的数字，优先作为款号
-4. 同一个款号只输出一次，去重
-5. 如果完全找不到款号，返回空数组
-6. 图片中可能包含多个供应商/客户的款号，全部提取出来，后续会由系统筛选
+【本年产品目录】
+{catalog_text}
+
+款号匹配规则：
+1. 客户内容中出现的数字、名称，需要与上方【本年产品目录】中的 product_no 或别名(aliases) 进行匹配
+2. **只能输出目录中存在的 product_no**，绝对禁止编造不在目录中的款号
+3. 如果客户写的是别名（aliases 中的值），请输出该别名对应的 product_no
+4. 不要把价格、数量、尺码、日期等数字误认为款号
+5. 如果内容中出现类似"款号"、"货号"、"款"等关键词后面的数字，优先尝试匹配
+6. 同一个 product_no 只输出一次，去重
+7. 如果客户提到的款号在目录中完全找不到匹配，不要输出该款号
+8. 如果完全没有匹配到任何款号，返回空数组
 
 图片旋转判断规则：
 1. 观察图片中手写文字/表格的朝向
@@ -656,12 +673,30 @@ PRODUCT_NO_EXTRACT_SYSTEM_PROMPT = """你是一个服装行业款号提取助手
 7. 如果没有图片或无法判断，填 0
 
 严格只返回 JSON，不要返回 markdown：
-{
+{{
   "product_nos": ["1234", "5678"],
   "rotation_angle": 0,
-  "reason": "简短说明提取依据和旋转判断"
-}
+  "reason": "简短说明匹配依据和旋转判断"
+}}
 """
+
+
+def _build_catalog_text(catalog: list[dict[str, Any]]) -> str:
+    """将产品目录列表格式化为提示词文本。"""
+    if not catalog:
+        return "（目录为空）"
+    lines: list[str] = []
+    for item in catalog:
+        pno = item.get("product_no", "")
+        pname = item.get("product_name", "")
+        aliases = item.get("aliases") or []
+        alias_str = f"  别名: {', '.join(aliases)}" if aliases else ""
+        lines.append(f"- {pno}  {pname}{alias_str}")
+    return "\n".join(lines)
+
+
+# 向后兼容：无目录时的降级提示词
+PRODUCT_NO_EXTRACT_SYSTEM_PROMPT = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE.replace("{catalog_text}", "（无目录信息，请尽可能从内容中提取纯数字款号）")
 
 # ==========================================================================
 # 智能体 B — 带库存上下文的详细解析 Agent（动态提示词模板）

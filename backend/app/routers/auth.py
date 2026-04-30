@@ -109,6 +109,19 @@ async def logout(token: str = Depends(lambda: None)):
     return {"code": 200, "message": "退出成功"}
 
 
+@router.post("/verify-password", summary="验证当前用户密码")
+async def verify_current_password(
+    payload: dict,
+    current_user: User = Depends(get_current_user),
+):
+    password = (payload.get("password") or "").strip()
+    if not password:
+        return {"code": 400, "message": "密码不能为空"}
+    if not verify_password(password, current_user.password):
+        return {"code": 403, "message": "密码错误"}
+    return {"code": 200, "message": "验证通过"}
+
+
 @router.get("/userinfo", response_model=UserResponse, summary="获取当前用户信息")
 async def get_user_info(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """

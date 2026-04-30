@@ -56,17 +56,20 @@
         </el-table-column>
         <el-table-column label="尺码" prop="spec" min-width="120" show-overflow-tooltip />
         <el-table-column label="备注" prop="remark" min-width="120" show-overflow-tooltip />
-        <el-table-column label="操作" width="200" fixed="right" align="center">
+        <el-table-column label="操作" width="310" fixed="right" align="center">
           <template #default="{ row }">
-            <el-button type="primary" link size="small" @click="viewInventory(row)">查看库存</el-button>
-            <el-button type="warning" link size="small" @click="openMappingDialog(row)">
-              名称映射<el-badge v-if="row.mapping_count" :value="row.mapping_count" :max="99" class="mapping-badge" />
-            </el-button>
-            <el-popconfirm title="确定取消本年款？" @confirm="handleRemove(row)">
-              <template #reference>
-                <el-button type="danger" link size="small">取消本年款</el-button>
-              </template>
-            </el-popconfirm>
+            <div class="action-row">
+              <el-button type="primary" link size="small" @click="viewDetail(row)">查看详情</el-button>
+              <el-button type="primary" link size="small" @click="viewInventory(row)">查看库存</el-button>
+              <el-button type="warning" link size="small" @click="openMappingDialog(row)">
+                名称映射<el-badge v-if="row.mapping_count" :value="row.mapping_count" :max="99" class="mapping-badge" />
+              </el-button>
+              <el-popconfirm title="确定取消本年款？" @confirm="handleRemove(row)">
+                <template #reference>
+                  <el-button type="danger" link size="small">取消本年款</el-button>
+                </template>
+              </el-popconfirm>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -115,15 +118,49 @@
         <el-button @click="mappingVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- 产品详情弹窗 -->
+    <el-dialog v-model="detailVisible" title="产品详情" width="640px" destroy-on-close>
+      <el-descriptions :column="2" border size="default" class="product-detail-desc">
+        <el-descriptions-item label="货号">{{ detailData.product_no || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="品名">{{ detailData.product_name || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="品牌">{{ detailData.brand || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="类别">{{ detailData.category || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="材质">{{ detailData.material || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="单位">{{ detailData.unit || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="单价">
+          <span class="price-text">{{ detailData.price > 0 ? `¥${Number(detailData.price).toFixed(2)}` : '-' }}</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="产品编号">{{ detailData.product_id || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="颜色" :span="2">{{ detailData.color || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="尺码" :span="2">{{ detailData.spec || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="图片" :span="2">
+          <el-image
+            v-if="detailData.image_url"
+            :src="detailData.image_url"
+            :preview-src-list="[detailData.image_url]"
+            fit="contain"
+            style="width: 120px; height: 120px;"
+          />
+          <span v-else>-</span>
+        </el-descriptions-item>
+        <el-descriptions-item label="备注" :span="2">{{ detailData.remark || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="同步时间" :span="2">{{ detailData.synced_at || '-' }}</el-descriptions-item>
+      </el-descriptions>
+      <template #footer>
+        <el-button @click="detailVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search } from '@element-plus/icons-vue'
 import { getCurrentYearProducts, setCurrentYear, batchSetCurrentYear, getNameMappings, addNameMapping, deleteNameMapping } from '@/api/products'
+import request from '@/utils/request'
 
 const router = useRouter()
 
@@ -131,6 +168,8 @@ const loading = ref(false)
 const allProducts = ref([])
 const total = ref(0)
 const selectedIds = ref([])
+const detailVisible = ref(false)
+const detailData = ref({})
 
 const mappingVisible = ref(false)
 const mappingProductNo = ref('')
@@ -181,6 +220,11 @@ async function fetchProducts() {
   }
 }
 
+function viewDetail(row) {
+  detailData.value = { ...row }
+  detailVisible.value = true
+}
+
 async function handleRemove(row) {
   try {
     const res = await setCurrentYear(row.id, false)
@@ -195,6 +239,38 @@ async function handleRemove(row) {
 
 async function handleBatchRemove() {
   if (!selectedIds.value.length) return
+  const count = selectedIds.value.length
+  // 第一次确认
+  try {
+    await ElMessageBox.confirm(
+      `确定要批量取消 ${count} 个产品的本年款标记吗？`,
+      '操作确认',
+      { confirmButtonText: '确定', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch { return }
+  // 第二次确认：输入密码
+  let password = ''
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '此操作需要二次验证，请输入当前账户密码：',
+      '安全验证',
+      { confirmButtonText: '验证并执行', cancelButtonText: '取消', inputType: 'password', inputPlaceholder: '请输入密码' }
+    )
+    password = (value || '').trim()
+  } catch { return }
+  if (!password) { ElMessage.warning('密码不能为空'); return }
+  // 验证密码
+  try {
+    const verifyRes = await request({ url: '/api/auth/verify-password', method: 'post', data: { password } })
+    if (verifyRes.code !== 200) {
+      ElMessage.error(verifyRes.message || '密码验证失败')
+      return
+    }
+  } catch {
+    ElMessage.error('密码验证失败')
+    return
+  }
+  // 执行批量取消
   try {
     const res = await batchSetCurrentYear(selectedIds.value, false)
     if (res.code === 200) {
@@ -294,19 +370,126 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.lark-products {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.lark-page-header { margin-bottom: 4px; }
+
+.header-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--lark-text-primary);
+  margin-bottom: 6px;
+}
+
+.header-desc {
+  font-size: 13px;
+  color: var(--lark-text-secondary);
+}
+
+.lark-table-panel {
+  background: var(--lark-bg-base);
+  border-radius: var(--lark-radius-lg);
+  padding: 20px 24px;
+}
+
+.lark-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.summary-bar {
+  display: flex;
+  gap: 24px;
+  padding: 10px 14px;
+  background: var(--lark-bg-subtle, #f7f8fa);
+  border-radius: var(--lark-radius);
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--lark-text-secondary);
+}
+
+.summary-item strong {
+  color: var(--lark-text-primary);
+  margin: 0 2px;
+}
+
 .product-no {
   cursor: pointer;
-  color: var(--el-color-primary);
+  color: var(--el-color-primary, #409eff);
   font-weight: 500;
 }
+
 .product-no:hover {
   text-decoration: underline;
 }
-.mapping-badge {
-  margin-left: 4px;
+
+.action-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
 }
+
+.price-text {
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+:deep(.product-detail-desc .el-descriptions__label) {
+  width: 80px;
+  font-weight: 500;
+}
+
+.lark-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+:deep(.el-table) {
+  --el-table-border-color: var(--lark-border-light);
+  --el-table-header-bg-color: var(--lark-bg-subtle);
+  font-size: 14px;
+}
+
+:deep(.el-table td.el-table__cell) {
+  padding: 6px 0;
+}
+
+:deep(.el-table th.el-table__cell) {
+  font-weight: 600;
+  color: var(--lark-text-primary);
+}
+
 .mapping-add-row {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.mapping-badge {
+  margin-left: 4px;
+  vertical-align: middle;
+}
+
+:deep(.mapping-badge .el-badge__content) {
+  font-size: 10px;
+  height: 16px;
+  line-height: 16px;
+  padding: 0 4px;
 }
 </style>

@@ -734,12 +734,14 @@ async def _process_order(
     db = SessionLocal()
     try:
         from app.services.erp_sync import ensure_tables
-        from app.services.downstream_orders import query_product_context_structured
+        from app.services.downstream_orders import query_product_context_structured, query_current_year_catalog
         await run_in_threadpool(ensure_tables, db)
 
-        # === 步骤 1：智能体 A — 提取款号 + 判断旋转角度 ===
-        logger.info("%s: 步骤1 提取款号 room=%s", source_label, room_id)
-        extract_result = await ai_order_parser.extract_product_nos(ai_inputs, db=db)
+        # === 步骤 1：智能体 A — 从本年产品目录匹配款号 + 判断旋转角度 ===
+        logger.info("%s: 步骤1 加载本年产品目录并匹配款号 room=%s", source_label, room_id)
+        catalog = await run_in_threadpool(query_current_year_catalog, db)
+        logger.info("%s: 本年产品目录: %d 个产品 room=%s", source_label, len(catalog), room_id)
+        extract_result = await ai_order_parser.extract_product_nos(ai_inputs, db=db, catalog=catalog)
         product_nos = extract_result.get("product_nos") or []
         rotation_angle = extract_result.get("rotation_angle") or 0
         logger.info("%s: 提取到款号: %s rotation=%d° room=%s", source_label, product_nos, rotation_angle, room_id)
