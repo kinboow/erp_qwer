@@ -90,7 +90,13 @@ const routes = [
         path: 'downstream-order-reviews',
         name: 'DownstreamOrderReviews',
         component: () => import('@/views/business/DownstreamOrderReviews.vue'),
-        meta: { title: '销售订单' }
+        meta: { title: '订单审核' }
+      },
+      {
+        path: 'approval-list',
+        name: 'ApprovalList',
+        component: () => import('@/views/business/ApprovalList.vue'),
+        meta: { title: '审核列表' }
       },
       {
         path: 'products',

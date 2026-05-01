@@ -59,7 +59,11 @@
             </template>
             <el-menu-item index="/downstream-order-reviews">
               <el-icon><ChatDotRound /></el-icon>
-              <template #title>销售订单</template>
+              <template #title>订单审核</template>
+            </el-menu-item>
+            <el-menu-item index="/approval-list">
+              <el-icon><DocumentChecked /></el-icon>
+              <template #title>审核列表</template>
             </el-menu-item>
           </el-sub-menu>
 

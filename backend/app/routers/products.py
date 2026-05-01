@@ -205,6 +205,36 @@ def api_list_current_year_products(
     }
 
 
+@router.get("/current-year/options", summary="本年产品下拉选项（款号+颜色+尺码）")
+def api_current_year_options(
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """返回去重的款号列表及每个款号对应的颜色和可用尺码列表，用于下拉选择"""
+    ensure_tables(db)
+    rows = db.execute(text(
+        "SELECT product_no, color, spec FROM erp_products WHERE is_current_year = 1 ORDER BY product_no ASC"
+    )).mappings().all()
+    pno_map: dict[str, dict] = {}
+    for r in rows:
+        pno = r["product_no"] or ""
+        color_raw = r["color"] or ""
+        spec_raw = r["spec"] or ""
+        if not pno:
+            continue
+        if pno not in pno_map:
+            pno_map[pno] = {"colors": [], "sizes": []}
+        for c in color_raw.replace("，", ",").split(","):
+            c = c.strip()
+            if c and c not in pno_map[pno]["colors"]:
+                pno_map[pno]["colors"].append(c)
+        for s in spec_raw.replace("，", ",").split(","):
+            s = s.strip()
+            if s and s not in pno_map[pno]["sizes"]:
+                pno_map[pno]["sizes"].append(s)
+    product_nos = [{"product_no": k, "colors": v["colors"], "sizes": v["sizes"]} for k, v in pno_map.items()]
+    return {"code": 200, "data": product_nos}
+
+
 # ---------------------------------------------------------------------------
 # 名称映射 CRUD
 # ---------------------------------------------------------------------------

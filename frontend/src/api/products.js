@@ -32,6 +32,10 @@ export const getCurrentYearProducts = (params) => {
   return request({ url: '/api/products/current-year', method: 'get', params })
 }
 
+export const getProductOptions = () => {
+  return request({ url: '/api/products/current-year/options', method: 'get' })
+}
+
 export const exportProducts = () => {
   return request({ url: '/api/products/export', method: 'get', responseType: 'blob' })
 }
