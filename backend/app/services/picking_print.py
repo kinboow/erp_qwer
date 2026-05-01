@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import uuid
 from base64 import b64encode
@@ -267,7 +268,7 @@ def _build_picking_pdf(
             "customer_tel": str(order.get("customer_tel") or ""),
             "customer_addr": str(order.get("customer_addr") or ""),
             "creator": str(order.get("creator") or ""),
-            "remark": str(order.get("remark") or "")[:120],
+            "remark": re.sub(r"\[RV[A-Za-z0-9]+\]\s*", "", str(order.get("remark") or "")).strip()[:120],
         },
         "all_sizes": all_sizes,
         "pages": payload_pages,

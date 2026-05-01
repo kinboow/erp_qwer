@@ -472,7 +472,7 @@ const msgPopoverList = computed(() =>
 
 async function fetchMsgUnreadCount() {
   try {
-    const res = await request({ url: '/api/system-messages/unread-count', method: 'get' })
+    const res = await request({ url: '/api/system-messages/unread-count', method: 'get', silentError: true })
     msgUnreadCount.value = res.data?.count || 0
   } catch { msgUnreadCount.value = 0 }
 }
@@ -481,8 +481,8 @@ async function fetchMsgPopoverData() {
   msgPopoverLoading.value = true
   try {
     const [unreadRes, allRes] = await Promise.all([
-      request({ url: '/api/system-messages', method: 'get', params: { is_read: 0, page: 1, page_size: 8 } }),
-      request({ url: '/api/system-messages', method: 'get', params: { page: 1, page_size: 8 } }),
+      request({ url: '/api/system-messages', method: 'get', params: { is_read: 0, page: 1, page_size: 8 }, silentError: true }),
+      request({ url: '/api/system-messages', method: 'get', params: { page: 1, page_size: 8 }, silentError: true }),
     ])
     msgPopoverUnread.value = unreadRes.data?.items || []
     msgPopoverAll.value = allRes.data?.items || []
@@ -568,7 +568,7 @@ function onMsgUnreadChanged(e) {
 }
 
 onMounted(() => {
-  userStore.fetchUserInfo().catch(() => {})
+  userStore.fetchUserInfo(true).catch(() => {})
   window.addEventListener('keydown', handleGlobalShortcut)
   window.addEventListener('msg-unread-changed', onMsgUnreadChanged)
   startMsgPoll()

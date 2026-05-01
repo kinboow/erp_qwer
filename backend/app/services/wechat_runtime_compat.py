@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.services.downstream_orders import create_review_from_callback, resolve_customer_by_room
+from app.services.media_archive import download_and_archive_background
 from app.services.message_logs import record_message_log
 from app.services.at_order_handler import extract_trigger_info, handle_at_order, handle_media_order, is_at_bot
 
@@ -110,6 +111,27 @@ async def ingest_runtime_message(
             db.rollback()
         except Exception:
             pass
+
+    # 图片/文件消息自动归档到 OSS
+    if log_result:
+        _log_msg_type = str(log_result.get("message_type") or "").lower()
+        if _log_msg_type in ("image", "img", "picture", "file"):
+            _msg_data = (normalized_payload.get("message") or {}).get("data") or normalized_payload.get("data") or {}
+            if isinstance(_msg_data, str):
+                _msg_data = {}
+            _file_name = str(
+                _msg_data.get("file_name") or _msg_data.get("filename")
+                or normalized_payload.get("file_name") or normalized_payload.get("filename")
+                or log_result.get("content_preview") or ""
+            )
+            asyncio.create_task(download_and_archive_background(
+                msg_log_id=log_result["id"],
+                payload=normalized_payload,
+                instance_id=resolved_instance_id or effective_wxid or "",
+                message_type=_log_msg_type,
+                file_name=_file_name,
+            ))
+            logger.debug("媒体归档: 已创建后台任务 msg_log_id=%s type=%s", log_result["id"], _log_msg_type)
 
     # 检查发送者是否为员工账号——如果是则跳过订单处理，仅保留日志
     sender_is_employee = False

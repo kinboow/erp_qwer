@@ -59,9 +59,9 @@ export const useUserStore = defineStore('user', {
       }
     },
 
-    async fetchUserInfo() {
+    async fetchUserInfo(silent = false) {
       try {
-        const res = await getUserInfo()
+        const res = await getUserInfo(silent)
         this.userInfo = res
         localStorage.setItem('userInfo', JSON.stringify(res))
         return res

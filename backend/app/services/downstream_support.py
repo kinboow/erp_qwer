@@ -129,4 +129,6 @@ def ensure_downstream_support_tables(db: Session):
     _add_column_if_not_exists(db, "downstream_customers", "synced_at", "DATETIME NULL")
     # 审核记录关联消息日志ID
     _add_column_if_not_exists(db, "downstream_order_reviews", "msg_log_id", "BIGINT UNSIGNED NULL")
+    # 审核记录唯一标识（用于 ERP 备注追踪）
+    _add_column_if_not_exists(db, "downstream_order_reviews", "review_uid", "VARCHAR(30) DEFAULT '' AFTER id")
     db.commit()

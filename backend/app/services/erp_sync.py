@@ -548,9 +548,14 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
         except Exception:
             pass
 
+    # 从详情明细行聚合货号（当列表API未提供时使用）
+    detail_product_nos = ", ".join(
+        dict.fromkeys(row.product_no for row in detail.detail if row.product_no)
+    )
+
     # upsert 主表
     existing = db.execute(
-        text("SELECT id FROM erp_sales_orders WHERE order_no = :order_no"),
+        text("SELECT id, print_count, product_no FROM erp_sales_orders WHERE order_no = :order_no"),
         {"order_no": order_no},
     ).mappings().first()
 
@@ -579,8 +584,8 @@ def _upsert_order(db: Session, detail: Any, synced_at: str, list_extra: dict | N
         "total_amount": main.total_amount or 0,
         "payment_amount": main.payment_amount,
         "discount_amount": main.discount_amount,
-        "print_count": extra.get("print_count", 0),
-        "product_no": extra.get("product_no", ""),
+        "print_count": extra.get("print_count") if extra.get("print_count") is not None else (existing["print_count"] if existing else 0),
+        "product_no": extra.get("product_no") or detail_product_nos or (existing["product_no"] if existing else ""),
         "remark": main.remark or "",
         "synced_at": synced_at,
     }
@@ -1052,6 +1057,72 @@ def _upsert_inventory_item(db: Session, item: Any, synced_at: str) -> None:
         vals = ", ".join(f":{k}" for k in data.keys())
         db.execute(text(f"INSERT INTO erp_inventory ({cols}) VALUES ({vals})"), data)
     db.commit()
+
+
+# ---------------------------------------------------------------------------
+# 单订单 & 按款号库存 — 审核操作后的精准同步
+# ---------------------------------------------------------------------------
+
+async def sync_single_order(erp_client: ERPClient, order_no: str) -> dict[str, Any]:
+    """拉取单张销售订单详情并写入本地数据库。"""
+    if not order_no:
+        return {"synced": 0, "message": "无订单号"}
+    db: Session = SessionLocal()
+    try:
+        ensure_tables(db)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        detail = await get_order_detail(erp_client, order_no)
+        await run_in_threadpool(_upsert_order, db, detail, now_str)
+        logger.info("[ReviewSync] 单订单 %s 同步成功", order_no)
+        return {"synced": 1, "order_no": order_no}
+    except Exception as exc:
+        logger.exception("[ReviewSync] 单订单 %s 同步失败", order_no)
+        return {"synced": 0, "order_no": order_no, "error": str(exc)}
+    finally:
+        db.close()
+
+
+async def sync_inventory_by_product_nos(erp_client: ERPClient, product_nos: list[str]) -> dict[str, Any]:
+    """按款号列表逐个查询 ERP 库存并写入本地数据库。"""
+    if not product_nos:
+        return {"synced": 0, "message": "无款号"}
+    db: Session = SessionLocal()
+    try:
+        ensure_tables(db)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        synced = 0
+        failed = 0
+        for pno in product_nos:
+            try:
+                inv_resp = await erp_query_inventory(
+                    erp_client,
+                    warehouse=None,
+                    product_type=None,
+                    product_no=pno,
+                    product_name=None,
+                    show_zero=False,
+                    show_negative=True,
+                    page=1,
+                    rows=500,
+                )
+                for item in inv_resp.rows:
+                    await run_in_threadpool(_upsert_inventory_item, db, item, now_str)
+                    synced += 1
+            except Exception:
+                logger.warning("[ReviewSync] 库存同步款号 %s 失败", pno, exc_info=True)
+                failed += 1
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        result = {"synced": synced, "failed": failed, "product_nos": product_nos}
+        logger.info("[ReviewSync] 库存按款号同步完成: %s", result)
+        return result
+    except Exception:
+        logger.exception("[ReviewSync] 库存按款号同步异常")
+        raise
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------

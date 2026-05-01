@@ -1,10 +1,11 @@
 import request from '@/utils/request'
 
-export const getReviewList = (params) => {
+export const getReviewList = (params, options = {}) => {
   return request({
     url: '/api/downstream-orders/reviews',
     method: 'get',
-    params
+    params,
+    ...options
   })
 }
 
@@ -22,11 +23,21 @@ export const reparseReview = (id) => {
   })
 }
 
+export const checkDuplicate = (id, data) => {
+  return request({
+    url: `/api/downstream-orders/reviews/${id}/check-duplicate`,
+    method: 'post',
+    data,
+    timeout: 0
+  })
+}
+
 export const approveReview = (id, data) => {
   return request({
     url: `/api/downstream-orders/reviews/${id}/approve`,
     method: 'post',
-    data
+    data,
+    timeout: 0
   })
 }
 
@@ -34,7 +45,8 @@ export const replaceReview = (id, data) => {
   return request({
     url: `/api/downstream-orders/reviews/${id}/replace`,
     method: 'post',
-    data
+    data,
+    timeout: 0
   })
 }
 
@@ -42,7 +54,8 @@ export const manualReview = (id, data) => {
   return request({
     url: `/api/downstream-orders/reviews/${id}/manual`,
     method: 'post',
-    data
+    data,
+    timeout: 0
   })
 }
 
@@ -50,13 +63,23 @@ export const voidReview = (id, data) => {
   return request({
     url: `/api/downstream-orders/reviews/${id}/void`,
     method: 'post',
-    data
+    data,
+    timeout: 0
   })
 }
 
-export const getContextMessages = (id) => {
+export const revertPending = (id) => {
   return request({
-    url: `/api/downstream-orders/reviews/${id}/context-messages`,
-    method: 'get'
+    url: `/api/downstream-orders/reviews/${id}/revert-pending`,
+    method: 'post'
   })
 }
+
+export const getContextMessages = (id, options = {}) => {
+  return request({
+    url: `/api/downstream-orders/reviews/${id}/context-messages`,
+    method: 'get',
+    ...options
+  })
+}
+

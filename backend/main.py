@@ -116,6 +116,10 @@ async def startup_event():
     app.state.http_client = http_client
     app.state.erp_client = erp_client
 
+    # 注入 ERPClient 到 erp_bridge，供审核/下单/替换等操作使用
+    from app.services.erp_bridge import set_erp_client
+    set_erp_client(erp_client)
+
     # 恢复企业微信 WebSocket 连接
     await wechat_ws_service.auto_connect_from_saved_config()
 

@@ -4,7 +4,7 @@ import router from '@/router'
 
 const request = axios.create({
   baseURL: '',
-  timeout: 10000
+  timeout: 30000
 })
 
 let isRedirectingToLogin = false
@@ -37,6 +37,21 @@ request.interceptors.request.use(
   }
 )
 
+// 从响应 data 中提取可读的错误消息字符串
+function extractErrorMsg(data, fallback = '请求失败') {
+  if (!data) return fallback
+  // FastAPI 422 validation error: { detail: [{ msg: "...", ... }] }
+  const detail = data.detail
+  if (Array.isArray(detail)) {
+    const msgs = detail.map(d => d?.msg || d?.message || '').filter(Boolean)
+    return msgs.length > 0 ? msgs.join('; ') : fallback
+  }
+  const raw = detail || data.message || ''
+  // 确保返回非空字符串
+  const msg = typeof raw === 'string' ? raw.trim() : String(raw || '')
+  return msg || fallback
+}
+
 // 响应拦截器
 request.interceptors.response.use(
   response => {
@@ -47,8 +62,9 @@ request.interceptors.response.use(
     const res = response.data
     const silentError = !!response.config?.silentError
     if (res.code && res.code !== 200) {
-      if (!silentError) ElMessage.error(res.message || '请求失败')
-      return Promise.reject(new Error(res.message || '请求失败'))
+      const msg = res.message || '请求失败'
+      if (!silentError) ElMessage.error(msg)
+      return Promise.reject(new Error(msg))
     }
     return res
   },
@@ -62,16 +78,16 @@ request.interceptors.response.use(
         const isLogin = requestUrl.includes('/auth/login')
         const isLogout = error.config?.url?.includes('/auth/logout')
         if (isLogin) {
-          if (!silentError) ElMessage.error(data.detail || data.message || '用户名或密码错误')
+          if (!silentError) ElMessage.error(extractErrorMsg(data, '用户名或密码错误'))
         } else if (!isLogout && hasToken) {
           handleTokenExpired()
         } else {
-          if (!silentError) ElMessage.error(data.detail || data.message || '未授权访问')
+          if (!silentError) ElMessage.error(extractErrorMsg(data, '未授权访问'))
         }
       } else if (status === 403) {
-        if (!silentError) ElMessage.error(data.detail || data.message || '权限不足')
+        if (!silentError) ElMessage.error(extractErrorMsg(data, '权限不足'))
       } else {
-        if (!silentError) ElMessage.error(data.detail || data.message || '请求失败')
+        if (!silentError) ElMessage.error(extractErrorMsg(data, '请求失败'))
       }
     } else {
       if (!silentError) ElMessage.error('网络错误，请稍后重试')

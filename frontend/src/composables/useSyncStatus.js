@@ -23,7 +23,7 @@ export function useSyncStatus(module, onSyncComplete) {
   // 检查模块是否正在同步
   async function checkSyncStatus() {
     try {
-      const res = await request({ url: '/api/erp/sync/module-status', method: 'get' })
+      const res = await request({ url: '/api/erp/sync/module-status', method: 'get', silentError: true })
       const data = res.data || {}
       const info = data[module]
       if (info && typeof info === 'object') {

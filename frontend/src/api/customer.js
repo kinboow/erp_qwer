@@ -1,10 +1,11 @@
 import request from '@/utils/request'
 
-export const getCustomerList = (params) => {
+export const getCustomerList = (params, options = {}) => {
   return request({
     url: '/api/customers',
     method: 'get',
-    params
+    params,
+    ...options
   })
 }
 

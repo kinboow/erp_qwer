@@ -18,9 +18,10 @@ export const logout = () => {
 }
 
 // 获取用户信息
-export const getUserInfo = () => {
+export const getUserInfo = (silent = false) => {
   return request({
     url: '/api/auth/userinfo',
-    method: 'get'
+    method: 'get',
+    silentError: silent
   })
 }

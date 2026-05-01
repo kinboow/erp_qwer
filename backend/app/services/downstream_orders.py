@@ -1,6 +1,9 @@
+import asyncio
 import base64
 import io
 import json
+import logging
+import secrets
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
@@ -16,6 +19,8 @@ from app.services.downstream_support import ensure_downstream_support_tables
 from app.services.erp_bridge import ERPBridge, ERPBridgeError
 from app.services.wechat_event_types import EVENT_TYPE_TO_MESSAGE_TYPE, CONTENT_TYPE_TO_MESSAGE_TYPE
 
+_logger = logging.getLogger(__name__)
+
 try:
     from openpyxl import load_workbook
 except Exception:
@@ -23,6 +28,73 @@ except Exception:
 
 
 erp_bridge = ERPBridge()
+
+REVIEW_UID_PREFIX = "RV"
+
+
+def _generate_review_uid() -> str:
+    """生成审核单唯一标识，格式: RV + 日期6位 + 随机4位hex，如 RV250501A3F1"""
+    date_part = datetime.now().strftime("%y%m%d")
+    rand_part = secrets.token_hex(2).upper()
+    return f"{REVIEW_UID_PREFIX}{date_part}{rand_part}"
+
+
+def _inject_review_uid_to_remark(order_data: dict[str, Any], review_uid: str) -> None:
+    """将审核单UID标识注入到订单备注开头，格式: [RV250501A3F1] 原始备注"""
+    if not review_uid:
+        return
+    tag = f"[{review_uid}]"
+    existing_remark = str(order_data.get("remark") or "").strip()
+    order_data["remark"] = f"{tag} {existing_remark}".strip()
+
+
+def _check_review_uid_in_recent_orders(db: Session, erp_customer_id: str, review_uid: str) -> str | None:
+    """检查该客户最近35张销售订单的备注中是否已包含该review_uid标识。
+    返回匹配的订单号，未找到返回 None。"""
+    if not review_uid or not erp_customer_id:
+        return None
+    tag = f"[{review_uid}]"
+    rows = db.execute(
+        text(
+            "SELECT order_no, remark FROM erp_sales_orders "
+            "WHERE customer_id = :cid ORDER BY order_date DESC, id DESC LIMIT 35"
+        ),
+        {"cid": erp_customer_id},
+    ).mappings().all()
+    for r in rows:
+        remark = str(r.get("remark") or "")
+        if tag in remark:
+            return r["order_no"]
+    return None
+
+
+def _trigger_incremental_sync(order_no: str = "", product_nos: list[str] | None = None) -> None:
+    """审核操作后在后台精准同步：只拉取刚下的那一单 + 涉及款号的库存，不阻塞当前请求。"""
+    from app.services.erp_bridge import _erp_client
+    if _erp_client is None:
+        _logger.warning("[ReviewSync] ERPClient 未初始化，跳过增量同步")
+        return
+
+    from app.services.erp_sync import sync_single_order, sync_inventory_by_product_nos
+
+    async def _do_sync():
+        tasks = []
+        if order_no:
+            tasks.append(sync_single_order(_erp_client, order_no))
+        if product_nos:
+            tasks.append(sync_inventory_by_product_nos(_erp_client, product_nos))
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for r in results:
+            if isinstance(r, Exception):
+                _logger.error("[ReviewSync] 精准同步任务异常: %s", r)
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_do_sync())
+    except RuntimeError:
+        _logger.warning("[ReviewSync] 无法获取事件循环，跳过增量同步")
 
 
 class AttachmentContentRequiredError(Exception):
@@ -995,15 +1067,17 @@ async def create_review_from_callback(db: Session, payload: dict[str, Any], inst
 
     customer = resolve_customer_by_room(db, message["room_id"], message["instance_id"])
     initial_parse_status = "pending_attachment" if message.get("requires_attachment_download") else "pending"
+    review_uid = _generate_review_uid()
     result = db.execute(
         text(
             "INSERT INTO downstream_order_reviews ("
-            "source_type, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_text, attachment_name, attachment_url, attachment_mime, attachment_base64, callback_payload, parse_status, review_status, customer_id, customer_name"
+            "review_uid, source_type, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_text, attachment_name, attachment_url, attachment_mime, attachment_base64, callback_payload, parse_status, review_status, customer_id, customer_name"
             ") VALUES ("
-            ":source_type, :instance_id, :room_id, :room_name, :sender_id, :sender_name, :message_type, :content_text, :attachment_name, :attachment_url, :attachment_mime, :attachment_base64, :callback_payload, :parse_status, 'pending', :customer_id, :customer_name"
+            ":review_uid, :source_type, :instance_id, :room_id, :room_name, :sender_id, :sender_name, :message_type, :content_text, :attachment_name, :attachment_url, :attachment_mime, :attachment_base64, :callback_payload, :parse_status, 'pending', :customer_id, :customer_name"
             ")"
         ),
         {
+            "review_uid": review_uid,
             "source_type": message.get("source_type") or "wechat_generic",
             "instance_id": message.get("instance_id"),
             "room_id": message.get("room_id") or "",
@@ -1038,6 +1112,8 @@ async def create_review_from_callback(db: Session, payload: dict[str, Any], inst
         response["parse_error"] = parse_error
     if parsed_order:
         response["parsed_order"] = parsed_order
+    from app.services.review_events import notify_review_change
+    notify_review_change("new_review", {"review_id": review_id})
     return response
 
 
@@ -1078,7 +1154,8 @@ def get_review_detail(db: Session, review_id: int) -> dict[str, Any]:
 
 
 def get_review_context_messages(db: Session, review_id: int) -> dict[str, Any]:
-    """获取审核记录关联的上下文消息（触发消息前5条+后5条），用于聊天记录展示。"""
+    """获取审核记录关联的上下文消息（触发消息前20条+后20条），用于聊天记录展示。
+    图片消息会关联查询审核记录中的 attachment_base64 以便前端直接展示。"""
     from app.services.message_logs import ensure_message_logs_table
     ensure_message_logs_table(db)
     ensure_review_state(db)
@@ -1095,19 +1172,18 @@ def get_review_context_messages(db: Session, review_id: int) -> dict[str, Any]:
     review_created_at = row.get("created_at")
 
     if not room_id:
-        return {"messages": [], "trigger_msg_id": msg_log_id}
+        return {"messages": [], "trigger_msg_id": msg_log_id, "review_msg_ids": []}
 
     cols = (
         "id, msg_uid, instance_id, room_id, room_name, sender_id, sender_name, "
-        "message_type, content_preview, ai_recognized, is_at_bot, created_at"
+        "message_type, content_preview, ai_recognized, is_at_bot, oss_key, created_at"
     )
 
     if msg_log_id:
-        # 用 msg_log_id 精确定位：前5条 + 触发消息本身 + 后5条
         before_rows = db.execute(text(
             f"SELECT {cols} FROM message_logs "
             "WHERE room_id = :room_id AND id < :msg_id "
-            "ORDER BY id DESC LIMIT 5"
+            "ORDER BY id DESC LIMIT 20"
         ), {"room_id": room_id, "msg_id": msg_log_id}).mappings().all()
 
         trigger_row = db.execute(text(
@@ -1117,25 +1193,49 @@ def get_review_context_messages(db: Session, review_id: int) -> dict[str, Any]:
         after_rows = db.execute(text(
             f"SELECT {cols} FROM message_logs "
             "WHERE room_id = :room_id AND id > :msg_id "
-            "ORDER BY id ASC LIMIT 5"
+            "ORDER BY id ASC LIMIT 20"
         ), {"room_id": room_id, "msg_id": msg_log_id}).mappings().all()
 
         all_rows = list(reversed(before_rows)) + list(trigger_row) + list(after_rows)
     else:
-        # 无 msg_log_id，用 created_at 近似查找（前5+后5）
         before_rows = db.execute(text(
             f"SELECT {cols} FROM message_logs "
             "WHERE room_id = :room_id AND created_at <= :ts "
-            "ORDER BY created_at DESC, id DESC LIMIT 5"
+            "ORDER BY created_at DESC, id DESC LIMIT 20"
         ), {"room_id": room_id, "ts": review_created_at}).mappings().all()
 
         after_rows = db.execute(text(
             f"SELECT {cols} FROM message_logs "
             "WHERE room_id = :room_id AND created_at > :ts "
-            "ORDER BY created_at ASC, id ASC LIMIT 5"
+            "ORDER BY created_at ASC, id ASC LIMIT 20"
         ), {"room_id": room_id, "ts": review_created_at}).mappings().all()
 
         all_rows = list(reversed(before_rows)) + list(after_rows)
+
+    msg_ids = [r["id"] for r in all_rows]
+
+    # 查询同群聊所有审核单的 msg_log_id，用于前端标注"已关联审核单"
+    review_rows = db.execute(text(
+        "SELECT msg_log_id FROM downstream_order_reviews "
+        "WHERE room_id = :room_id AND msg_log_id IS NOT NULL"
+    ), {"room_id": room_id}).mappings().all()
+    review_msg_ids = [int(r["msg_log_id"]) for r in review_rows if r["msg_log_id"]]
+
+    # 查询这些消息中图片/文件类型关联的审核记录的 attachment_base64
+    image_map: dict[int, dict[str, str]] = {}
+    if msg_ids:
+        placeholders = ", ".join(f":mid{i}" for i in range(len(msg_ids)))
+        id_params = {f"mid{i}": mid for i, mid in enumerate(msg_ids)}
+        img_reviews = db.execute(text(
+            f"SELECT msg_log_id, attachment_base64, attachment_mime "
+            f"FROM downstream_order_reviews "
+            f"WHERE msg_log_id IN ({placeholders}) AND attachment_base64 IS NOT NULL AND attachment_base64 != ''"
+        ), id_params).mappings().all()
+        for ir in img_reviews:
+            image_map[int(ir["msg_log_id"])] = {
+                "base64": ir["attachment_base64"],
+                "mime": ir["attachment_mime"] or "image/png",
+            }
 
     messages = []
     for r in all_rows:
@@ -1143,9 +1243,18 @@ def get_review_context_messages(db: Session, review_id: int) -> dict[str, Any]:
         for k, v in item.items():
             if hasattr(v, "strftime"):
                 item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+        # 优先使用 OSS 媒体 URL
+        if item.get("oss_key"):
+            item["media_url"] = f"/api/downstream-orders/media/{item['id']}"
+        else:
+            # 回退：使用审核记录中的 attachment_base64
+            img_data = image_map.get(item["id"])
+            if img_data:
+                item["image_base64"] = img_data["base64"]
+                item["image_mime"] = img_data["mime"]
         messages.append(item)
 
-    return {"messages": messages, "trigger_msg_id": msg_log_id}
+    return {"messages": messages, "trigger_msg_id": msg_log_id, "review_msg_ids": review_msg_ids}
 
 
 def _load_customer(db: Session, customer_id: int) -> dict[str, Any]:
@@ -1168,13 +1277,118 @@ def _review_order_data(row: dict[str, Any]) -> dict[str, Any]:
     raise ValueError("当前记录尚无可下单的解析结果")
 
 
-async def approve_review(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
+def check_duplicate_order(db: Session, review_id: int, customer_id: int, order_data_override: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """下单前检查该客户最近10张销售订单中是否存在整单完全相同的订单。
+    整单匹配条件：明细行数相同，且每行的款号、颜色、尺码、数量完全一致。
+    """
     row = db.execute(text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
     if not row:
         raise ValueError("待审核记录不存在")
     customer = _load_customer(db, customer_id)
+    erp_customer_id = customer.get("erp_customer_id") or ""
+    if not erp_customer_id:
+        return []
+
+    if order_data_override:
+        order_data = order_data_override
+    else:
+        order_data = _review_order_data(row)
+
+    new_items = order_data.get("items", [])
+    if not new_items:
+        return []
+
+    def _item_fingerprint(product_no: str, color: str, sizes: list) -> str:
+        """生成单行明细的指纹：款号||颜色||尺码1:数量1|尺码2:数量2|..."""
+        size_parts = sorted(
+            f"{s.get('size', '')}:{s.get('qty', 0)}"
+            for s in (sizes or []) if s.get("qty")
+        )
+        return f"{product_no}||{color}||{'|'.join(size_parts)}"
+
+    def _order_fingerprint(item_fps: list[str]) -> str:
+        """整单指纹：所有行指纹排序后拼接"""
+        return "###".join(sorted(item_fps))
+
+    new_fps = []
+    for item in new_items:
+        pno = item.get("product_no") or ""
+        color = item.get("color") or ""
+        sizes = item.get("sizes") or []
+        new_fps.append(_item_fingerprint(pno, color, sizes))
+    new_order_fp = _order_fingerprint(new_fps)
+
+    recent_orders = db.execute(
+        text(
+            "SELECT order_no, order_date FROM erp_sales_orders "
+            "WHERE customer_id = :cid "
+            "ORDER BY order_date DESC, id DESC LIMIT 10"
+        ),
+        {"cid": erp_customer_id},
+    ).mappings().all()
+
+    if not recent_orders:
+        return []
+
+    order_nos = [o["order_no"] for o in recent_orders]
+    order_dates = {o["order_no"]: o["order_date"] for o in recent_orders}
+    placeholders = ", ".join(f":o{i}" for i in range(len(order_nos)))
+    params = {f"o{i}": no for i, no in enumerate(order_nos)}
+    existing_items = db.execute(
+        text(
+            f"SELECT order_no, product_no, color, total_qty, sizes_json "
+            f"FROM erp_sales_order_items WHERE order_no IN ({placeholders})"
+        ),
+        params,
+    ).mappings().all()
+
+    orders_items: dict[str, list] = {}
+    for ei in existing_items:
+        orders_items.setdefault(ei["order_no"], []).append(ei)
+
+    duplicates = []
+    for ono, items_list in orders_items.items():
+        if len(items_list) != len(new_items):
+            continue
+        fps = []
+        for ei in items_list:
+            sizes_raw = _json_loads(ei["sizes_json"], [])
+            fps.append(_item_fingerprint(ei["product_no"] or "", ei["color"] or "", sizes_raw))
+        if _order_fingerprint(fps) == new_order_fp:
+            duplicates.append({
+                "order_no": ono,
+                "order_date": str(order_dates.get(ono, "")),
+                "item_count": len(items_list),
+            })
+    return duplicates
+
+
+async def approve_review(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
+    import time as _t; _t0 = _t.time(); _logs = []
+    def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
+    _log("审核下单 开始")
+    row = db.execute(text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
+    if not row:
+        raise ValueError("待审核记录不存在")
+    customer = _load_customer(db, customer_id)
+    review_uid = row.get("review_uid") or ""
+    erp_customer_id = customer.get("erp_customer_id") or ""
+    existing_order = _check_review_uid_in_recent_orders(db, erp_customer_id, review_uid)
+    if existing_order:
+        db.execute(text(
+            "UPDATE downstream_order_reviews SET review_status = 'exception', review_note = :note, "
+            "reviewer_id = :rid, reviewer_name = :rname, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+        ), {"id": review_id, "note": f"重复下单拦截: 该审核单已在ERP订单 {existing_order} 中存在",
+            "rid": current_user.id, "rname": current_user.real_name})
+        db.commit()
+        raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     order_data = _review_order_data(row)
+    _inject_review_uid_to_remark(order_data, review_uid)
+    _log("调用 ERP 创建订单+审核...")
     result = await erp_bridge.create_sales_order(order_data, customer)
+    new_order_no = result.get("order_no") or ""
+    _log(f"ERP 下单完成, 单号={new_order_no}")
+    pnos = [item.get("product_no") for item in order_data.get("items", []) if item.get("product_no")]
     db.execute(
         text(
             "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'approved', erp_order_no = :erp_order_no, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
@@ -1183,28 +1397,56 @@ async def approve_review(db: Session, review_id: int, customer_id: int, current_
             "id": review_id,
             "customer_id": customer_id,
             "customer_name": customer.get("customer_name") or "",
-            "erp_order_no": result.get("order_no") or "",
+            "erp_order_no": new_order_no,
             "review_note": review_note,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,
         },
     )
     db.commit()
-    return {**result, "review_status": "approved"}
+    _log("DB更新完成")
+    _trigger_incremental_sync(order_no=new_order_no, product_nos=pnos)
+    _log("全流程完成 ✅")
+    return {**result, "review_status": "approved", "_debug_logs": _logs}
 
 
 async def replace_old_order(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
+    import time as _t; _t0 = _t.time(); _logs = []
+    def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
+    _log("替换旧单 开始")
     row = db.execute(text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
     if not row:
         raise ValueError("待审核记录不存在")
     customer = _load_customer(db, customer_id)
+    review_uid = row.get("review_uid") or ""
+    erp_customer_id = customer.get("erp_customer_id") or ""
+    if not erp_customer_id:
+        raise ValueError("所选客户缺少 ERP 客户编号，无法查询未发货订单")
+    existing_order = _check_review_uid_in_recent_orders(db, erp_customer_id, review_uid)
+    if existing_order:
+        db.execute(text(
+            "UPDATE downstream_order_reviews SET review_status = 'exception', review_note = :note, "
+            "reviewer_id = :rid, reviewer_name = :rname, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+        ), {"id": review_id, "note": f"重复下单拦截: 该审核单已在ERP订单 {existing_order} 中存在",
+            "rid": current_user.id, "rname": current_user.real_name})
+        db.commit()
+        raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     order_data = _review_order_data(row)
-    product_nos = [item.get("product_no") for item in order_data.get("items", []) if item.get("product_no")]
-    begin_date = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    _inject_review_uid_to_remark(order_data, review_uid)
+    # 查询该客户所有未发货订单（不限货号），时间范围放宽到 5 年
+    begin_date = (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
     end_date = datetime.now().strftime("%Y-%m-%d")
-    unshipped_rows = await erp_bridge.query_unshipped(customer.get("erp_customer_id") or "", product_nos=product_nos, dates=begin_date, datee=end_date)
+    _log("查询未发货报表...")
+    unshipped_rows = await erp_bridge.query_unshipped(erp_customer_id, product_nos=None, dates=begin_date, datee=end_date)
+    _log(f"查询完成, 找到 {len(unshipped_rows)} 行未发货")
+    # 先取消该客户所有未发货订单行，再下新单
+    _log("取消未发货订单...")
     cancel_result = await erp_bridge.cancel_unshipped([item["id"] for item in unshipped_rows])
+    _log("取消完成, 创建新订单+审核...")
     create_result = await erp_bridge.create_sales_order(order_data, customer)
+    new_order_no = create_result.get("order_no") or ""
+    _log(f"新单创建完成, 单号={new_order_no}")
+    pnos = [item.get("product_no") for item in order_data.get("items", []) if item.get("product_no")]
     replaced_orders = sorted({item.get("order_no") for item in unshipped_rows if item.get("order_no")})
     db.execute(
         text(
@@ -1214,7 +1456,7 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
             "id": review_id,
             "customer_id": customer_id,
             "customer_name": customer.get("customer_name") or "",
-            "erp_order_no": create_result.get("order_no") or "",
+            "erp_order_no": new_order_no,
             "replaced_order_no": ",".join(replaced_orders),
             "replace_source_ids": _json_dumps(unshipped_rows),
             "review_note": review_note,
@@ -1223,16 +1465,38 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
         },
     )
     db.commit()
-    return {**create_result, **cancel_result, "review_status": "replaced", "replaced_orders": replaced_orders}
+    _log("DB更新完成")
+    _trigger_incremental_sync(order_no=new_order_no, product_nos=pnos)
+    _log("全流程完成 ✅")
+    return {**create_result, **cancel_result, "review_status": "replaced", "replaced_orders": replaced_orders, "_debug_logs": _logs}
 
 
 async def manual_order(db: Session, review_id: int, customer_id: int, order_data: dict[str, Any], current_user: User, review_note: str = "") -> dict[str, Any]:
-    row = db.execute(text("SELECT id FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
+    import time as _t; _t0 = _t.time(); _logs = []
+    def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
+    _log("手动录单 开始")
+    row = db.execute(text("SELECT id, review_uid FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
     if not row:
         raise ValueError("待审核记录不存在")
     customer = _load_customer(db, customer_id)
+    review_uid = row.get("review_uid") or ""
+    erp_customer_id = customer.get("erp_customer_id") or ""
+    existing_order = _check_review_uid_in_recent_orders(db, erp_customer_id, review_uid)
+    if existing_order:
+        db.execute(text(
+            "UPDATE downstream_order_reviews SET review_status = 'exception', review_note = :note, "
+            "reviewer_id = :rid, reviewer_name = :rname, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+        ), {"id": review_id, "note": f"重复下单拦截: 该审核单已在ERP订单 {existing_order} 中存在",
+            "rid": current_user.id, "rname": current_user.real_name})
+        db.commit()
+        raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     normalized = _normalize_order(order_data, customer.get("customer_name") or "")
+    _inject_review_uid_to_remark(normalized, review_uid)
+    _log("调用 ERP 创建订单+审核...")
     result = await erp_bridge.create_sales_order(normalized, customer)
+    new_order_no = result.get("order_no") or ""
+    _log(f"ERP 下单完成, 单号={new_order_no}")
+    pnos = [item.get("product_no") for item in normalized.get("items", []) if item.get("product_no")]
     db.execute(
         text(
             "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'manual_ordered', manual_order_json = :manual_order_json, erp_order_no = :erp_order_no, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
@@ -1242,20 +1506,42 @@ async def manual_order(db: Session, review_id: int, customer_id: int, order_data
             "customer_id": customer_id,
             "customer_name": customer.get("customer_name") or "",
             "manual_order_json": _json_dumps(normalized),
-            "erp_order_no": result.get("order_no") or "",
+            "erp_order_no": new_order_no,
             "review_note": review_note,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,
         },
     )
     db.commit()
-    return {**result, "review_status": "manual_ordered"}
+    _log("DB更新完成")
+    _trigger_incremental_sync(order_no=new_order_no, product_nos=pnos)
+    _log("全流程完成 ✅")
+    return {**result, "review_status": "manual_ordered", "_debug_logs": _logs}
 
 
-def void_review(db: Session, review_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
-    row = db.execute(text("SELECT id FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
+def void_review(db: Session, review_id: int, current_user: User, customer_id: int | None = None, review_note: str = "") -> dict[str, Any]:
+    row = db.execute(text("SELECT id, review_uid, customer_id FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
     if not row:
         raise ValueError("待审核记录不存在")
+    review_uid = row.get("review_uid") or ""
+    cid = customer_id or row.get("customer_id")
+    if cid and review_uid:
+        try:
+            customer = _load_customer(db, cid)
+            erp_customer_id = customer.get("erp_customer_id") or ""
+            existing_order = _check_review_uid_in_recent_orders(db, erp_customer_id, review_uid)
+            if existing_order:
+                db.execute(text(
+                    "UPDATE downstream_order_reviews SET review_status = 'exception', review_note = :note, "
+                    "reviewer_id = :rid, reviewer_name = :rname, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+                ), {"id": review_id, "note": f"重复下单拦截: 该审核单已在ERP订单 {existing_order} 中存在",
+                    "rid": current_user.id, "rname": current_user.real_name})
+                db.commit()
+                raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
+        except ValueError:
+            raise
+        except Exception:
+            pass
     db.execute(
         text(
             "UPDATE downstream_order_reviews SET review_status = 'voided', review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
@@ -1269,3 +1555,23 @@ def void_review(db: Session, review_id: int, current_user: User, review_note: st
     )
     db.commit()
     return {"review_status": "voided"}
+
+
+def revert_to_pending(db: Session, review_id: int, current_user: User) -> dict[str, Any]:
+    row = db.execute(text("SELECT id, review_status FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
+    if not row:
+        raise ValueError("记录不存在")
+    if row["review_status"] not in ("voided", "exception"):
+        raise ValueError("只有废单或异常状态才能转为待审核")
+    db.execute(
+        text(
+            "UPDATE downstream_order_reviews SET review_status = 'pending', reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NULL, updated_at = NOW() WHERE id = :id"
+        ),
+        {
+            "id": review_id,
+            "reviewer_id": current_user.id,
+            "reviewer_name": current_user.real_name,
+        },
+    )
+    db.commit()
+    return {"review_status": "pending"}

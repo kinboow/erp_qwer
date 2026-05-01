@@ -1,7 +1,7 @@
 import request from '@/utils/request'
 
-export const getSalesOrders = (params) => {
-  return request({ url: '/api/sales-orders/', method: 'get', params })
+export const getSalesOrders = (params, options = {}) => {
+  return request({ url: '/api/sales-orders/', method: 'get', params, ...options })
 }
 
 export const getOrderDetail = (orderNo) => {

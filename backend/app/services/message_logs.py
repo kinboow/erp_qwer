@@ -51,6 +51,7 @@ def ensure_message_logs_table(db: Session):
         "ALTER TABLE message_logs ADD UNIQUE INDEX idx_msg_uid (msg_uid)",
         "ALTER TABLE message_logs ADD COLUMN ai_recognized TINYINT NOT NULL DEFAULT 0 AFTER payload_json",
         "ALTER TABLE message_logs ADD COLUMN is_at_bot TINYINT NOT NULL DEFAULT 0 AFTER ai_recognized",
+        "ALTER TABLE message_logs ADD COLUMN oss_key VARCHAR(500) DEFAULT '' AFTER is_at_bot",
     ):
         try:
             db.execute(text(col_sql))

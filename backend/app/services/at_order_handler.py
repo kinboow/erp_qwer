@@ -23,6 +23,7 @@ from app.database import SessionLocal, run_in_threadpool
 
 from app.services.ai_order_parser import AIOrderParserError, ai_order_parser
 from app.services.downstream_orders import (
+    _generate_review_uid,
     _normalize_order,
     ensure_review_state,
     resolve_customer_by_room,
@@ -688,19 +689,21 @@ def _write_review(
 ) -> int:
     """写入 downstream_order_reviews 表"""
     ensure_review_state(db)
+    review_uid = _generate_review_uid()
     result = db.execute(
         text(
             "INSERT INTO downstream_order_reviews ("
-            "source_type, instance_id, room_id, sender_id, message_type, content_text, "
+            "review_uid, source_type, instance_id, room_id, sender_id, message_type, content_text, "
             "parse_status, review_status, customer_id, customer_name, "
             "parsed_order_json, ai_error, msg_log_id"
             ") VALUES ("
-            "'wechat_at_order', :instance_id, :room_id, :sender_id, 'batch', :content_text, "
+            ":review_uid, 'wechat_at_order', :instance_id, :room_id, :sender_id, 'batch', :content_text, "
             ":parse_status, 'pending', :customer_id, :customer_name, "
             ":parsed_order_json, :ai_error, :msg_log_id"
             ")"
         ),
         {
+            "review_uid": review_uid,
             "instance_id": instance_id,
             "room_id": room_id,
             "sender_id": sender_id,
@@ -714,7 +717,10 @@ def _write_review(
         },
     )
     db.commit()
-    return result.lastrowid
+    review_id = result.lastrowid
+    from app.services.review_events import notify_review_change
+    notify_review_change("new_review", {"review_id": review_id})
+    return review_id
 
 
 # ---------------------------------------------------------------------------

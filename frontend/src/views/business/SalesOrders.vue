@@ -152,7 +152,7 @@ async function fetchOrders() {
       params.date_start = filter.dateRange[0]
       params.date_end = filter.dateRange[1]
     }
-    const res = await getSalesOrders(params)
+    const res = await getSalesOrders(params, { silentError: true })
     const d = res.data || {}
     orders.value = d.list || []
     total.value = d.total || 0
