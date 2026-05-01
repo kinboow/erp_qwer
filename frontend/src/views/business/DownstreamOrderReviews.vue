@@ -67,12 +67,54 @@
           <div class="detail-body">
             <div class="compare-grid">
               <div class="compare-left">
-                <div class="panel-label">原始消息</div>
-                <div class="msg-meta-row">
-                  <span>类型：{{ selectedReview.message_type || '-' }}</span>
-                  <span>附件：{{ selectedReview.attachment_name || '-' }}</span>
+                <div class="panel-label">群聊上下文</div>
+                <div class="chat-container" ref="chatContainerRef">
+                  <div v-if="contextLoading" class="chat-loading">
+                    <el-icon class="is-loading"><Loading /></el-icon> 加载聊天记录...
+                  </div>
+                  <template v-else-if="contextMessages.length > 0">
+                    <div
+                      v-for="msg in contextMessages"
+                      :key="msg.id"
+                      class="chat-msg"
+                      :class="{ 'is-trigger': msg.id === triggerMsgId }"
+                    >
+                      <div class="chat-msg-header">
+                        <span class="chat-sender">{{ msg.sender_name || msg.sender_id || '未知' }}</span>
+                        <span class="chat-time">{{ formatChatTime(msg.created_at) }}</span>
+                      </div>
+                      <div class="chat-msg-body">
+                        <template v-if="msg.message_type === 'image'">
+                          <div class="chat-img-wrap" @click="previewImage(msg)">
+                            <el-icon class="chat-img-icon"><Picture /></el-icon>
+                            <span>[图片]</span>
+                          </div>
+                        </template>
+                        <template v-else-if="msg.message_type === 'file'">
+                          <div class="chat-file-wrap">
+                            <el-icon><Document /></el-icon>
+                            <span>{{ msg.content_preview || '[文件]' }}</span>
+                          </div>
+                        </template>
+                        <template v-else>
+                          <span class="chat-text">{{ msg.content_preview || '[空消息]' }}</span>
+                        </template>
+                      </div>
+                    </div>
+                  </template>
+                  <el-empty v-else description="暂无聊天记录" :image-size="48" />
                 </div>
-                <pre class="raw-block">{{ formatRawMessage(selectedReview) }}</pre>
+                <!-- 当前审核消息的图片预览 -->
+                <div v-if="selectedReview.attachment_base64 && isReviewImage" class="review-image-section">
+                  <div class="panel-label" style="margin-top:12px">订单图片</div>
+                  <el-image
+                    :src="`data:${selectedReview.attachment_mime || 'image/png'};base64,${selectedReview.attachment_base64}`"
+                    fit="contain"
+                    class="review-image-preview"
+                    :preview-src-list="[`data:${selectedReview.attachment_mime || 'image/png'};base64,${selectedReview.attachment_base64}`]"
+                    preview-teleported
+                  />
+                </div>
               </div>
 
               <div class="compare-right">
@@ -178,11 +220,13 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Loading, Picture, Document } from '@element-plus/icons-vue'
 import { getCustomerList } from '@/api/customer'
 import {
   approveReview,
+  getContextMessages,
   getReviewDetail,
   getReviewList,
   manualReview,
@@ -211,9 +255,22 @@ const pagination = reactive({
   total: 0
 })
 
+const contextLoading = ref(false)
+const contextMessages = ref([])
+const triggerMsgId = ref(null)
+const chatContainerRef = ref(null)
+const previewImageUrl = ref('')
+
 const manualForm = reactive({
   remark: '',
   items: []
+})
+
+const isReviewImage = computed(() => {
+  if (!selectedReview.value) return false
+  const mt = (selectedReview.value.message_type || '').toLowerCase()
+  const mime = (selectedReview.value.attachment_mime || '').toLowerCase()
+  return mt === 'image' || mime.startsWith('image/')
 })
 
 const currentOrder = computed(() => {
@@ -308,6 +365,47 @@ const selectReview = async (item) => {
   selectedReview.value = res.data
   selectedCustomerId.value = res.data.customer_id || null
   reviewNote.value = res.data.review_note || ''
+  await fetchContextMessages(item.id)
+}
+
+const fetchContextMessages = async (reviewId) => {
+  contextLoading.value = true
+  contextMessages.value = []
+  triggerMsgId.value = null
+  try {
+    const res = await getContextMessages(reviewId)
+    contextMessages.value = res?.data?.messages || []
+    triggerMsgId.value = res?.data?.trigger_msg_id || null
+    await nextTick()
+    scrollToTrigger()
+  } catch {
+    contextMessages.value = []
+  } finally {
+    contextLoading.value = false
+  }
+}
+
+const scrollToTrigger = () => {
+  const container = chatContainerRef.value
+  if (!container) return
+  const triggerEl = container.querySelector?.('.is-trigger') || container.$el?.querySelector?.('.is-trigger')
+  if (triggerEl) {
+    triggerEl.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+}
+
+const formatChatTime = (value) => {
+  if (!value) return ''
+  const d = new Date(value)
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+const previewImage = (msg) => {
+  if (selectedReview.value?.attachment_base64 && msg.id === triggerMsgId.value) {
+    previewImageUrl.value = `data:${selectedReview.value.attachment_mime || 'image/png'};base64,${selectedReview.value.attachment_base64}`
+  } else {
+    ElMessage.info('图片预览仅支持当前订单图片')
+  }
 }
 
 const ensureCustomerSelected = () => {
@@ -641,26 +739,109 @@ onMounted(async () => {
   margin-bottom: 10px;
 }
 
-.msg-meta-row {
-  display: flex;
-  gap: 16px;
-  font-size: 12px;
-  color: var(--lark-text-secondary);
-  margin-bottom: 10px;
+/* ===== 聊天记录容器 ===== */
+.chat-container {
+  flex: 1;
+  min-height: 0;
+  max-height: 360px;
+  overflow-y: auto;
+  background: #f0f1f5;
+  border-radius: 8px;
+  padding: 12px 10px;
 }
 
-.raw-block {
-  flex: 1;
-  background: #f7f8fa;
+.chat-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  color: var(--lark-text-secondary);
+  font-size: 13px;
+  padding: 24px 0;
+}
+
+/* 单条聊天消息 */
+.chat-msg {
+  padding: 6px 10px;
+  margin-bottom: 6px;
   border-radius: 8px;
-  padding: 12px;
+  transition: background 0.15s;
+}
+
+.chat-msg:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.chat-msg.is-trigger {
+  background: #e6f7ff;
+  border-left: 3px solid #409eff;
+}
+
+.chat-msg-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 3px;
+}
+
+.chat-sender {
   font-size: 12px;
-  line-height: 1.6;
-  color: #334155;
-  white-space: pre-wrap;
+  font-weight: 600;
+  color: #5b7083;
+}
+
+.chat-time {
+  font-size: 11px;
+  color: #999;
+}
+
+.chat-msg-body {
+  font-size: 13px;
+  color: #1d2129;
+  line-height: 1.5;
   word-break: break-word;
-  overflow: auto;
-  margin: 0;
+}
+
+.chat-text {
+  white-space: pre-wrap;
+}
+
+.chat-img-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #409eff;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.chat-img-wrap:hover {
+  text-decoration: underline;
+}
+
+.chat-img-icon {
+  font-size: 16px;
+}
+
+.chat-file-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #67c23a;
+  font-size: 13px;
+}
+
+/* 审核消息图片预览 */
+.review-image-section {
+  flex-shrink: 0;
+}
+
+.review-image-preview {
+  max-width: 100%;
+  max-height: 200px;
+  border-radius: 8px;
+  border: 1px solid var(--lark-border-light);
+  cursor: pointer;
 }
 
 .order-info-bar {

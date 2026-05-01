@@ -127,4 +127,6 @@ def ensure_downstream_support_tables(db: Session):
     _add_column_if_not_exists(db, "downstream_customers", "nature", "VARCHAR(500) DEFAULT ''")
     _add_column_if_not_exists(db, "downstream_customers", "credit_limit", "DECIMAL(12,2) DEFAULT NULL")
     _add_column_if_not_exists(db, "downstream_customers", "synced_at", "DATETIME NULL")
+    # 审核记录关联消息日志ID
+    _add_column_if_not_exists(db, "downstream_order_reviews", "msg_log_id", "BIGINT UNSIGNED NULL")
     db.commit()

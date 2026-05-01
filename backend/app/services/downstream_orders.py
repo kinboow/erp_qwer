@@ -736,34 +736,15 @@ def _normalize_order(parsed: dict[str, Any], customer_name: str = "") -> dict[st
             continue
         items.append({
             "product_no": str(item.get("product_no") or "").strip(),
-            "product_name": str(item.get("product_name") or "").strip(),
             "color": str(item.get("color") or "").strip(),
-            "brand": str(item.get("brand") or "").strip(),
-            "unit": str(item.get("unit") or "件").strip() or "件",
-            "price": float(item.get("price") or 0),
-            "discount": _normalize_discount(item.get("discount") or 100),
-            "packaging": str(item.get("packaging") or "").strip(),
-            "customer_product_no": str(item.get("customer_product_no") or "").strip(),
-            "grade": str(item.get("grade") or "").strip(),
-            "product_spec": str(item.get("product_spec") or "").strip(),
-            "semi_product_no": str(item.get("semi_product_no") or "").strip(),
-            "linked_order_ref": str(item.get("linked_order_ref") or "").strip(),
-            "remark": str(item.get("remark") or "").strip(),
             "sizes": sizes,
+            "remark": str(item.get("remark") or "").strip(),
         })
 
-    order_date = str(parsed.get("order_date") or "").strip()
-    if len(order_date) == 10:
-        order_date = f"{order_date} 00:00:00"
-    if not order_date:
-        order_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     return {
-        "customer_name": str(parsed.get("customer_name") or customer_name or "").strip(),
-        "contact_person": str(parsed.get("contact_person") or "").strip(),
-        "order_date": order_date,
+        "customer_name": str(customer_name or "").strip(),
+        "order_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "remark": str(parsed.get("remark") or "").strip(),
-        "brand": str(parsed.get("brand") or "").strip(),
         "items": items,
         "uncertainties": parsed.get("uncertainties") or [],
     }
@@ -969,17 +950,14 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
 
         normalized = _normalize_order(parsed, customer_hint)
 
-        # 硬校验：最终订单中的 product_no 必须在本年产品目录中
+        # 软校验：标记不在本年产品目录中的款号（但不过滤，保留所有数据）
         if catalog:
             valid_pnos = {item["product_no"] for item in catalog}
-            original_count = len(normalized.get("items") or [])
-            normalized["items"] = [
-                it for it in (normalized.get("items") or [])
-                if it.get("product_no") in valid_pnos
-            ]
-            if len(normalized["items"]) < original_count:
-                logger.info("[AI Parse] review=%d 硬校验过滤订单items: %d -> %d",
-                            review_id, original_count, len(normalized["items"]))
+            unknown_pnos = {it.get("product_no") for it in (normalized.get("items") or [])
+                           if it.get("product_no") and it["product_no"] not in valid_pnos}
+            if unknown_pnos:
+                logger.warning("[AI Parse] review=%d 以下款号不在本年产品目录中(保留不过滤): %s",
+                               review_id, unknown_pnos)
         db.execute(
             text("UPDATE downstream_order_reviews SET parse_status = 'success', ai_error = '', parsed_order_json = :parsed_order_json, updated_at = NOW() WHERE id = :id"),
             {"id": review_id, "parsed_order_json": _json_dumps(normalized)},
@@ -1070,6 +1048,9 @@ def list_reviews(db: Session, page: int = 1, page_size: int = 20, review_status:
     if review_status:
         where_parts.append("review_status = :review_status")
         params["review_status"] = review_status
+    # 待审核列表只显示AI解析成功的记录
+    if review_status == "pending" or not review_status:
+        where_parts.append("parse_status = 'success'")
     if customer_id:
         where_parts.append("customer_id = :customer_id")
         params["customer_id"] = customer_id
@@ -1094,6 +1075,77 @@ def get_review_detail(db: Session, review_id: int) -> dict[str, Any]:
     if not row:
         raise ValueError("待审核记录不存在")
     return serialize_review(row)
+
+
+def get_review_context_messages(db: Session, review_id: int) -> dict[str, Any]:
+    """获取审核记录关联的上下文消息（触发消息前5条+后5条），用于聊天记录展示。"""
+    from app.services.message_logs import ensure_message_logs_table
+    ensure_message_logs_table(db)
+    ensure_review_state(db)
+
+    row = db.execute(
+        text("SELECT id, room_id, msg_log_id, created_at FROM downstream_order_reviews WHERE id = :id"),
+        {"id": review_id},
+    ).mappings().first()
+    if not row:
+        raise ValueError("待审核记录不存在")
+
+    room_id = row.get("room_id") or ""
+    msg_log_id = row.get("msg_log_id")
+    review_created_at = row.get("created_at")
+
+    if not room_id:
+        return {"messages": [], "trigger_msg_id": msg_log_id}
+
+    cols = (
+        "id, msg_uid, instance_id, room_id, room_name, sender_id, sender_name, "
+        "message_type, content_preview, ai_recognized, is_at_bot, created_at"
+    )
+
+    if msg_log_id:
+        # 用 msg_log_id 精确定位：前5条 + 触发消息本身 + 后5条
+        before_rows = db.execute(text(
+            f"SELECT {cols} FROM message_logs "
+            "WHERE room_id = :room_id AND id < :msg_id "
+            "ORDER BY id DESC LIMIT 5"
+        ), {"room_id": room_id, "msg_id": msg_log_id}).mappings().all()
+
+        trigger_row = db.execute(text(
+            f"SELECT {cols} FROM message_logs WHERE id = :msg_id"
+        ), {"msg_id": msg_log_id}).mappings().all()
+
+        after_rows = db.execute(text(
+            f"SELECT {cols} FROM message_logs "
+            "WHERE room_id = :room_id AND id > :msg_id "
+            "ORDER BY id ASC LIMIT 5"
+        ), {"room_id": room_id, "msg_id": msg_log_id}).mappings().all()
+
+        all_rows = list(reversed(before_rows)) + list(trigger_row) + list(after_rows)
+    else:
+        # 无 msg_log_id，用 created_at 近似查找（前5+后5）
+        before_rows = db.execute(text(
+            f"SELECT {cols} FROM message_logs "
+            "WHERE room_id = :room_id AND created_at <= :ts "
+            "ORDER BY created_at DESC, id DESC LIMIT 5"
+        ), {"room_id": room_id, "ts": review_created_at}).mappings().all()
+
+        after_rows = db.execute(text(
+            f"SELECT {cols} FROM message_logs "
+            "WHERE room_id = :room_id AND created_at > :ts "
+            "ORDER BY created_at ASC, id ASC LIMIT 5"
+        ), {"room_id": room_id, "ts": review_created_at}).mappings().all()
+
+        all_rows = list(reversed(before_rows)) + list(after_rows)
+
+    messages = []
+    for r in all_rows:
+        item = dict(r)
+        for k, v in item.items():
+            if hasattr(v, "strftime"):
+                item[k] = v.strftime("%Y-%m-%d %H:%M:%S")
+        messages.append(item)
+
+    return {"messages": messages, "trigger_msg_id": msg_log_id}
 
 
 def _load_customer(db: Session, customer_id: int) -> dict[str, Any]:

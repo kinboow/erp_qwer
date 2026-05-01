@@ -111,8 +111,8 @@ def log_ai_call(
             "dur": duration_ms,
             "status": status[:20],
             "err": error_message[:2000] if error_message else None,
-            "req": request_summary[:2000] if request_summary else None,
-            "resp": response_summary[:2000] if response_summary else None,
+            "req": request_summary[:4000] if request_summary else None,
+            "resp": response_summary[:16000] if response_summary else None,
         })
         db.commit()
     except Exception as exc:

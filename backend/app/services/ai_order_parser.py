@@ -64,28 +64,21 @@ missing_fields 只能包含这四个值：款号、颜色、尺码、数量
 # ==========================================================================
 ORDER_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客户通过企微发送的文本、图片、表格内容解析成结构化订单 JSON。
 要求：
-1. 不需要识别客户名、联系人、下单日期，这些字段留空即可。
-2. items 中每个款号单独成行，并识别颜色、尺码数量。
+1. 只提取货号、颜色、尺码、数量、备注信息，不需要识别客户名、联系人、下单日期等无关信息。
+2. items 中每个款号+颜色单独成行，sizes 包含所有识别到的尺码和数量。
 3. 如果信息不确定，保留在 uncertainties 数组中，不要编造。
 4. 严格返回 JSON，不要返回 markdown。
 返回结构：
 {
-  "remark": "",
   "items": [
     {
-      "product_no": "",
-      "product_name": "",
-      "color": "",
-      "brand": "",
-      "unit": "件",
-      "price": 0,
-      "discount": 1,
-      "sizes": [
-        {"size": "S", "qty": 1}
-      ],
+      "product_no": "款号",
+      "color": "颜色",
+      "sizes": [{"size": "S", "qty": 1}],
       "remark": ""
     }
   ],
+  "remark": "",
   "uncertainties": []
 }
 """
@@ -152,8 +145,8 @@ class AIOrderParser:
             return _ensure_dict(json.loads(text_content))
         except Exception:
             pass
-        # 2. 尝试从 ```json ... ``` 代码块中提取
-        m = re.search(r"```(?:json)?\s*\n?(\{.*?\})\s*```", text_content, re.DOTALL)
+        # 2. 尝试从 ```json ... ``` 代码块中提取（贪婪匹配以处理嵌套JSON）
+        m = re.search(r"```(?:json)?\s*\n?(\{.*\})\s*```", text_content, re.DOTALL)
         if m:
             try:
                 return _ensure_dict(json.loads(m.group(1)))
@@ -241,6 +234,7 @@ class AIOrderParser:
             "model": model,
             "temperature": temperature,
             "messages": messages,
+            "max_tokens": 16384,
         }
         # response_format json_object 仅部分供应商/模型支持
         if provider == "qwen":
@@ -279,7 +273,15 @@ class AIOrderParser:
             duration_ms = int((time.time() - t0) * 1000)
 
             usage = payload.get("usage") or {}
-            content = (((payload.get("choices") or [{}])[0].get("message") or {}).get("content") or "{}").strip()
+            choice = (payload.get("choices") or [{}])[0]
+            content = (choice.get("message") or {}).get("content") or "{}"
+            content = content.strip()
+            finish_reason = choice.get("finish_reason") or ""
+
+            # 检测输出截断
+            if finish_reason == "length":
+                logger.warning("AI 输出被截断(finish_reason=length) [%s caller=%s] completion_tokens=%s content_len=%d",
+                               model, caller, usage.get("completion_tokens"), len(content))
 
             # 记录日志
             if db is not None:
@@ -293,7 +295,7 @@ class AIOrderParser:
                     duration_ms=duration_ms,
                     status="success",
                     request_summary=req_summary,
-                    response_summary=content[:2000],
+                    response_summary=content[:16000],
                 )
 
             return self._extract_json(content)
@@ -656,17 +658,24 @@ class AIOrderParser:
             mappings=product_context_data.get("mappings") or {},
         )
 
-        # 构建用户消息：仅 "解析内容" + 图片，不附加多余文本
-        user_parts: list[dict[str, Any]] = [{"type": "text", "text": "解析内容"}]
+        # 构建用户消息：包含文字 + 图片 + 文件摘要
+        user_parts: list[dict[str, Any]] = [{"type": "text", "text": "请解析以下内容中的订单数据："}]
         for msg in context_messages:
-            if msg.get("type") == "image":
+            msg_type = msg.get("type", "text")
+            if msg_type == "text":
+                text = (msg.get("content") or "").strip()
+                if text:
+                    user_parts.append({"type": "text", "text": text})
+            elif msg_type == "image":
                 if msg.get("oss_url"):
                     user_parts.append({"type": "image_url", "image_url": {"url": msg["oss_url"]}})
                 elif msg.get("base64"):
                     mime = msg.get("mime") or "image/png"
                     user_parts.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{msg['base64']}"}})
-        if len(user_parts) == 1 and not any(m.get("type") == "image" for m in context_messages):
-            return {"style_code": None, "original_style_code": None, "inventory": [], "remarks": "无图片内容"}
+            elif msg_type == "file" and msg.get("excel_summary"):
+                user_parts.append({"type": "text", "text": f"[Excel文件] {msg.get('file_name', '')}:\n{msg['excel_summary']}"})
+        if len(user_parts) <= 1:
+            return {"items": [], "remark": "无有效内容"}
 
         user_content: Any = user_parts
 
@@ -688,23 +697,29 @@ class AIOrderParser:
 _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE = """你是一个服装行业订单内容提取助手。
 你有两个任务：
 
-任务1：从客户发来的内容（文字、图片、表格）中，提取出所有可能是款号/货号/卡号/编号的文本值。
-- 图片或表格中可能存在**多列**包含款号信息（例如"款号"列、"货号"列、"卡号"列、"编号"列等）
-- 凡是列名包含"款号"、"货号"、"卡号"、"编号"、"款"、"货"等关键词的列，里面的值都要提取
-- 文字消息中出现的类似款号/编号的字符串也要提取
-- 不要把价格、数量、尺码、日期等数字误认为款号
-- 将所有提取到的原始文本放入 raw_texts 数组
+任务1：从客户发来的内容（文字、图片、表格）中，提取出所有可能用来识别产品的文本。
+需要提取两类信息：
+A. 款号/货号/卡号/编号（纯数字或字母数字组合）
+   - 图片或表格中可能存在"款号"、"货号"、"卡号"、"编号"等列，里面的值都要提取
+   - 文字消息中出现的类似款号/编号的字符串也要提取
+   - 不要把价格、数量、尺码、日期等数字误认为款号
+B. 产品名称（如"空气层弯刀裤82761"、"砂洗云朵裤直筒裤95890"、"天丝牛仔裤82892"等）
+   - 表格标题行、产品描述中出现的完整产品名称也要提取
+   - 产品名称通常包含面料/款式描述+款号，如"钛金棉青花瓷溜溜裤82861"
+   - 把完整的产品名称文本（包含名称和款号）原样提取
+
+将所有提取到的原始文本（款号和产品名称都放）放入 raw_texts 数组。
 
 任务2：如果输入包含图片，判断图片中的纸张/内容需要顺时针旋转多少度才能变成正向可读。
 - rotation_angle 只能是：0, 90, -90, 180, -180, 270, -270
 - 0 表示图片已经是正的
 - 如果没有图片或无法判断，填 0
 
-注意：你只需要提取原始文本和判断旋转角度，**不需要识别客户名、联系人、下单日期**，也**不需要判断款号是否正确**，只管把看到的款号/货号原样提取出来。
+注意：你只需要提取原始文本和判断旋转角度，**不需要识别客户名、联系人、下单日期**，也**不需要判断款号是否正确**，只管把看到的款号/货号/产品名称原样提取出来。
 
 严格只返回 JSON，不要返回 markdown：
 {{
-  "raw_texts": ["1234", "AB-5678", "某某款名"],
+  "raw_texts": ["82761", "空气层弯刀裤82761", "95890", "砂洗云朵裤直筒裤95890"],
   "rotation_angle": 0
 }}
 """
@@ -713,13 +728,18 @@ _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE = """你是一个服装行业订单内容提
 def _match_catalog(raw_texts: list[str], catalog: list[dict[str, Any]]) -> list[str]:
     """将 AI 提取的原始文本与产品目录做精确匹配。
 
-    匹配规则:
+    匹配规则（优先级从高到低）:
         1. raw_text 完全等于某个 product_no → 匹配
         2. raw_text 完全等于某个 alias → 映射到对应的 product_no
-        3. 去重，同一个 product_no 只返回一次
+        3. raw_text 完全等于某个 product_name → 映射到对应的 product_no
+        4. raw_text 是某个 product_name 的子串（如"砂洗云朵裤直筒裤"包含"砂洗云朵裤"）→ 映射
+        5. 去重，同一个 product_no 只返回一次
     """
     # 构建查找表: text -> product_no
     lookup: dict[str, str] = {}
+    # product_name 列表，用于子串匹配
+    name_to_pno: list[tuple[str, str]] = []
+
     for item in catalog:
         pno = item.get("product_no", "").strip()
         if not pno:
@@ -731,11 +751,23 @@ def _match_catalog(raw_texts: list[str], catalog: list[dict[str, Any]]) -> list[
             alias = alias.strip()
             if alias:
                 lookup[alias] = pno
+        # product_name（映射前的原始名称）
+        pname = item.get("product_name", "").strip()
+        if pname:
+            lookup[pname] = pno
+            name_to_pno.append((pname, pno))
 
     matched: list[str] = []
     seen: set[str] = set()
     for raw in raw_texts:
+        # 精确匹配
         pno = lookup.get(raw)
+        # 子串匹配：raw_text 包含某个 product_name，或 product_name 包含 raw_text
+        if not pno:
+            for name, candidate_pno in name_to_pno:
+                if name in raw or raw in name:
+                    pno = candidate_pno
+                    break
         if pno and pno not in seen:
             seen.add(pno)
             matched.append(pno)
@@ -769,23 +801,26 @@ _CONTEXT_PARSER_PROMPT_TEMPLATE = """【⚠️ 固定配置 — 各款号可选�
 
 【核心执行规则（AI必须100%严格遵守，不得修改）】
 1. 图片解析核心要求
-你是专业的手写服装订单数据解析工具，仅识别内容中与服装款号、颜色、尺码、对应数量相关的信息，其余无关信息全部忽略。针对手写内容，优先做语义精准匹配。
+你是专业的手写服装订单数据解析工具，识别内容中与服装款号、颜色、尺码、对应数量相关的信息。针对手写内容，优先做语义精准匹配。**所有识别到的有效数据都必须输出，不允许遗漏任何一条。**
 
-2. 按款号匹配颜色和尺码（极其重要）
+2. 按款号匹配颜色和尺码
 - 每个款号有**独立的**可选颜色列表和可选尺码列表（见上方配置）
-- 识别到某款号的报货数据时，颜色必须从**该款号自己的可选颜色列表**中匹配，尺码必须从**该款号自己的可选尺码列表**中匹配
-- 手写简写/俗称必须对应到列表内的标准名（如手写"黑"匹配"黑色"，手写"茶"匹配"茶色"）
-- 颜色或尺码无法匹配到该款号的可选列表时，直接丢弃，绝对禁止编造
-- 每个匹配到的有效颜色，单独生成一条记录；size_stock 必须完整包含**该款号**可选尺码列表里的全部尺码，识别到数量的填阿拉伯数字，无标注/无法识别的填0
+- 识别到某款号的数据时，颜色必须从**该款号自己的可选颜色列表**中智能匹配
+- **颜色智能匹配规则（极其重要）：**
+  - 手写简写/俗称/近义词必须智能对应到列表内最接近的标准名
+  - 例如："米白"→"奶油白"、"黑"→"黑色"/"奢雅黑"、"花灰"→"花灰色"、"茶"→"茶色"、"藏青色"→"藏青"、"酱紫"→"酱紫色"
+  - 判断标准：只要语义上指的是同一种颜色，就应该匹配到列表中对应的标准名称
+  - 只有当图片中的颜色与列表中的所有颜色都完全无关时，才丢弃
+- 尺码必须从**该款号自己的可选尺码列表**中匹配
+- 每个匹配到的有效颜色，单独生成一条记录；sizes 必须完整包含**该款号**可选尺码列表里的全部尺码，识别到数量的填阿拉伯数字，无标注/无法识别的填0
 
-3. 款号映射转换规则
-- 先识别内容中的原始款号，再按【款号映射关系】做转换，原始款号完全匹配映射键的，输出对应目标款号
-- 若原始款号不在映射关系中，但直接匹配上方配置中的某个款号，则直接使用该款号
-- 若原始款号既不在映射关系中，也不在上方款号配置中，则忽略该款号及其所有数据
+3. 款号处理规则
+- 先识别内容中的原始款号，再按【款号映射关系】做转换
+- 若原始款号直接匹配上方配置中的某个款号，则直接使用
+- **若原始款号既不在映射关系中也不在上方配置中，仍然要解析该款号的数据**，使用图片中原样的款号和颜色名称输出，sizes中按图片中看到的尺码列输出
 
 4. 异常处理规则
 - 手写内容模糊、涂改、无法辨认的数量，统一填0
-- 识别到的颜色/尺码无法匹配到该款号可选列表的，直接丢弃
 - 未识别到任何有效数据的，items为空数组，remark标注原因
 
 5. 输出格式铁则
@@ -796,12 +831,7 @@ _CONTEXT_PARSER_PROMPT_TEMPLATE = """【⚠️ 固定配置 — 各款号可选�
   "items": [
     {{
       "product_no": "款号",
-      "product_name": "",
       "color": "颜色",
-      "brand": "",
-      "unit": "件",
-      "price": 0,
-      "discount": 1,
       "sizes": [{{"size": "尺码", "qty": 数量}}],
       "remark": ""
     }}
@@ -870,21 +900,13 @@ def convert_inventory_result_to_standard(ai_result: dict[str, Any]) -> dict[str,
         if sizes and color:
             items.append({
                 "product_no": product_no,
-                "product_name": "",
                 "color": color,
-                "brand": "",
-                "unit": "件",
-                "price": 0,
-                "discount": 1,
                 "sizes": sizes,
                 "remark": "",
             })
 
     remarks = str(ai_result.get("remarks") or "").strip()
     return {
-        "customer_name": "",
-        "contact_person": "",
-        "order_date": "",
         "remark": remarks if remarks and remarks != "无" else "",
         "items": items,
         "uncertainties": [],

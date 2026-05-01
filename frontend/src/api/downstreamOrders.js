@@ -53,3 +53,10 @@ export const voidReview = (id, data) => {
     data
   })
 }
+
+export const getContextMessages = (id) => {
+  return request({
+    url: `/api/downstream-orders/reviews/${id}/context-messages`,
+    method: 'get'
+  })
+}

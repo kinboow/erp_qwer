@@ -11,6 +11,7 @@ from app.services.downstream_orders import (
     approve_review,
     create_review_from_callback,
     get_review_attachment_debug,
+    get_review_context_messages,
     get_review_detail,
     list_reviews,
     manual_order,
@@ -100,6 +101,21 @@ async def reparse_review(
     try:
         data = await parse_review_content(db, review_id)
         return json_response(message="重新解析成功", data=data)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/reviews/{review_id}/context-messages", summary="获取审核记录上下文聊天消息")
+async def get_review_context_messages_api(
+    review_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        data = get_review_context_messages(db, review_id)
+        return json_response(data=data)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

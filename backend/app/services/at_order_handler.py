@@ -684,6 +684,7 @@ def _write_review(
     context_summary: str,
     parse_status: str = "success",
     ai_error: str = "",
+    msg_log_id: int = 0,
 ) -> int:
     """写入 downstream_order_reviews 表"""
     ensure_review_state(db)
@@ -692,11 +693,11 @@ def _write_review(
             "INSERT INTO downstream_order_reviews ("
             "source_type, instance_id, room_id, sender_id, message_type, content_text, "
             "parse_status, review_status, customer_id, customer_name, "
-            "parsed_order_json, ai_error"
+            "parsed_order_json, ai_error, msg_log_id"
             ") VALUES ("
             "'wechat_at_order', :instance_id, :room_id, :sender_id, 'batch', :content_text, "
             ":parse_status, 'pending', :customer_id, :customer_name, "
-            ":parsed_order_json, :ai_error"
+            ":parsed_order_json, :ai_error, :msg_log_id"
             ")"
         ),
         {
@@ -709,6 +710,7 @@ def _write_review(
             "customer_name": customer.get("customer_name") or "",
             "parsed_order_json": json.dumps(parsed_order, ensure_ascii=False) if parsed_order else None,
             "ai_error": ai_error,
+            "msg_log_id": msg_log_id or None,
         },
     )
     db.commit()
@@ -776,23 +778,20 @@ async def _process_order(
         logger.info("%s: 步骤3 normalize后 items=%s room=%s", source_label,
                      [{"pno": it.get("product_no"), "color": it.get("color")} for it in (final_order.get("items") or [])], room_id)
 
-        # 硬校验：最终订单中的 product_no 必须在本年产品目录中
+        # 软校验：标记不在本年产品目录中的款号（但不过滤，保留所有数据）
         if catalog:
             valid_pnos = {item["product_no"] for item in catalog}
-            original_count = len(final_order.get("items") or [])
-            final_order["items"] = [
-                it for it in (final_order.get("items") or [])
-                if it.get("product_no") in valid_pnos
-            ]
-            if len(final_order["items"]) < original_count:
-                logger.info("%s: 硬校验过滤订单items: %d -> %d room=%s",
-                            source_label, original_count, len(final_order["items"]), room_id)
+            unknown_pnos = {it.get("product_no") for it in (final_order.get("items") or [])
+                           if it.get("product_no") and it["product_no"] not in valid_pnos}
+            if unknown_pnos:
+                logger.warning("%s: 以下款号不在本年产品目录中(保留不过滤): %s room=%s",
+                               source_label, unknown_pnos, room_id)
 
         logger.info("%s: 解析完成 room=%s items=%d", source_label, room_id, len(final_order.get("items") or []))
 
         review_id = _write_review(
             db, final_order, customer, room_id, sender_id, instance_id, context_summary,
-            parse_status="success",
+            parse_status="success", msg_log_id=trigger_msg_id,
         )
 
         ensure_at_order_tables(db)
