@@ -1167,6 +1167,39 @@ onBeforeUnmount(() => {
   color: #67c23a;
 }
 
+/* 待确认 tab */
+.tab-label-badge {
+  position: relative;
+  display: inline-block;
+}
+
+.tab-label-badge .red-dot {
+  position: absolute;
+  top: -2px;
+  right: -8px;
+  width: 7px;
+  height: 7px;
+  background: #f56c6c;
+  border-radius: 50%;
+}
+
+.uncertain-panel {
+  padding: 12px 10px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.uncertain-item {
+  font-size: 13px;
+  color: #8c6d1f;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  line-height: 1.5;
+}
+
 /* ===== 微信风格聊天记录 ===== */
 
 .chat-panel {
@@ -1438,25 +1471,6 @@ onBeforeUnmount(() => {
   color: #303133;
 }
 
-.uncertainty-box {
-  margin-top: 12px;
-  background: #fff7e6;
-  border: 1px solid #ffd591;
-  border-radius: 8px;
-  padding: 10px 12px;
-}
-
-.uncertainty-title {
-  font-weight: 600;
-  font-size: 13px;
-  margin-bottom: 6px;
-}
-
-.uncertainty-item {
-  font-size: 13px;
-  color: #8c6d1f;
-  margin-bottom: 3px;
-}
 
 .edit-form-area {
   display: flex;
