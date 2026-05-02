@@ -686,18 +686,55 @@ def _write_review(
     parse_status: str = "success",
     ai_error: str = "",
     msg_log_id: int = 0,
+    message_type: str = "text",
 ) -> int:
     """写入 downstream_order_reviews 表"""
     ensure_review_state(db)
+
+    # 从 msg_log_id 补全 room_name / sender_name / message_type
+    room_name = ""
+    sender_name = ""
+    if msg_log_id:
+        try:
+            log_row = db.execute(
+                text("SELECT room_name, sender_name, message_type FROM message_logs WHERE id = :id"),
+                {"id": msg_log_id},
+            ).mappings().first()
+            if log_row:
+                room_name = log_row.get("room_name") or ""
+                sender_name = log_row.get("sender_name") or ""
+                if message_type == "text" and log_row.get("message_type"):
+                    message_type = log_row["message_type"]
+        except Exception:
+            pass
+
+    # 从 wechat_room_listeners 补全 room_name
+    if not room_name and room_id:
+        try:
+            from app.services.wechat_room_cache import get_room_name
+            room_name = get_room_name(room_id)
+        except Exception:
+            pass
+        if not room_name:
+            try:
+                r = db.execute(
+                    text("SELECT room_name FROM wechat_room_listeners WHERE room_id = :rid LIMIT 1"),
+                    {"rid": room_id},
+                ).mappings().first()
+                if r:
+                    room_name = r.get("room_name") or ""
+            except Exception:
+                pass
+
     review_uid = _generate_review_uid()
     result = db.execute(
         text(
             "INSERT INTO downstream_order_reviews ("
-            "review_uid, source_type, instance_id, room_id, sender_id, message_type, content_text, "
+            "review_uid, source_type, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_text, "
             "parse_status, review_status, customer_id, customer_name, "
             "parsed_order_json, ai_error, msg_log_id"
             ") VALUES ("
-            ":review_uid, 'wechat_at_order', :instance_id, :room_id, :sender_id, 'batch', :content_text, "
+            ":review_uid, 'wechat_at_order', :instance_id, :room_id, :room_name, :sender_id, :sender_name, :message_type, :content_text, "
             ":parse_status, 'pending', :customer_id, :customer_name, "
             ":parsed_order_json, :ai_error, :msg_log_id"
             ")"
@@ -706,7 +743,10 @@ def _write_review(
             "review_uid": review_uid,
             "instance_id": instance_id,
             "room_id": room_id,
+            "room_name": room_name,
             "sender_id": sender_id,
+            "sender_name": sender_name,
+            "message_type": message_type,
             "content_text": context_summary,
             "parse_status": parse_status,
             "customer_id": customer.get("id"),

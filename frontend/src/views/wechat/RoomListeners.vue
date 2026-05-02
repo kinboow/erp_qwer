@@ -117,7 +117,7 @@
           v-model:page-size="pagination.pageSize"
           :total="pagination.total"
           :page-sizes="[20, 50, 100, 200]"
-          layout="sizes, prev, pager, next, jumper"
+          layout="total, sizes, prev, pager, next, jumper"
           @size-change="fetchData"
           @current-change="fetchData"
         />

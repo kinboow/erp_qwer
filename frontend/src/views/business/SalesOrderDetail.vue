@@ -53,6 +53,30 @@
         </el-descriptions>
       </div>
 
+      <!-- 配货单打印记录 -->
+      <div class="info-section" v-if="printHistory.length > 0">
+        <h3 class="section-title">配货单打印记录</h3>
+        <el-table :data="printHistory" size="small" stripe class="print-history-table">
+          <el-table-column label="页码ID" width="180">
+            <template #default="{ row }">
+              <span :class="{ 'voided-id': row.status === 'voided' }">{{ row.page_id }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="页码" width="80" align="center">
+            <template #default="{ row }">第 {{ row.page_index + 1 }} 页</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.status === 'active'" type="success" size="small">有效</el-tag>
+              <el-tag v-else type="danger" size="small" effect="plain">已废除</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="生成时间" width="180">
+            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+
       <!-- 明细行 -->
       <div class="items-section">
         <h3 class="section-title">订单明细 <span class="item-count" v-if="items.length">（{{ items.length }} 项）</span></h3>
@@ -103,7 +127,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Printer, ArrowDown } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { getOrderDetail, printPicking } from '@/api/salesOrders'
+import { getOrderDetail, printPicking, getPickingPrintHistory } from '@/api/salesOrders'
 
 const route = useRoute()
 const router = useRouter()
@@ -111,6 +135,7 @@ const loading = ref(false)
 const order = ref({})
 const items = ref([])
 const printing = ref(false)
+const printHistory = ref([])
 
 const formatDateTime = (val) => {
   if (!val) return '-'
@@ -179,6 +204,7 @@ async function handlePrintPicking() {
     if (res.code === 200 && res.data?.oss_url) {
       window.open(res.data.oss_url, '_blank')
       ElMessage.success(`拣货单已生成（${res.data.page_count} 页${res.data.is_cached ? '，使用缓存' : ''}）`)
+      await fetchPrintHistory()
     } else {
       ElMessage.error(res.message || '生成拣货单失败')
     }
@@ -190,7 +216,21 @@ async function handlePrintPicking() {
   }
 }
 
-onMounted(fetchDetail)
+async function fetchPrintHistory() {
+  const orderNo = route.params.orderNo
+  if (!orderNo) return
+  try {
+    const res = await getPickingPrintHistory(orderNo)
+    if (res.code === 200) {
+      printHistory.value = res.data || []
+    }
+  } catch {}
+}
+
+onMounted(async () => {
+  await fetchDetail()
+  await fetchPrintHistory()
+})
 </script>
 
 <style scoped>
@@ -297,6 +337,15 @@ onMounted(fetchDetail)
 :deep(.items-table .el-table__footer td.el-table__cell) {
   padding: 6px 0;
   font-weight: 600;
+  font-size: 13px;
+}
+
+.voided-id {
+  text-decoration: line-through;
+  color: #999;
+}
+
+.print-history-table {
   font-size: 13px;
 }
 </style>

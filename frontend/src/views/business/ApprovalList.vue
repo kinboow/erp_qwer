@@ -51,24 +51,29 @@
       >
         <el-table-column type="selection" width="45" align="center" />
         <el-table-column type="index" label="#" width="50" align="center" />
-        <el-table-column label="审核状态" width="110" align="center">
+        <el-table-column prop="review_uid" label="审核单号" width="150" show-overflow-tooltip />
+        <el-table-column label="审核状态" width="120" align="center">
           <template #default="{ row }">
             <el-tag :type="statusTagType(row.review_status)" size="small">{{ statusText(row.review_status) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="customer_name" label="客户" min-width="120" show-overflow-tooltip>
+        <el-table-column prop="customer_name" label="客户" min-width="140" show-overflow-tooltip>
           <template #default="{ row }">{{ row.customer_name || '未匹配客户' }}</template>
         </el-table-column>
-        <el-table-column prop="room_name" label="来源群聊" min-width="130" show-overflow-tooltip />
-        <el-table-column prop="sender_name" label="发送人" width="90" show-overflow-tooltip />
-        <el-table-column label="消息类型" width="80" align="center">
+        <el-table-column prop="room_name" label="来源群聊" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.room_name || '-' }}</template>
+        </el-table-column>
+        <el-table-column prop="sender_name" label="发送人" width="110" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.sender_name || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="消息类型" width="90" align="center">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.message_type === 'image' ? 'warning' : 'info'" effect="plain">
-              {{ row.message_type === 'image' ? '图片' : row.message_type === 'file' ? '文件' : '文字' }}
+            <el-tag size="small" :type="msgTagType(row.message_type)" effect="plain">
+              {{ msgTypeText(row.message_type) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="解析内容" min-width="180" show-overflow-tooltip>
+        <el-table-column label="解析内容" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.parsed_order && row.parsed_order.items">
               {{ row.parsed_order.items.length }} 款：
@@ -78,8 +83,7 @@
             <span v-else class="text-muted">无解析结果</span>
           </template>
         </el-table-column>
-        <el-table-column prop="review_uid" label="审核单号" width="120" show-overflow-tooltip />
-        <el-table-column label="创建时间" width="160">
+        <el-table-column label="创建时间" width="170">
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="160" align="center" fixed="right">
@@ -105,8 +109,7 @@
           v-model:page-size="pagination.pageSize"
           :total="total"
           :page-sizes="[20, 50, 100]"
-          layout="total, sizes, prev, pager, next"
-          background
+          layout="total, sizes, prev, pager, next, jumper"
           @size-change="handleSearch"
           @current-change="fetchData"
         />
@@ -116,7 +119,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onBeforeUnmount, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
@@ -163,6 +166,28 @@ const statusTagType = (status) => {
   return map[status] || 'info'
 }
 
+const msgTypeText = (type) => {
+  const map = {
+    text: '文字',
+    image: '图片',
+    file: '文件',
+    video: '视频',
+    voice: '语音',
+    link: '链接',
+    gif: 'GIF',
+    location: '位置',
+    card: '名片',
+    miniprogram: '小程序',
+    batch: '批量识别',
+  }
+  return map[type] || type || '未知'
+}
+
+const msgTagType = (type) => {
+  const map = { image: 'warning', file: '', video: 'info', text: 'info' }
+  return map[type] || 'info'
+}
+
 const formatDate = (value) => {
   if (!value) return '-'
   return new Date(value).toLocaleString('zh-CN')
@@ -183,7 +208,8 @@ const fetchData = async () => {
     const res = await getReviewList({
       page: pagination.page,
       pageSize: pagination.pageSize,
-      review_status: filter.reviewStatus || undefined
+      review_status: filter.reviewStatus || undefined,
+      sort: filter.reviewStatus === 'pending' ? 'asc' : 'desc'
     }, { silentError: true })
     list.value = res?.data?.list || []
     total.value = res?.data?.total || 0
@@ -271,7 +297,7 @@ const handleExport = () => {
     r.customer_name || '',
     r.room_name || '',
     r.sender_name || '',
-    r.message_type === 'image' ? '图片' : r.message_type === 'file' ? '文件' : '文字',
+    msgTypeText(r.message_type),
     formatDate(r.created_at),
     (r.review_note || '').replace(/"/g, '""')
   ])
@@ -287,8 +313,36 @@ const handleExport = () => {
   ElMessage.success(`已导出 ${rows.length} 条`)
 }
 
+let _eventSource = null
+
+const _connectSSE = () => {
+  _disconnectSSE()
+  _eventSource = new EventSource('/api/downstream-orders/reviews/stream')
+  _eventSource.onmessage = async (e) => {
+    try {
+      const payload = JSON.parse(e.data)
+      if (payload.event === 'new_review') {
+        await fetchData()
+      }
+    } catch {}
+  }
+  _eventSource.onerror = () => {
+    _disconnectSSE()
+    setTimeout(_connectSSE, 5000)
+  }
+}
+
+const _disconnectSSE = () => {
+  if (_eventSource) { _eventSource.close(); _eventSource = null }
+}
+
 onMounted(() => {
   fetchData()
+  _connectSSE()
+})
+
+onBeforeUnmount(() => {
+  _disconnectSSE()
 })
 </script>
 

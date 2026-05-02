@@ -23,3 +23,7 @@ export const getUnshippedDetail = (id) => {
 export const printUnshipped = (ids, customerName = '') => {
   return request({ url: '/api/unshipped-report/print', method: 'post', data: { ids, customer_name: customerName }, timeout: 120000 })
 }
+
+export const getUnshippedPrintHistory = (orderNo) => {
+  return request({ url: `/api/unshipped-report/print-history/${encodeURIComponent(orderNo)}`, method: 'get' })
+}

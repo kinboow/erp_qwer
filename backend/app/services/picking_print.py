@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS picking_print_pages (
     page_index      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '从0开始的页码',
     page_id         VARCHAR(64) NOT NULL COMMENT '本页唯一ID',
     barcode_content VARCHAR(300) NOT NULL DEFAULT '' COMMENT '条形码内容 = order_no|page_id',
+    status          VARCHAR(20) NOT NULL DEFAULT 'active' COMMENT 'active=有效, voided=已废除',
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_page_id (page_id),
     INDEX idx_order_no (order_no)
@@ -60,6 +61,14 @@ CREATE TABLE IF NOT EXISTS picking_print_pages (
 def ensure_print_tables(db: Session) -> None:
     db.execute(text(_DDL_PRINT_JOBS))
     db.execute(text(_DDL_PRINT_PAGES))
+    # 兼容已有表：追加 status 列
+    try:
+        db.execute(text(
+            "ALTER TABLE picking_print_pages ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active' "
+            "COMMENT 'active=有效, voided=已废除' AFTER barcode_content"
+        ))
+    except Exception:
+        pass
     db.commit()
 
 
@@ -348,8 +357,8 @@ def generate_picking_pdf(db: Session, order_no: str) -> dict[str, Any]:
     block_pages = _paginate_blocks(blocks)
     total_pages = len(block_pages)
 
-    # 4. 每次打印都生成全新的 page_id（每张纸的 ID 唯一且不重复）
-    db.execute(text("DELETE FROM picking_print_pages WHERE order_no = :no"), {"no": order_no})
+    # 4. 将旧 page_id 标记为已废除，再生成新的
+    db.execute(text("UPDATE picking_print_pages SET status = 'voided' WHERE order_no = :no AND status = 'active'"), {"no": order_no})
 
     page_records = []
     for i in range(total_pages):

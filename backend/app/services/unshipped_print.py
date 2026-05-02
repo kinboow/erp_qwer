@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS unshipped_print_pages (
     page_index      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '从0开始的页码',
     page_id         VARCHAR(64) NOT NULL COMMENT '本页唯一ID',
     barcode_content VARCHAR(300) NOT NULL DEFAULT '' COMMENT '二维码内容 = order_no|page_id',
+    status          VARCHAR(20) NOT NULL DEFAULT 'active' COMMENT 'active=有效, voided=已废除',
     created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uk_page_id (page_id),
     INDEX idx_order_no (order_no)
@@ -55,6 +56,14 @@ CREATE TABLE IF NOT EXISTS unshipped_print_pages (
 def ensure_print_tables(db: Session) -> None:
     db.execute(text(_DDL_PRINT_JOBS))
     db.execute(text(_DDL_PRINT_PAGES))
+    # 兼容已有表：追加 status 列
+    try:
+        db.execute(text(
+            "ALTER TABLE unshipped_print_pages ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'active' "
+            "COMMENT 'active=有效, voided=已废除' AFTER barcode_content"
+        ))
+    except Exception:
+        pass
     db.commit()
 
 # ---------------------------------------------------------------------------
@@ -281,7 +290,7 @@ def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str 
         n_pages = len(block_pages)
 
         # 生成 page_id 并写入 DB
-        db.execute(text("DELETE FROM unshipped_print_pages WHERE order_no = :no"), {"no": order_no})
+        db.execute(text("UPDATE unshipped_print_pages SET status = 'voided' WHERE order_no = :no AND status = 'active'"), {"no": order_no})
         page_records = []
         for i in range(n_pages):
             page_id = uuid.uuid4().hex[:16]

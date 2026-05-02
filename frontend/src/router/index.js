@@ -87,6 +87,12 @@ const routes = [
         meta: { title: '外部服务配置', tab: 'ai' }
       },
       {
+        path: 'config-printer',
+        name: 'ConfigPrinter',
+        component: () => import('@/views/system/ExternalConfig.vue'),
+        meta: { title: '外部服务配置', tab: 'printer' }
+      },
+      {
         path: 'downstream-order-reviews',
         name: 'DownstreamOrderReviews',
         component: () => import('@/views/business/DownstreamOrderReviews.vue'),

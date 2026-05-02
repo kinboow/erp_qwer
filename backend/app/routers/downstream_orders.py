@@ -77,10 +77,11 @@ async def get_reviews(
     pageSize: int = Query(20, ge=1, le=100),
     review_status: Optional[str] = Query(None),
     customer_id: Optional[int] = Query(None),
+    sort: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    data = list_reviews(db, page=page, page_size=pageSize, review_status=review_status or "", customer_id=customer_id)
+    data = list_reviews(db, page=page, page_size=pageSize, review_status=review_status or "", customer_id=customer_id, sort=sort)
     return json_response(data=data)
 
 

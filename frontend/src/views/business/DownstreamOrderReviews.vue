@@ -585,7 +585,7 @@ const _connectSSE = () => {
     try {
       const payload = JSON.parse(e.data)
       if (payload.event === 'new_review') {
-        await fetchReviews()
+        await _silentRefresh()
       }
     } catch {}
   }
@@ -593,6 +593,31 @@ const _connectSSE = () => {
     _disconnectSSE()
     setTimeout(_connectSSE, 5000)
   }
+}
+
+const _silentRefresh = async () => {
+  // 静默刷新列表，保持当前选中项不变
+  try {
+    const res = await getReviewList({
+      page: 1,
+      pageSize: Math.max(pagination.pageSize, reviewList.value.length + 10),
+      review_status: filters.review_status || undefined,
+      sort: 'asc'
+    }, { silentError: true })
+    const list = res?.data?.list || []
+    const newTotal = res?.data?.total || 0
+    const currentId = selectedReview.value?.id
+    reviewList.value = list
+    pagination.total = newTotal
+    noMoreReviews.value = list.length >= newTotal
+    // 保持当前选中项
+    if (currentId) {
+      const still = list.find(item => item.id === currentId)
+      if (still) {
+        selectedReview.value = still
+      }
+    }
+  } catch {}
 }
 
 const _disconnectSSE = () => {
@@ -610,7 +635,8 @@ const fetchReviews = async (append = false) => {
     const res = await getReviewList({
       page: pagination.page,
       pageSize: pagination.pageSize,
-      review_status: filters.review_status || undefined
+      review_status: filters.review_status || undefined,
+      sort: 'asc'
     }, { silentError: true })
     const list = res?.data?.list || []
     pagination.total = res?.data?.total || 0
@@ -774,7 +800,16 @@ const handleApprove = async () => {
     })
     const d = res.data || {}
     _printDebugLogs(d)
-    ElMessage.success(`审核下单成功，ERP单号: ${d.order_no || '-'}，${d.message || ''}`)
+    let msg = `审核下单成功，ERP单号: ${d.order_no || '-'}，${d.message || ''}`
+    if (d.auto_print?.printed) {
+      msg += `，${d.auto_print.message || '配货单已加入打印队列'}`
+      ElMessage.success(msg)
+    } else if (d.auto_print && !d.auto_print.printed) {
+      msg += `，自动打印失败: ${d.auto_print.error || '未知错误'}`
+      ElMessage({ message: msg, type: 'warning', duration: 6000 })
+    } else {
+      ElMessage.success(msg)
+    }
     await fetchReviews()
   } finally {
     actionLoading.value = false
@@ -804,7 +839,16 @@ const handleReplace = async () => {
     const d = res.data || {}
     _printDebugLogs(d)
     const replacedInfo = d.replaced_orders?.length ? `，已取消旧单: ${d.replaced_orders.join(', ')}` : ''
-    ElMessage.success(`替换旧单成功，新ERP单号: ${d.order_no || '-'}${replacedInfo}`)
+    let rMsg = `替换旧单成功，新ERP单号: ${d.order_no || '-'}${replacedInfo}`
+    if (d.auto_print?.printed) {
+      rMsg += `，${d.auto_print.message || '配货单已加入打印队列'}`
+      ElMessage.success(rMsg)
+    } else if (d.auto_print && !d.auto_print.printed) {
+      rMsg += `，自动打印失败: ${d.auto_print.error || '未知错误'}`
+      ElMessage({ message: rMsg, type: 'warning', duration: 6000 })
+    } else {
+      ElMessage.success(rMsg)
+    }
     await fetchReviews()
   } finally {
     actionLoading.value = false

@@ -25,6 +25,12 @@
           </template>
           <AiModelConfig v-if="activeTab === 'ai'" />
         </el-tab-pane>
+        <el-tab-pane name="printer">
+          <template #label>
+            <span class="tab-label"><el-icon><Printer /></el-icon>打印机测试</span>
+          </template>
+          <PrinterConfig v-if="activeTab === 'printer'" />
+        </el-tab-pane>
       </el-tabs>
     </div>
   </div>
@@ -33,16 +39,17 @@
 <script setup>
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ChatDotRound, DataLine, Cpu } from '@element-plus/icons-vue'
+import { ChatDotRound, DataLine, Cpu, Printer } from '@element-plus/icons-vue'
 import WechatConfig from './WechatConfig.vue'
 import ErpSyncConfig from './ErpSyncConfig.vue'
 import AiModelConfig from './AiModelConfig.vue'
+import PrinterConfig from './PrinterConfig.vue'
 
 const route = useRoute()
 const router = useRouter()
 const activeTab = ref(route.meta.tab || 'wechat')
 
-const TAB_ROUTES = { wechat: '/config-wechat', erp: '/config-erp', ai: '/config-ai' }
+const TAB_ROUTES = { wechat: '/config-wechat', erp: '/config-erp', ai: '/config-ai', printer: '/config-printer' }
 
 function handleTabChange(tab) {
   const target = TAB_ROUTES[tab]

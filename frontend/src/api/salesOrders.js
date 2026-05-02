@@ -19,3 +19,7 @@ export const syncOrders = (daysBack = 360) => {
 export const printPicking = (orderNo) => {
   return request({ url: `/api/sales-orders/${encodeURIComponent(orderNo)}/print-picking`, method: 'post', timeout: 120000 })
 }
+
+export const getPickingPrintHistory = (orderNo) => {
+  return request({ url: `/api/sales-orders/${encodeURIComponent(orderNo)}/print-history`, method: 'get' })
+}

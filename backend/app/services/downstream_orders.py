@@ -843,6 +843,41 @@ def resolve_customer_by_room(db: Session, room_id: str, instance_id: Optional[st
     return db.execute(text(sql), params).mappings().first()
 
 
+def _lookup_room_names(db: Session, room_ids: list[str]) -> dict[str, str]:
+    """从 API 缓存和 wechat_room_listeners 批量查找 room_id → room_name 映射"""
+    if not room_ids:
+        return {}
+    unique_ids = list(set(rid for rid in room_ids if rid))
+    if not unique_ids:
+        return {}
+
+    # 优先从 API 缓存获取
+    result: dict[str, str] = {}
+    try:
+        from app.services.wechat_room_cache import get_room_names
+        result.update(get_room_names(unique_ids))
+    except Exception:
+        pass
+
+    # 缓存未命中的，从 DB 查找
+    missing = [rid for rid in unique_ids if rid not in result]
+    if missing:
+        placeholders = ", ".join(f":rid{i}" for i in range(len(missing)))
+        params = {f"rid{i}": rid for i, rid in enumerate(missing)}
+        try:
+            rows = db.execute(
+                text(f"SELECT room_id, room_name FROM wechat_room_listeners WHERE room_id IN ({placeholders})"),
+                params,
+            ).mappings().all()
+            for r in rows:
+                if r.get("room_name"):
+                    result[r["room_id"]] = r["room_name"]
+        except Exception:
+            pass
+
+    return result
+
+
 def serialize_review(row: dict[str, Any]) -> dict[str, Any]:
     item = dict(row)
     item["callback_payload"] = _json_loads(item.get("callback_payload"), {})
@@ -1067,6 +1102,13 @@ async def create_review_from_callback(db: Session, payload: dict[str, Any], inst
 
     customer = resolve_customer_by_room(db, message["room_id"], message["instance_id"])
     initial_parse_status = "pending_attachment" if message.get("requires_attachment_download") else "pending"
+
+    # 如果 callback 中没有 room_name，从 wechat_room_listeners 补全
+    room_name = message.get("room_name") or ""
+    if not room_name and message.get("room_id"):
+        room_map = _lookup_room_names(db, [message["room_id"]])
+        room_name = room_map.get(message["room_id"], "")
+
     review_uid = _generate_review_uid()
     result = db.execute(
         text(
@@ -1081,7 +1123,7 @@ async def create_review_from_callback(db: Session, payload: dict[str, Any], inst
             "source_type": message.get("source_type") or "wechat_generic",
             "instance_id": message.get("instance_id"),
             "room_id": message.get("room_id") or "",
-            "room_name": message.get("room_name") or "",
+            "room_name": room_name,
             "sender_id": message.get("sender_id") or "",
             "sender_name": message.get("sender_name") or "",
             "message_type": message.get("message_type") or "text",
@@ -1117,28 +1159,63 @@ async def create_review_from_callback(db: Session, payload: dict[str, Any], inst
     return response
 
 
-def list_reviews(db: Session, page: int = 1, page_size: int = 20, review_status: str = "", customer_id: Optional[int] = None) -> dict[str, Any]:
+def list_reviews(db: Session, page: int = 1, page_size: int = 20, review_status: str = "", customer_id: Optional[int] = None, sort: Optional[str] = None) -> dict[str, Any]:
     ensure_review_state(db)
     params = {"limit": page_size, "offset": (page - 1) * page_size}
     where_parts = ["1 = 1"]
     if review_status:
-        where_parts.append("review_status = :review_status")
+        where_parts.append("r.review_status = :review_status")
         params["review_status"] = review_status
     # 待审核列表只显示AI解析成功的记录
     if review_status == "pending" or not review_status:
-        where_parts.append("parse_status = 'success'")
+        where_parts.append("r.parse_status = 'success'")
     if customer_id:
-        where_parts.append("customer_id = :customer_id")
+        where_parts.append("r.customer_id = :customer_id")
         params["customer_id"] = customer_id
     where_sql = " AND ".join(where_parts)
+    # 排序：asc=从早到晚，desc=从晚到早；默认待审核按 ASC，其余按 DESC
+    order_dir = "ASC" if sort == "asc" else ("DESC" if sort == "desc" else ("ASC" if review_status == "pending" else "DESC"))
     rows = db.execute(
-        text(f"SELECT * FROM downstream_order_reviews WHERE {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+        text(
+            f"SELECT r.*, "
+            f"COALESCE(NULLIF(r.room_name, ''), m.room_name, '') AS _room_name, "
+            f"COALESCE(NULLIF(r.sender_name, ''), m.sender_name, '') AS _sender_name, "
+            f"COALESCE(NULLIF(r.message_type, ''), m.message_type, 'text') AS _message_type "
+            f"FROM downstream_order_reviews r "
+            f"LEFT JOIN message_logs m ON r.msg_log_id IS NOT NULL AND r.msg_log_id = m.id "
+            f"WHERE {where_sql} ORDER BY r.created_at {order_dir} LIMIT :limit OFFSET :offset"
+        ),
         params,
     ).mappings().all()
     count_params = {key: value for key, value in params.items() if key not in {"limit", "offset"}}
-    total = db.execute(text(f"SELECT COUNT(*) AS total FROM downstream_order_reviews WHERE {where_sql}"), count_params).mappings().first()["total"]
+    total = db.execute(text(f"SELECT COUNT(*) AS total FROM downstream_order_reviews r WHERE {where_sql}"), count_params).mappings().first()["total"]
+
+    # 批量查找缺失的 room_name
+    missing_room_ids = []
+    serialized = []
+    for row in rows:
+        item = serialize_review(row)
+        # 用 JOIN 得到的补全值覆盖空字段
+        if not item.get("room_name"):
+            item["room_name"] = row.get("_room_name") or ""
+        if not item.get("sender_name"):
+            item["sender_name"] = row.get("_sender_name") or ""
+        if not item.get("message_type") or item["message_type"] in ("text", "unknown"):
+            enriched_type = row.get("_message_type") or ""
+            if enriched_type and enriched_type != "unknown":
+                item["message_type"] = enriched_type
+        if not item.get("room_name") and item.get("room_id"):
+            missing_room_ids.append(item["room_id"])
+        serialized.append(item)
+
+    if missing_room_ids:
+        room_map = _lookup_room_names(db, missing_room_ids)
+        for item in serialized:
+            if not item.get("room_name") and item.get("room_id") and item["room_id"] in room_map:
+                item["room_name"] = room_map[item["room_id"]]
+
     return {
-        "list": [serialize_review(row) for row in rows],
+        "list": serialized,
         "total": total,
         "page": page,
         "pageSize": page_size,
@@ -1147,10 +1224,35 @@ def list_reviews(db: Session, page: int = 1, page_size: int = 20, review_status:
 
 def get_review_detail(db: Session, review_id: int) -> dict[str, Any]:
     ensure_review_state(db)
-    row = db.execute(text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
+    row = db.execute(
+        text(
+            "SELECT r.*, "
+            "COALESCE(NULLIF(r.room_name, ''), m.room_name, '') AS _room_name, "
+            "COALESCE(NULLIF(r.sender_name, ''), m.sender_name, '') AS _sender_name, "
+            "COALESCE(NULLIF(r.message_type, ''), m.message_type, 'text') AS _message_type "
+            "FROM downstream_order_reviews r "
+            "LEFT JOIN message_logs m ON r.msg_log_id IS NOT NULL AND r.msg_log_id = m.id "
+            "WHERE r.id = :id"
+        ),
+        {"id": review_id},
+    ).mappings().first()
     if not row:
         raise ValueError("待审核记录不存在")
-    return serialize_review(row)
+    item = serialize_review(row)
+    if not item.get("room_name"):
+        item["room_name"] = row.get("_room_name") or ""
+    if not item.get("sender_name"):
+        item["sender_name"] = row.get("_sender_name") or ""
+    if not item.get("message_type") or item["message_type"] in ("text", "unknown"):
+        enriched_type = row.get("_message_type") or ""
+        if enriched_type and enriched_type != "unknown":
+            item["message_type"] = enriched_type
+    # 从 wechat_room_listeners 补全 room_name
+    if not item.get("room_name") and item.get("room_id"):
+        room_map = _lookup_room_names(db, [item["room_id"]])
+        if item["room_id"] in room_map:
+            item["room_name"] = room_map[item["room_id"]]
+    return item
 
 
 def get_review_context_messages(db: Session, review_id: int) -> dict[str, Any]:
@@ -1405,9 +1507,33 @@ async def approve_review(db: Session, review_id: int, customer_id: int, current_
     )
     db.commit()
     _log("DB更新完成")
-    _trigger_incremental_sync(order_no=new_order_no, product_nos=pnos)
+    # 先同步订单明细（等待完成），再后台同步库存
+    if new_order_no:
+        try:
+            from app.services.erp_sync import sync_single_order
+            from app.services.erp_bridge import _erp_client
+            if _erp_client:
+                sync_result = await sync_single_order(_erp_client, new_order_no)
+                _log(f"订单同步完成: {sync_result}")
+        except Exception as sync_exc:
+            _log(f"订单同步异常: {sync_exc}")
+    _trigger_incremental_sync(order_no="", product_nos=pnos)
+    _log("库存同步已触发")
+    # 自动打印配货单
+    auto_print_result = None
+    if new_order_no:
+        try:
+            from app.services.printer_service import auto_print_picking_list
+            auto_print_result = auto_print_picking_list(db, new_order_no)
+            if auto_print_result:
+                _log(f"自动打印: {'成功' if auto_print_result.get('printed') else '失败'}")
+        except Exception as print_exc:
+            _log(f"自动打印异常: {print_exc}")
     _log("全流程完成 ✅")
-    return {**result, "review_status": "approved", "_debug_logs": _logs}
+    resp = {**result, "review_status": "approved", "_debug_logs": _logs}
+    if auto_print_result:
+        resp["auto_print"] = auto_print_result
+    return resp
 
 
 async def replace_old_order(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
@@ -1466,9 +1592,33 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
     )
     db.commit()
     _log("DB更新完成")
-    _trigger_incremental_sync(order_no=new_order_no, product_nos=pnos)
+    # 先同步订单明细（等待完成），再后台同步库存
+    if new_order_no:
+        try:
+            from app.services.erp_sync import sync_single_order
+            from app.services.erp_bridge import _erp_client
+            if _erp_client:
+                sync_result = await sync_single_order(_erp_client, new_order_no)
+                _log(f"订单同步完成: {sync_result}")
+        except Exception as sync_exc:
+            _log(f"订单同步异常: {sync_exc}")
+    _trigger_incremental_sync(order_no="", product_nos=pnos)
+    _log("库存同步已触发")
+    # 自动打印配货单
+    auto_print_result = None
+    if new_order_no:
+        try:
+            from app.services.printer_service import auto_print_picking_list
+            auto_print_result = auto_print_picking_list(db, new_order_no)
+            if auto_print_result:
+                _log(f"自动打印: {'成功' if auto_print_result.get('printed') else '失败'}")
+        except Exception as print_exc:
+            _log(f"自动打印异常: {print_exc}")
     _log("全流程完成 ✅")
-    return {**create_result, **cancel_result, "review_status": "replaced", "replaced_orders": replaced_orders, "_debug_logs": _logs}
+    resp = {**create_result, **cancel_result, "review_status": "replaced", "replaced_orders": replaced_orders, "_debug_logs": _logs}
+    if auto_print_result:
+        resp["auto_print"] = auto_print_result
+    return resp
 
 
 async def manual_order(db: Session, review_id: int, customer_id: int, order_data: dict[str, Any], current_user: User, review_note: str = "") -> dict[str, Any]:

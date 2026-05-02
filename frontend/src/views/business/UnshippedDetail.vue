@@ -52,6 +52,30 @@
         </el-descriptions>
       </div>
 
+      <!-- 待发货单打印记录 -->
+      <div class="info-section" v-if="printHistory.length > 0">
+        <h3 class="section-title">待发货单打印记录</h3>
+        <el-table :data="printHistory" size="small" stripe class="print-history-table">
+          <el-table-column label="页码ID" width="180">
+            <template #default="{ row }">
+              <span :class="{ 'voided-id': row.status === 'voided' }">{{ row.page_id }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="页码" width="80" align="center">
+            <template #default="{ row }">第 {{ row.page_index + 1 }} 页</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="row.status === 'active'" type="success" size="small">有效</el-tag>
+              <el-tag v-else type="danger" size="small" effect="plain">已废除</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="生成时间" width="180">
+            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+          </el-table-column>
+        </el-table>
+      </div>
+
       <!-- 未发尺码明细 -->
       <div class="items-section">
         <h3 class="section-title">未发尺码明细 <span class="item-count" v-if="detail.unshipped_sizes && detail.unshipped_sizes.length">（{{ detail.unshipped_sizes.length }} 项）</span></h3>
@@ -80,7 +104,7 @@
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Printer } from '@element-plus/icons-vue'
-import { getUnshippedDetail, printUnshipped } from '@/api/unshippedReport'
+import { getUnshippedDetail, printUnshipped, getUnshippedPrintHistory } from '@/api/unshippedReport'
 import { getCustomerList } from '@/api/customer'
 import { ElMessage } from 'element-plus'
 
@@ -90,6 +114,7 @@ const loading = ref(false)
 const printing = ref(false)
 const detail = ref({})
 const customerName = ref('')
+const printHistory = ref([])
 
 const formatDateTime = (val) => {
   if (!val) return '-'
@@ -116,6 +141,7 @@ async function handlePrint() {
     if (res.code === 200 && res.data?.oss_url) {
       window.open(res.data.oss_url, '_blank')
       ElMessage.success('待发货单已生成')
+      await fetchPrintHistory()
     } else {
       ElMessage.error(res.message || '生成失败')
     }
@@ -125,6 +151,17 @@ async function handlePrint() {
   } finally {
     printing.value = false
   }
+}
+
+async function fetchPrintHistory() {
+  const orderNo = detail.value?.order_no
+  if (!orderNo) return
+  try {
+    const res = await getUnshippedPrintHistory(orderNo)
+    if (res.code === 200) {
+      printHistory.value = res.data || []
+    }
+  } catch {}
 }
 
 async function fetchDetail() {
@@ -181,7 +218,10 @@ function orderSizeSummary({ columns }) {
   return sums
 }
 
-onMounted(fetchDetail)
+onMounted(async () => {
+  await fetchDetail()
+  await fetchPrintHistory()
+})
 </script>
 
 <style scoped>
@@ -291,6 +331,15 @@ onMounted(fetchDetail)
 :deep(.items-table .el-table__footer td.el-table__cell) {
   padding: 6px 0;
   font-weight: 600;
+  font-size: 13px;
+}
+
+.voided-id {
+  text-decoration: line-through;
+  color: #999;
+}
+
+.print-history-table {
   font-size: 13px;
 }
 </style>

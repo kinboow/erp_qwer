@@ -235,6 +235,25 @@ def api_print_picking(
         return {"code": 500, "message": f"生成拣货单失败: {str(e)}"}
 
 
+@router.get("/{order_no}/print-history", summary="查询配货单/拣货单打印历史")
+def api_print_history(
+    order_no: str,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """返回该订单所有打印页面记录（含已废除），按创建时间降序"""
+    from app.services.picking_print import ensure_print_tables
+    ensure_print_tables(db)
+    rows = db.execute(
+        text(
+            "SELECT page_id, page_index, barcode_content, status, created_at "
+            "FROM picking_print_pages WHERE order_no = :no "
+            "ORDER BY created_at DESC, id DESC"
+        ),
+        {"no": order_no},
+    ).mappings().all()
+    return {"code": 200, "data": [dict(r) for r in rows]}
+
+
 @router.get("/oss-file/{file_path:path}", summary="代理下载 OSS 文件")
 def api_oss_proxy(file_path: str):
     """通过后端代理下载 OSS 文件，避免前端直连 MinIO"""

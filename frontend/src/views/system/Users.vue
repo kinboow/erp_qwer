@@ -130,7 +130,7 @@
               v-model:page-size="pagination.pageSize"
               :total="pagination.total"
               :page-sizes="[10, 20, 50, 100]"
-              layout="sizes, prev, pager, next, jumper"
+              layout="total, sizes, prev, pager, next, jumper"
               @size-change="fetchData"
               @current-change="fetchData"
             />
@@ -275,7 +275,7 @@
               v-model:page-size="customerPagination.pageSize"
               :total="customerPagination.total"
               :page-sizes="[20, 50, 100, 200]"
-              layout="sizes, prev, pager, next, jumper"
+              layout="total, sizes, prev, pager, next, jumper"
               @size-change="fetchCustomerData"
               @current-change="fetchCustomerData"
             />

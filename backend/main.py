@@ -11,10 +11,12 @@ from app.database import SessionLocal
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard, system_messages, system_activities, inventory
 from app.routers import unshipped_report as local_unshipped_report
 from app.routers import ai_config as ai_config_router
+from app.routers import printer as printer_router
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
 from app.services.wechat_health import start_wechat_health_checker, stop_wechat_health_checker
+from app.services.wechat_room_cache import start_room_cache_refresher, stop_room_cache_refresher
 from app.services import ws_notify
 
 # ncloud2 ERP API 子模块
@@ -68,6 +70,7 @@ app.include_router(dashboard.router, prefix="/api/dashboard", tags=["数据看�
 app.include_router(system_messages.router, prefix="/api/system-messages", tags=["系统消息"])
 app.include_router(system_activities.router, prefix="/api/system-activities", tags=["系统动态"])
 app.include_router(ai_config_router.router, prefix="/api/ai", tags=["AI-模型配置"])
+app.include_router(printer_router.router)
 
 # ncloud2 ERP API 路由（弘兆云 ERP 操作）
 app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])
@@ -132,8 +135,11 @@ async def startup_event():
     # 启动 ERP 健康检查轮询（每20秒）
     start_erp_health_checker(interval_seconds=20)
 
-    # 启动企微健康检查轮询（每20秒）
-    start_wechat_health_checker(interval_seconds=20)
+    # 启动企微健康检查轮询（每15秒）
+    start_wechat_health_checker(interval_seconds=15)
+
+    # 启动企微群聊名称缓存刷新（每5分钟）
+    start_room_cache_refresher(interval_seconds=300)
 
     # 设置根日志级别为 INFO，确保 INFO/WARNING/ERROR 都能被记录
     root_logger = logging.getLogger()
@@ -162,6 +168,7 @@ async def shutdown_event():
     # 停止健康检查轮询
     stop_erp_health_checker()
     stop_wechat_health_checker()
+    stop_room_cache_refresher()
 
     # 停止日志清理
     from app.services.log_cleanup import stop_log_cleanup

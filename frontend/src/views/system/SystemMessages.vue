@@ -90,7 +90,7 @@
           v-model:current-page="pagination.page"
           :page-size="pagination.pageSize"
           :total="pagination.total"
-          layout="total, prev, pager, next"
+          layout="total, sizes, prev, pager, next, jumper"
           @current-change="fetchMessages"
         />
       </div>

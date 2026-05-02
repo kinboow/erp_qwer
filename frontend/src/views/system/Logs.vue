@@ -67,7 +67,7 @@
               v-model:page-size="systemPagination.pageSize"
               :total="systemPagination.total"
               :page-sizes="[20, 50, 100]"
-              layout="total, sizes, prev, pager, next"
+              layout="total, sizes, prev, pager, next, jumper"
               @size-change="fetchSystemLogs"
               @current-change="fetchSystemLogs"
             />
@@ -168,7 +168,7 @@
               v-model:page-size="opPagination.pageSize"
               :total="opPagination.total"
               :page-sizes="[20, 50, 100]"
-              layout="total, sizes, prev, pager, next"
+              layout="total, sizes, prev, pager, next, jumper"
               @size-change="fetchOpLogs"
               @current-change="fetchOpLogs"
             />
@@ -255,7 +255,7 @@
               v-model:page-size="messagePagination.pageSize"
               :total="messagePagination.total"
               :page-sizes="[20, 50, 100]"
-              layout="total, sizes, prev, pager, next"
+              layout="total, sizes, prev, pager, next, jumper"
               @size-change="fetchMessageLogs"
               @current-change="fetchMessageLogs"
             />

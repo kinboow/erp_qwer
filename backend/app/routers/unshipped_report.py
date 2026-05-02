@@ -185,3 +185,23 @@ def api_print_unshipped(
         import logging
         logging.getLogger(__name__).exception("待发货单打印失败: %s", e)
         return json_response(code=500, message=f"生成待发货单失败: {str(e)}")
+
+
+@router.get("/print-history/{order_no}", summary="查询待发货单打印历史")
+def api_unshipped_print_history(
+    order_no: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    """返回该订单所有待发货打印页面记录（含已废除），按创建时间降序"""
+    from app.services.unshipped_print import ensure_print_tables
+    ensure_print_tables(db)
+    rows = db.execute(
+        text(
+            "SELECT page_id, page_index, barcode_content, status, created_at "
+            "FROM unshipped_print_pages WHERE order_no = :no "
+            "ORDER BY created_at DESC, id DESC"
+        ),
+        {"no": order_no},
+    ).mappings().all()
+    return json_response(data=[dict(r) for r in rows])

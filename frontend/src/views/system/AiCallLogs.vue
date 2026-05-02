@@ -66,7 +66,7 @@
         v-model:page-size="filter.page_size"
         :page-sizes="[20, 50, 100]"
         :total="total"
-        layout="total, sizes, prev, pager, next"
+        layout="total, sizes, prev, pager, next, jumper"
         @size-change="fetchLogs"
         @current-change="fetchLogs"
       />
