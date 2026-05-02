@@ -147,6 +147,12 @@ const routes = [
         meta: { title: '待发货报表' }
       },
       {
+        path: 'unshipped-report/:id',
+        name: 'UnshippedDetail',
+        component: () => import('@/views/business/UnshippedDetail.vue'),
+        meta: { title: '待发货详情', parent: { title: '待发货报表', path: '/unshipped-report' } }
+      },
+      {
         path: 'wechat-listeners/:instanceId',
         name: 'WechatRoomListeners',
         component: () => import('@/views/wechat/RoomListeners.vue'),

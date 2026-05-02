@@ -64,6 +64,7 @@
         stripe
         class="lark-table"
         :default-sort="{ prop: 'product_no', order: 'ascending' }"
+        style="flex: 1"
       >
         <el-table-column type="index" label="#" width="50" align="center" />
         <el-table-column label="图片" width="70" align="center">
@@ -298,6 +299,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100%;
+  overflow: hidden;
 }
 
 .lark-page-header { margin-bottom: 4px; }
@@ -318,6 +321,10 @@ onMounted(() => {
   background: var(--lark-bg-base);
   border-radius: var(--lark-radius-lg);
   padding: 20px 24px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .lark-toolbar {

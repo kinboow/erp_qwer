@@ -198,6 +198,8 @@ onMounted(fetchDetail)
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100%;
+  overflow: hidden;
 }
 
 .detail-header {
@@ -206,6 +208,7 @@ onMounted(fetchDetail)
   gap: 16px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--lark-border-light, #e5e6eb);
+  flex-shrink: 0;
 }
 
 .back-btn {
@@ -223,6 +226,14 @@ onMounted(fetchDetail)
   display: flex;
   flex-direction: column;
   gap: 24px;
+  flex: 1;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.detail-body::-webkit-scrollbar {
+  display: none;
 }
 
 .info-section,

@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -125,3 +126,62 @@ def api_list_unshipped(
         "total": total,
         "summary": dict(summary) if summary else {},
     })
+
+
+@router.get("/{row_id}", summary="获取单条未发货记录详情")
+def api_get_unshipped_detail(
+    row_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    ensure_tables(db)
+    row = db.execute(
+        text(
+            "SELECT id, erp_row_id, order_no, order_date, customer_id, customer_type, "
+            "customer_order_no, brand, product_no, product_name, color, unit, "
+            "order_qty, shipped_qty, returned_qty, unshipped_qty, unshipped_amount, "
+            "stock_qty, price, cost_price, tag_price, creator, remark, "
+            "unshipped_sizes_json, order_sizes_json, synced_at "
+            "FROM erp_unshipped_report WHERE id = :row_id"
+        ),
+        {"row_id": row_id},
+    ).mappings().first()
+
+    if not row:
+        return json_response(code=404, message="记录不存在")
+
+    item = dict(row)
+    for json_field, out_field in [
+        ("unshipped_sizes_json", "unshipped_sizes"),
+        ("order_sizes_json", "order_sizes"),
+    ]:
+        raw = item.pop(json_field, None) or "[]"
+        try:
+            item[out_field] = json.loads(raw)
+        except Exception:
+            item[out_field] = []
+
+    return json_response(data=item)
+
+
+class PrintUnshippedRequest(BaseModel):
+    ids: list[int]
+    customer_name: str = ""
+
+
+@router.post("/print", summary="生成待发货单 PDF")
+def api_print_unshipped(
+    req: PrintUnshippedRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.unshipped_print import generate_unshipped_pdf
+    try:
+        result = generate_unshipped_pdf(db, req.ids, req.customer_name)
+        return json_response(data=result)
+    except ValueError as e:
+        return json_response(code=404, message=str(e))
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).exception("待发货单打印失败: %s", e)
+        return json_response(code=500, message=f"生成待发货单失败: {str(e)}")

@@ -1,55 +1,65 @@
 <template>
   <div class="login-container">
-    <div class="login-bg-overlay"></div>
-    <div class="login-box">
-      <div class="login-header">
-        <div class="logo-circle">
-          <el-icon :size="28" color="#fff"><Box /></el-icon>
-        </div>
-        <h2 class="login-title">Factory ERP</h2>
-        <p class="login-subtitle">企业资源计划管理系统</p>
+    <!-- 左侧图片区 -->
+    <div class="login-left">
+      <div class="login-left-overlay"></div>
+      <div class="login-left-content">
+        <img src="/logo-white.png" alt="logo" class="login-logo" />
+        <h1 class="login-slogan">协途AI</h1>
+        <p class="login-slogan-sub">智能化企业管理，让协作更高效</p>
       </div>
+    </div>
 
-      <el-form :model="loginForm" :rules="rules" ref="loginFormRef" class="login-form">
-        <el-form-item prop="username">
-          <el-input
-            v-model="loginForm.username"
-            placeholder="请输入用户名 / Admin"
-            size="large"
-            :prefix-icon="User"
-            class="custom-input"
-          />
-        </el-form-item>
-        <el-form-item prop="password">
-          <el-input
-            v-model="loginForm.password"
-            type="password"
-            placeholder="请输入密码 / admin123"
-            size="large"
-            :prefix-icon="Lock"
-            show-password
-            @keyup.enter="handleLogin"
-            class="custom-input"
-          />
-        </el-form-item>
-
-        <div class="login-options">
-          <el-checkbox v-model="rememberMe">记住密码</el-checkbox>
-          <el-link type="primary" underline="never">忘记密码？</el-link>
+    <!-- 右侧表单区 -->
+    <div class="login-right">
+      <div class="login-box">
+        <div class="login-header">
+          <h2 class="login-title">欢迎登录</h2>
+          <p class="login-subtitle">请输入您的账号信息</p>
         </div>
 
-        <el-form-item>
-          <el-button
-            type="primary"
-            size="large"
-            :loading="loading"
-            @click="handleLogin"
-            class="login-btn"
-          >
-            登录系统
-          </el-button>
-        </el-form-item>
-      </el-form>
+        <el-form :model="loginForm" :rules="rules" ref="loginFormRef" class="login-form">
+          <el-form-item prop="username">
+            <el-input
+              v-model="loginForm.username"
+              placeholder="请输入用户名"
+              size="large"
+              :prefix-icon="User"
+              class="custom-input"
+            />
+          </el-form-item>
+          <el-form-item prop="password">
+            <el-input
+              v-model="loginForm.password"
+              type="password"
+              placeholder="请输入密码"
+              size="large"
+              :prefix-icon="Lock"
+              show-password
+              @keyup.enter="handleLogin"
+              class="custom-input"
+            />
+          </el-form-item>
+
+          <div class="login-options">
+            <el-checkbox v-model="rememberMe">记住密码</el-checkbox>
+          </div>
+
+          <el-form-item>
+            <el-button
+              type="primary"
+              size="large"
+              :loading="loading"
+              @click="handleLogin"
+              class="login-btn"
+            >
+              登录系统
+            </el-button>
+          </el-form-item>
+        </el-form>
+
+        <div class="login-footer">© 2025 协途AI · All rights reserved</div>
+      </div>
     </div>
   </div>
 </template>
@@ -111,68 +121,89 @@ const handleLogin = async () => {
 <style scoped>
 .login-container {
   display: flex;
-  justify-content: center;
-  align-items: center;
   height: 100vh;
-  position: relative;
-  background-image: url('https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?ixlib=rb-4.0.3&auto=format&fit=crop&w=2000&q=80');
-  background-size: cover;
-  background-position: center;
+  width: 100vw;
+  overflow: hidden;
 }
 
-.login-bg-overlay {
+/* ---------- 左侧图片区 ---------- */
+.login-left {
+  flex: 1;
+  position: relative;
+  background-image: url('/login-bg.jpg');
+  background-size: cover;
+  background-position: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-left-overlay {
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: linear-gradient(135deg, rgba(24, 43, 76, 0.85) 0%, rgba(53, 92, 125, 0.8) 100%);
-  backdrop-filter: blur(4px);
+  inset: 0;
+  background: linear-gradient(135deg, rgba(24, 43, 76, 0.82) 0%, rgba(53, 92, 125, 0.75) 100%);
+  backdrop-filter: blur(2px);
+}
+
+.login-left-content {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  color: #fff;
+}
+
+.login-logo {
+  width: 80px;
+  height: 80px;
+  object-fit: contain;
+  margin-bottom: 10px;
+  filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.25));
+}
+
+.login-slogan {
+  font-size: 44px;
+  font-weight: 700;
+  letter-spacing: 8px;
+  margin: 0 0 14px;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.login-slogan-sub {
+  font-size: 20px;
+  opacity: 0.85;
+  margin: 0;
+  letter-spacing: 2px;
+}
+
+/* ---------- 右侧表单区 ---------- */
+.login-right {
+  width: 480px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
 }
 
 .login-box {
-  position: relative;
-  width: 420px;
-  padding: 40px;
-  background: rgba(255, 255, 255, 0.95);
-  border-radius: 12px;
-  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
-  z-index: 1;
-  transition: transform 0.3s ease;
-}
-
-.login-box:hover {
-  transform: translateY(-5px);
+  width: 360px;
 }
 
 .login-header {
-  text-align: center;
-  margin-bottom: 35px;
-}
-
-.logo-circle {
-  width: 60px;
-  height: 60px;
-  background: linear-gradient(135deg, #409EFF 0%, #3a8ee6 100%);
-  border-radius: 50%;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  margin: 0 auto 15px;
-  box-shadow: 0 4px 15px rgba(64, 158, 255, 0.3);
+  margin-bottom: 32px;
 }
 
 .login-title {
   color: #1f2f3d;
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 5px;
+  font-size: 26px;
+  font-weight: 700;
+  margin: 0 0 8px;
   letter-spacing: 1px;
 }
 
 .login-subtitle {
   color: #909399;
-  font-size: 13px;
+  font-size: 14px;
   margin: 0;
 }
 
@@ -205,22 +236,29 @@ const handleLogin = async () => {
 
 .login-btn {
   width: 100%;
-  height: 44px;
+  height: 46px;
   font-size: 16px;
   font-weight: 500;
-  letter-spacing: 2px;
-  border-radius: 6px;
-  background: linear-gradient(to right, #409EFF, #3a8ee6);
+  letter-spacing: 3px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #409EFF 0%, #3a8ee6 100%);
   border: none;
   transition: all 0.3s ease;
 }
 
 .login-btn:hover {
   transform: translateY(-2px);
-  box-shadow: 0 6px 15px rgba(64, 158, 255, 0.3);
+  box-shadow: 0 6px 20px rgba(64, 158, 255, 0.35);
 }
 
 .login-btn:active {
   transform: translateY(0);
+}
+
+.login-footer {
+  text-align: center;
+  margin-top: 40px;
+  font-size: 12px;
+  color: #c0c4cc;
 }
 </style>

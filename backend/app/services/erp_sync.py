@@ -1172,58 +1172,93 @@ async def sync_inventory_by_product_nos(erp_client: ERPClient, product_nos: list
 # ---------------------------------------------------------------------------
 
 async def sync_unshipped_report(erp_client: ERPClient, days_back: int | None = None) -> dict[str, Any]:
-    """拉取 ERP 未发货报表，全量写入本地 erp_unshipped_report 表。"""
+    """
+    拉取 ERP 未发货报表，写入本地 erp_unshipped_report 表。
+    使用滑动时间窗口向前回溯，直到某个窗口返回 0 条记录时停止。
+    返回同步统计信息。
+    """
     cfg = _get_db_config()
     window_days = days_back or cfg.get("sync_days_back", 360)
+    # 短周期（<=180天，即定时同步）：找到数据就停，空窗口顺延
+    # 长周期（>180天，即手动同步）：完整滑动窗口回溯
+    stop_on_data = window_days <= 180
 
     db: Session = SessionLocal()
     try:
         ensure_tables(db)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        datee = datetime.now().strftime("%Y-%m-%d")
-        dates = (datetime.now() - timedelta(days=window_days)).strftime("%Y-%m-%d")
-
-        # 标记同步前的 synced_at，同步结束后删除未被更新的旧行
-        synced = 0
-        failed = 0
-        page = 1
-        rows_per_page = 500
+        # 1. 使用滑动窗口获取所有未发货数据
+        all_items: list = []
+        window_end = datetime.now()
+        total_windows = 0
+        consecutive_empty = 0
 
         while True:
-            try:
-                report = await erp_query_unshipped(
-                    erp_client,
-                    dates=dates,
-                    datee=datee,
-                    customer_id=None,
-                    brand=None,
-                    product_no=None,
-                    page=page,
-                    rows=rows_per_page,
-                )
-            except Exception as exc:
-                logger.warning("[ERP Sync] 未发货报表拉取第 %d 页失败: %s", page, exc)
-                break
+            datee = window_end.strftime("%Y-%m-%d")
+            dates = (window_end - timedelta(days=window_days)).strftime("%Y-%m-%d")
+            total_windows += 1
 
-            for item in report.rows:
+            window_count = 0
+            page = 1
+            rows_per_page = 500
+            while True:
                 try:
-                    await run_in_threadpool(_upsert_unshipped_row, db, item, now_str)
-                    synced += 1
+                    report = await erp_query_unshipped(
+                        erp_client,
+                        dates=dates,
+                        datee=datee,
+                        customer_id=None,
+                        brand=None,
+                        product_no=None,
+                        page=page,
+                        rows=rows_per_page,
+                    )
                 except Exception as exc:
-                    logger.warning("[ERP Sync] 同步未发货行 %s 失败: %s", item.id, exc)
-                    failed += 1
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-            await asyncio.sleep(0)
+                    logger.warning("[ERP Sync] 未发货报表窗口 %s~%s 第 %d 页失败: %s", dates, datee, page, exc)
+                    break
 
-            if page * rows_per_page >= report.total:
-                break
-            page += 1
+                for item in report.rows:
+                    all_items.append(item)
+                    window_count += 1
 
-        # 删除本次未更新的旧数据（已发货/已取消的行）
+                if page * rows_per_page >= report.total:
+                    break
+                page += 1
+
+            logger.info("[ERP Sync] 未发货报表窗口 %s ~ %s 获取 %d 条", dates, datee, window_count)
+
+            if window_count > 0 and stop_on_data:
+                break  # 定时同步：找到数据就停，不继续滑动
+
+            if window_count == 0:
+                consecutive_empty += 1
+                if consecutive_empty >= 3:
+                    break
+            else:
+                consecutive_empty = 0
+
+            window_end = window_end - timedelta(days=window_days) - timedelta(days=1)
+
+        logger.info("[ERP Sync] 获取到 %d 条未发货记录（共 %d 个窗口）", len(all_items), total_windows)
+
+        # 2. 写入数据库
+        synced = 0
+        failed = 0
+
+        for item in all_items:
+            try:
+                await run_in_threadpool(_upsert_unshipped_row, db, item, now_str)
+                synced += 1
+            except Exception as exc:
+                logger.warning("[ERP Sync] 同步未发货行 %s 失败: %s", item.id, exc)
+                failed += 1
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+        # 3. 删除本次未更新的旧数据（已发货/已取消的行）
         try:
             db.execute(
                 text("DELETE FROM erp_unshipped_report WHERE synced_at < :now"),
@@ -1234,7 +1269,8 @@ async def sync_unshipped_report(erp_client: ERPClient, days_back: int | None = N
             logger.warning("[ERP Sync] 清理旧未发货数据失败", exc_info=True)
 
         result = {
-            "total_found": synced + failed,
+            "total_windows": total_windows,
+            "total_found": len(all_items),
             "synced": synced,
             "failed": failed,
             "synced_at": now_str,

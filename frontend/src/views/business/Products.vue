@@ -44,6 +44,7 @@
         v-loading="loading"
         stripe
         class="lark-table"
+        style="flex: 1"
       >
         <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column label="货号" prop="product_no" width="150" show-overflow-tooltip>
@@ -473,6 +474,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100%;
+  overflow: hidden;
 }
 
 .lark-page-header { margin-bottom: 4px; }
@@ -493,6 +496,10 @@ onMounted(() => {
   background: var(--lark-bg-base);
   border-radius: var(--lark-radius-lg);
   padding: 20px 24px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .lark-toolbar {

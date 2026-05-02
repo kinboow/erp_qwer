@@ -9,23 +9,21 @@
       <!-- 工具栏 -->
       <div class="lark-toolbar">
         <div class="toolbar-left">
-          <el-date-picker
-            v-model="dateRange"
-            type="daterange"
-            range-separator="至"
-            start-placeholder="开始日期"
-            end-placeholder="结束日期"
-            value-format="YYYY-MM-DD"
-            style="width: 260px"
-            :shortcuts="dateShortcuts"
-          />
-          <el-input
+          <el-select
             v-model="filter.customer_id"
-            placeholder="客户编号"
+            placeholder="选择客户"
             clearable
-            style="width: 140px"
-            @keyup.enter="handleSearch"
-          />
+            filterable
+            style="width: 180px"
+            @change="handleSearch"
+          >
+            <el-option
+              v-for="c in customerList"
+              :key="c.erp_customer_id"
+              :label="c.customer_name"
+              :value="c.erp_customer_id"
+            />
+          </el-select>
           <el-input
             v-model="filter.product_no"
             placeholder="货号"
@@ -35,9 +33,15 @@
             @keyup.enter="handleSearch"
           />
           <el-button type="primary" :icon="Search" @click="handleSearch">查询</el-button>
+          <el-switch v-model="mergeByOrder" active-text="合并同单" inactive-text="" style="margin-left: 8px" />
+          <template v-if="selectedRows.length > 0">
+            <el-button type="primary" size="default" :loading="printing" @click="handlePrint(selectedRows)">批量打印 ({{ selectedRows.length }})</el-button>
+            <el-button type="danger" plain size="default" :loading="batchLoading" @click="handleBatchCancel">批量取消 ({{ selectedRows.length }})</el-button>
+            <el-button type="success" plain size="default" :loading="batchLoading" @click="handleBatchRestore">批量恢复 ({{ selectedRows.length }})</el-button>
+          </template>
         </div>
         <div class="toolbar-right">
-          <el-button :icon="Refresh" @click="handleSync" :loading="syncing">同步数据</el-button>
+          <el-button :icon="syncing ? undefined : Refresh" @click="handleSync" :loading="syncing">{{ syncing ? `同步中${trigger === 'scheduled' ? '（定时）' : ''}...` : '同步数据' }}</el-button>
           <el-button :icon="Download" @click="handleExport" :disabled="rows.length === 0">导出 CSV</el-button>
         </div>
       </div>
@@ -49,17 +53,12 @@
         <span class="summary-item">未发货总金额 <strong>¥{{ Number(summary.total_unshipped_amount || 0).toFixed(2) }}</strong></span>
         <span class="summary-item">订单总数 <strong>{{ summary.total_order_qty }}</strong></span>
         <span class="summary-item">已发货 <strong>{{ summary.total_shipped_qty }}</strong></span>
+        <span v-if="selectedRows.length" class="summary-item">已选 <strong>{{ selectedRows.length }}</strong> 条</span>
       </div>
 
-      <!-- 批量操作 -->
-      <div class="batch-bar" v-if="selectedRows.length > 0">
-        <span>已选 <strong>{{ selectedRows.length }}</strong> 条</span>
-        <el-button type="danger" size="small" @click="handleBatchCancel" :loading="batchLoading">批量取消</el-button>
-        <el-button type="success" size="small" @click="handleBatchRestore" :loading="batchLoading">批量恢复</el-button>
-      </div>
-
-      <!-- 表格 -->
+      <!-- 表格（普通视图） -->
       <el-table
+        v-if="!mergeByOrder"
         ref="tableRef"
         :data="rows"
         v-loading="loading"
@@ -68,7 +67,7 @@
         class="lark-table"
         @selection-change="onSelectionChange"
         :default-sort="{ prop: 'order_date', order: 'descending' }"
-        max-height="calc(100vh - 320px)"
+        style="flex: 1"
       >
         <el-table-column type="selection" width="40" align="center" />
         <el-table-column type="index" label="#" width="45" align="center" />
@@ -78,38 +77,27 @@
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="下单日期" prop="order_date" width="100" align="center" sortable />
-        <el-table-column label="客户编号" prop="customer_id" width="100" show-overflow-tooltip />
-        <el-table-column label="品牌" prop="brand" width="80" show-overflow-tooltip />
+        <el-table-column label="下单日期" prop="order_date" width="120" align="center" sortable />
+        <el-table-column label="客户名称" prop="customer_id" width="120" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ customerMap[row.customer_id] || row.customer_id || '-' }}
+          </template>
+        </el-table-column>
         <el-table-column label="货号" prop="product_no" width="120" show-overflow-tooltip>
           <template #default="{ row }">
             <span class="product-no" @click.stop="copyText(row.product_no)">{{ row.product_no || '-' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="品名" prop="product_name" min-width="140" show-overflow-tooltip />
         <el-table-column label="颜色" prop="color" width="80" show-overflow-tooltip />
-        <el-table-column label="订单数" prop="order_qty" width="75" align="right" sortable>
+        <el-table-column label="下单数" prop="order_qty" width="90" align="right" sortable>
           <template #default="{ row }">{{ fmtQty(row.order_qty) }}</template>
         </el-table-column>
-        <el-table-column label="已发货" prop="shipped_qty" width="75" align="right">
-          <template #default="{ row }">{{ fmtQty(row.shipped_qty) }}</template>
-        </el-table-column>
-        <el-table-column label="退货数" prop="returned_qty" width="75" align="right">
-          <template #default="{ row }">
-            <span :class="{ 'qty-warn': row.returned_qty > 0 }">{{ fmtQty(row.returned_qty) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="未发货" prop="unshipped_qty" width="75" align="right" sortable>
+        <el-table-column label="未发货数" prop="unshipped_qty" width="110" align="right" sortable>
           <template #default="{ row }">
             <span class="qty-highlight">{{ fmtQty(row.unshipped_qty) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="库存数" prop="stock_qty" width="75" align="right">
-          <template #default="{ row }">
-            <span :class="{ 'qty-negative': row.stock_qty < 0 }">{{ fmtQty(row.stock_qty) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="未发尺码" min-width="200">
+        <el-table-column label="未发尺码" min-width="150">
           <template #default="{ row }">
             <div v-if="row.unshipped_sizes && row.unshipped_sizes.length > 0" class="size-tags">
               <el-tag v-for="s in row.unshipped_sizes" :key="s.size" size="small" effect="plain" class="size-tag">
@@ -119,8 +107,98 @@
             <span v-else class="text-muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column label="制单人" prop="creator" width="80" show-overflow-tooltip />
         <el-table-column label="备注" prop="remark" width="120" show-overflow-tooltip />
+        <el-table-column label="操作" width="120" align="center" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" size="small" @click="handleView(row)">查看</el-button>
+            <el-button link type="primary" size="small" @click="handlePrint([row])">打印</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <!-- 表格（合并同单视图） -->
+      <el-table
+        v-else
+        ref="tableRef"
+        :data="mergedRows"
+        v-loading="loading"
+        border
+        class="lark-table merged-table"
+        row-key="order_no"
+        style="flex: 1"
+      >
+        <el-table-column type="expand">
+          <template #default="{ row: group }">
+            <div class="expand-detail">
+              <table class="expand-inner-table">
+                <thead>
+                  <tr>
+                    <th>货号</th>
+                    <th>颜色</th>
+                    <th>下单数</th>
+                    <th>未发货数</th>
+                    <th>未发尺码</th>
+                    <th>备注</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(item, idx) in group.items" :key="idx">
+                    <td>
+                      <span class="product-no" @click.stop="copyText(item.product_no)">{{ item.product_no || '-' }}</span>
+                    </td>
+                    <td>{{ item.color || '-' }}</td>
+                    <td align="right">{{ fmtQty(item.order_qty) }}</td>
+                    <td align="right"><span class="qty-highlight">{{ fmtQty(item.unshipped_qty) }}</span></td>
+                    <td>
+                      <div v-if="item.unshipped_sizes && item.unshipped_sizes.length" class="size-tags">
+                        <el-tag v-for="s in item.unshipped_sizes" :key="s.size" size="small" effect="plain" class="size-tag">{{ s.size }}: {{ s.qty }}</el-tag>
+                      </div>
+                      <span v-else class="text-muted">-</span>
+                    </td>
+                    <td>{{ item.remark || '-' }}</td>
+                    <td>
+                      <el-button link type="primary" size="small" @click="handleView(item)">查看</el-button>
+                      <el-button link type="primary" size="small" @click="handlePrint([item])">打印</el-button>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column type="index" label="#" width="50" align="center" />
+        <el-table-column label="订单号" prop="order_no" min-width="160" show-overflow-tooltip>
+          <template #default="{ row: group }">
+            <router-link :to="`/sales/${encodeURIComponent(group.order_no)}`" class="link-text">{{ group.order_no }}</router-link>
+          </template>
+        </el-table-column>
+        <el-table-column label="下单日期" prop="order_date" min-width="120" align="center" sortable />
+        <el-table-column label="客户名称" min-width="140" show-overflow-tooltip>
+          <template #default="{ row: group }">
+            {{ customerMap[group.customer_id] || group.customer_id || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="商品数" min-width="80" align="center">
+          <template #default="{ row: group }">
+            <el-tag size="small" type="info">{{ new Set(group.items.map(i => i.product_no)).size }} 款</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="总下单数" min-width="100" align="right">
+          <template #default="{ row: group }">
+            {{ fmtQty(group.total_order_qty) }}
+          </template>
+        </el-table-column>
+        <el-table-column label="总未发货" min-width="100" align="right">
+          <template #default="{ row: group }">
+            <span class="qty-highlight">{{ fmtQty(group.total_unshipped_qty) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="100" align="center">
+          <template #default="{ row: group }">
+            <el-button link type="primary" size="small" @click="handlePrint(group.items)">打印整单</el-button>
+          </template>
+        </el-table-column>
       </el-table>
 
       <!-- 分页 -->
@@ -136,31 +214,39 @@
         />
       </div>
     </div>
+
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Download, Refresh } from '@element-plus/icons-vue'
-import { getUnshippedReport, cancelUnshipped, restoreUnshipped, syncUnshippedReport } from '@/api/unshippedReport'
+import { Search, Download, Refresh, Printer, View } from '@element-plus/icons-vue'
+import { getUnshippedReport, cancelUnshipped, restoreUnshipped, syncUnshippedReport, printUnshipped } from '@/api/unshippedReport'
+import { getCustomerList } from '@/api/customer'
+import { useSyncStatus } from '@/composables/useSyncStatus'
+
+const router = useRouter()
 
 const loading = ref(false)
 const batchLoading = ref(false)
-const syncing = ref(false)
+const printing = ref(false)
 const rows = ref([])
 const total = ref(0)
 const summary = ref({})
 const selectedRows = ref([])
 const tableRef = ref(null)
+const customerList = ref([])
+const customerMap = computed(() => {
+  const map = {}
+  for (const c of customerList.value) {
+    if (c.erp_customer_id) map[c.erp_customer_id] = c.customer_name
+  }
+  return map
+})
 
-// 默认查最近90天
-const today = new Date()
-const ninetyDaysAgo = new Date(today)
-ninetyDaysAgo.setDate(today.getDate() - 90)
-const fmt = (d) => d.toISOString().slice(0, 10)
-
-const dateRange = ref([fmt(ninetyDaysAgo), fmt(today)])
+const mergeByOrder = ref(false)
 
 const filter = reactive({
   customer_id: '',
@@ -169,12 +255,26 @@ const filter = reactive({
   rows: 200,
 })
 
-const dateShortcuts = [
-  { text: '最近30天', value: () => { const e = new Date(); const s = new Date(); s.setDate(e.getDate() - 30); return [s, e] } },
-  { text: '最近90天', value: () => { const e = new Date(); const s = new Date(); s.setDate(e.getDate() - 90); return [s, e] } },
-  { text: '最近180天', value: () => { const e = new Date(); const s = new Date(); s.setDate(e.getDate() - 180); return [s, e] } },
-  { text: '最近1年', value: () => { const e = new Date(); const s = new Date(); s.setFullYear(e.getFullYear() - 1); return [s, e] } },
-]
+const mergedRows = computed(() => {
+  const groups = {}
+  for (const row of rows.value) {
+    const key = row.order_no
+    if (!groups[key]) {
+      groups[key] = {
+        order_no: row.order_no,
+        order_date: row.order_date,
+        customer_id: row.customer_id,
+        items: [],
+        total_order_qty: 0,
+        total_unshipped_qty: 0,
+      }
+    }
+    groups[key].items.push(row)
+    groups[key].total_order_qty += Number(row.order_qty) || 0
+    groups[key].total_unshipped_qty += Number(row.unshipped_qty) || 0
+  }
+  return Object.values(groups)
+})
 
 
 function fmtQty(v) {
@@ -194,10 +294,6 @@ async function fetchReport() {
       page: filter.page,
       page_size: filter.rows,
     }
-    if (dateRange.value && dateRange.value.length === 2) {
-      params.dates = dateRange.value[0]
-      params.datee = dateRange.value[1]
-    }
     if (filter.customer_id) params.customer_id = filter.customer_id
     if (filter.product_no) params.product_no = filter.product_no
 
@@ -216,15 +312,20 @@ async function fetchReport() {
   }
 }
 
+const { syncing, trigger } = useSyncStatus('unshipped', () => fetchReport())
+
 async function handleSync() {
+  if (syncing.value) return
   syncing.value = true
   try {
-    await syncUnshippedReport(360)
-    ElMessage.success('同步已启动，数据将在后台更新')
-    setTimeout(() => fetchReport(), 3000)
-  } catch (e) {
-    ElMessage.error('同步触发失败: ' + (e?.message || '未知错误'))
-  } finally {
+    const res = await syncUnshippedReport(360)
+    if (res.data?.already_syncing) {
+      ElMessage.info('未发货报表同步进行中，完成后将自动刷新')
+    } else {
+      ElMessage.success('同步已启动，完成后将自动刷新')
+    }
+  } catch {
+    ElMessage.error('同步失败，请检查 ERP 配置')
     syncing.value = false
   }
 }
@@ -269,16 +370,42 @@ async function handleBatchRestore() {
   }
 }
 
+function handleView(row) {
+  router.push(`/unshipped-report/${row.id}`)
+}
+
+async function handlePrint(printRows) {
+  if (!printRows || printRows.length === 0) return
+  const ids = printRows.map(r => r.id).filter(Boolean)
+  if (ids.length === 0) { ElMessage.warning('没有可打印的记录'); return }
+  const firstCustomer = printRows[0]?.customer_id
+  const cName = customerMap.value[firstCustomer] || ''
+  printing.value = true
+  try {
+    const res = await printUnshipped(ids, cName)
+    if (res.code === 200 && res.data?.oss_url) {
+      window.open(res.data.oss_url, '_blank')
+      ElMessage.success(`待发货单已生成（${res.data.item_count} 条）`)
+    } else {
+      ElMessage.error(res.message || '生成待发货单失败')
+    }
+  } catch (e) {
+    console.error('打印待发货单失败:', e)
+    ElMessage.error('打印失败，请重试')
+  } finally {
+    printing.value = false
+  }
+}
+
 function handleExport() {
   if (rows.value.length === 0) return
-  const headers = ['订单号', '下单日期', '客户编号', '客户订单号', '品牌', '货号', '品名', '颜色', '订单数', '已发货', '退货数', '未发货', '未发金额', '库存数', '单价', '未发尺码', '制单人', '备注']
+  const headers = ['订单号', '下单日期', '客户名称', '货号', '颜色', '订单数', '未发货', '未发尺码', '备注']
   const csvRows = rows.value.map(r => [
-    r.order_no, r.order_date, r.customer_id, r.customer_order_no || '',
-    r.brand || '', r.product_no, r.product_name || '', r.color || '',
-    r.order_qty || 0, r.shipped_qty || 0, r.returned_qty || 0, r.unshipped_qty || 0,
-    r.unshipped_amount || 0, r.stock_qty || 0, r.price || 0,
+    r.order_no, r.order_date, customerMap.value[r.customer_id] || r.customer_id || '',
+    r.product_no, r.color || '',
+    r.order_qty || 0, r.unshipped_qty || 0,
     (r.unshipped_sizes || []).map(s => `${s.size}:${s.qty}`).join(' '),
-    r.creator || '', r.remark || '',
+    r.remark || '',
   ])
   const BOM = '\uFEFF'
   const csv = BOM + [headers.join(','), ...csvRows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(','))].join('\n')
@@ -286,7 +413,7 @@ function handleExport() {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `待发货报表_${dateRange.value[0]}_${dateRange.value[1]}.csv`
+  a.download = `待发货报表_${new Date().toISOString().slice(0, 10)}.csv`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -311,7 +438,17 @@ function fallbackCopy(text) {
   document.body.removeChild(ta)
 }
 
+async function fetchCustomers() {
+  try {
+    const res = await getCustomerList({ page: 1, pageSize: 200 })
+    customerList.value = (res.data?.list || []).filter(c => c.erp_customer_id)
+  } catch (e) {
+    console.error('获取客户列表失败:', e)
+  }
+}
+
 onMounted(() => {
+  fetchCustomers()
   fetchReport()
 })
 </script>
@@ -321,6 +458,8 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  height: 100%;
+  overflow: hidden;
 }
 
 .lark-page-header { margin-bottom: 4px; }
@@ -341,6 +480,10 @@ onMounted(() => {
   background: var(--lark-bg-base);
   border-radius: var(--lark-radius-lg);
   padding: 20px 24px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .lark-toolbar {
@@ -465,4 +608,39 @@ onMounted(() => {
   font-weight: 600;
   color: var(--lark-text-primary);
 }
+
+/* 合并视图 — 展开内表格 */
+.expand-detail {
+  padding: 12px 20px 12px 48px;
+}
+
+.expand-inner-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.expand-inner-table th,
+.expand-inner-table td {
+  border: 1px solid var(--lark-border-light, #e5e6eb);
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.expand-inner-table th {
+  background: var(--lark-bg-subtle, #f7f8fa);
+  font-weight: 600;
+  color: var(--lark-text-primary, #1f2329);
+  font-size: 12px;
+}
+
+.expand-inner-table tr:hover td {
+  background: #f5f7fa;
+}
+
+:deep(.merged-table .el-table__expanded-cell) {
+  padding: 0 !important;
+  background: #fafbfc;
+}
+
 </style>

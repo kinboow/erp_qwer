@@ -12,6 +12,7 @@ const MODULE_LABELS = {
   shipments: '发货单',
   products: '产品',
   inventory: '库存',
+  unshipped: '待发货报表',
 }
 
 export function useSyncStatus(module, onSyncComplete) {

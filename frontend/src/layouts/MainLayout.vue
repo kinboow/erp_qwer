@@ -3,11 +3,9 @@
     <!-- 侧边栏：极简、浅灰色背景、无边框 -->
     <el-aside width="192px" class="lark-sidebar">
       <div class="lark-logo">
-        <div class="logo-box">
-          <el-icon color="#fff" :size="20"><Box /></el-icon>
-        </div>
+        <img src="/logo.png" alt="logo" class="logo-img" />
         <transition name="fade">
-          <h1 class="logo-text">Factory ERP</h1>
+          <h1 class="logo-text">协途AI</h1>
         </transition>
       </div>
 
@@ -551,6 +549,7 @@ const activeMenu = computed(() => {
   if (p === '/customers') return '/users'
   if (p.startsWith('/sales/')) return '/sales'
   if (p.startsWith('/shipments/')) return '/shipments'
+  if (p.startsWith('/unshipped-report/')) return '/unshipped-report'
   if (p.startsWith('/config-')) return '/config-wechat'
   return p
 })
@@ -615,32 +614,31 @@ onUnmounted(() => {
 }
 
 .lark-logo {
-  height: 60px;
+  height: 56px;
   display: flex;
   align-items: center;
-  padding: 0 18px;
+  justify-content: center;
+  padding: 0 8px;
   cursor: pointer;
   flex-shrink: 0;
 }
 
-.logo-box {
-  width: 32px;
-  height: 32px;
-  background: linear-gradient(135deg, var(--lark-primary) 0%, #6698ff 100%);
+.logo-img {
+  width: 38px;
+  height: 38px;
   border-radius: var(--lark-radius);
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  margin-right: 12px;
+  margin-right: 8px;
   flex-shrink: 0;
+  object-fit: contain;
 }
 
 .logo-text {
-  font-size: 18px;
+  font-size: 24px;
   font-weight: 700;
   color: var(--lark-text-primary);
   margin: 0;
   white-space: nowrap;
+  letter-spacing: 3px;
 }
 
 .lark-menu-scroll {
@@ -922,13 +920,14 @@ onUnmounted(() => {
   padding: 20px 24px;
   background-color: var(--lark-bg-body);
   position: relative;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .lark-page-wrapper {
-  min-height: calc(100vh - 100px);
+  height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 /* 过渡动画 */
