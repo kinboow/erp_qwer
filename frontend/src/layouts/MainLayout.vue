@@ -25,10 +25,10 @@
             <template #title><span>数据看板</span></template>
           </el-menu-item>
 
-          <el-sub-menu index="business">
+          <el-sub-menu index="products">
             <template #title>
-              <el-icon><Management /></el-icon>
-              <span>业务管理</span>
+              <el-icon><Goods /></el-icon>
+              <span>商品管理</span>
             </template>
             <el-menu-item index="/products">
               <el-icon><Goods /></el-icon>
@@ -38,6 +38,17 @@
               <el-icon><Star /></el-icon>
               <template #title>本年产品库</template>
             </el-menu-item>
+            <el-menu-item index="/inventory">
+              <el-icon><Search /></el-icon>
+              <template #title>库存查询</template>
+            </el-menu-item>
+          </el-sub-menu>
+
+          <el-sub-menu index="orders">
+            <template #title>
+              <el-icon><List /></el-icon>
+              <span>订单管理</span>
+            </template>
             <el-menu-item index="/sales">
               <el-icon><List /></el-icon>
               <template #title>销售订单</template>
@@ -46,9 +57,9 @@
               <el-icon><Box /></el-icon>
               <template #title>销售发货单</template>
             </el-menu-item>
-            <el-menu-item index="/inventory">
-              <el-icon><Search /></el-icon>
-              <template #title>库存查询</template>
+            <el-menu-item index="/unshipped-report">
+              <el-icon><Tickets /></el-icon>
+              <template #title>待发货报表</template>
             </el-menu-item>
           </el-sub-menu>
 
@@ -251,7 +262,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   DataLine, User, Setting, Fold, Expand, Box, UserFilled,
   Search, Bell, SwitchButton, Stamp, Management, Goods, List, QuestionFilled,
-  ChatDotRound, Monitor, Link, Document, DocumentChecked, Star
+  ChatDotRound, Monitor, Link, Document, DocumentChecked, Star, Tickets
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import request from '@/utils/request'

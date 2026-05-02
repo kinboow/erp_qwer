@@ -6,17 +6,17 @@ from pydantic import BaseModel, ConfigDict
 class ERPSizeDetail(BaseModel):
     model_config = ConfigDict(extra="ignore")
     field: str = ""     # size name (S, M, L, XL, ...)
-    value: int | None = 0
+    value: float | None = 0
 
 
 class ERPWfhSizeDetail(BaseModel):
     """未发货尺码明细，比普通尺码多 fhvalue/thvalue/wfhvalue。"""
     model_config = ConfigDict(extra="ignore")
     field: str = ""
-    value: int | None = 0       # 订单数量
-    fhvalue: int | None = 0     # 已发货数量
-    thvalue: int | None = 0     # 退货数量
-    wfhvalue: int | None = 0    # 未发货数量
+    value: float | None = 0       # 订单数量
+    fhvalue: float | None = 0     # 已发货数量
+    thvalue: float | None = 0     # 退货数量
+    wfhvalue: float | None = 0    # 未发货数量
 
 
 class ERPUnshippedReportRow(BaseModel):

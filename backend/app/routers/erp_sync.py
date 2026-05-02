@@ -24,6 +24,7 @@ from app.services.erp_sync import (
     sync_products,
     sync_sales_orders,
     sync_sales_shipments,
+    sync_unshipped_report,
 )
 
 router = APIRouter(tags=["ERP-同步"])
@@ -261,11 +262,13 @@ async def api_sync_trigger(request: Request, days_back: int = 360) -> dict[str, 
         shipments_result = await _sync_module("shipments", sync_sales_shipments(erp_client, days_back=days_back), trigger="manual")
         products_result = await _sync_module("products", sync_products(erp_client), trigger="manual")
         inventory_result = await _sync_module("inventory", sync_inventory(erp_client), trigger="manual")
+        unshipped_result = await _sync_module("unshipped", sync_unshipped_report(erp_client, days_back=days_back), trigger="manual")
         return {"code": 200, "message": "同步完成", "data": {
             "orders": orders_result,
             "shipments": shipments_result,
             "products": products_result,
             "inventory": inventory_result,
+            "unshipped": unshipped_result,
         }}
     finally:
         _refresh_erp_status_background()
@@ -308,6 +311,16 @@ async def api_sync_inventory_trigger(request: Request) -> dict[str, Any]:
     import asyncio
     erp_client = request.app.state.erp_client
     asyncio.create_task(_background_sync_module("inventory", sync_inventory(erp_client), "库存"))
+    return {"code": 200, "message": "同步已启动"}
+
+
+@router.post("/trigger-unshipped", summary="手动触发未发货报表同步")
+async def api_sync_unshipped_trigger(request: Request, days_back: int = 360) -> dict[str, Any]:
+    if is_module_syncing("unshipped"):
+        return {"code": 200, "message": "未发货报表正在同步中，请稍候", "data": {"already_syncing": True}}
+    import asyncio
+    erp_client = request.app.state.erp_client
+    asyncio.create_task(_background_sync_module("unshipped", sync_unshipped_report(erp_client, days_back=days_back), "未发货报表"))
     return {"code": 200, "message": "同步已启动"}
 
 

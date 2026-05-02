@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
 from app.routers import auth, users, wechat, roles, customers, logs, wechat_runtime, wechat_config, downstream_orders, erp_sync, sales_orders, sales_shipments, products, dashboard, system_messages, system_activities, inventory
+from app.routers import unshipped_report as local_unshipped_report
 from app.routers import ai_config as ai_config_router
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
@@ -62,6 +63,7 @@ app.include_router(sales_orders.router, prefix="/api/sales-orders", tags=["销�
 app.include_router(sales_shipments.router, prefix="/api/sales-shipments", tags=["销售发货单"])
 app.include_router(products.router, prefix="/api/products", tags=["产品列表"])
 app.include_router(inventory.router, prefix="/api", tags=["库存查询"])
+app.include_router(local_unshipped_report.router, prefix="/api", tags=["待发货报表"])
 app.include_router(dashboard.router, prefix="/api/dashboard", tags=["数据看板"])
 app.include_router(system_messages.router, prefix="/api/system-messages", tags=["系统消息"])
 app.include_router(system_activities.router, prefix="/api/system-activities", tags=["系统动态"])

@@ -21,6 +21,7 @@ from app.ncloud.services.base import list_products as erp_list_products
 from app.ncloud.services.inventory import query_inventory as erp_query_inventory
 from app.ncloud.services.sales_orders import get_order_detail, list_orders
 from app.ncloud.services.shipments import get_shipment_detail, list_shipments
+from app.ncloud.services.unshipped_report import query_unshipped_report as erp_query_unshipped
 from app.services.system_activities import create_activity_background
 from app.services.system_messages import create_system_message_background
 
@@ -231,6 +232,46 @@ CREATE TABLE IF NOT EXISTS product_name_mappings (
 """
 
 
+_DDL_UNSHIPPED_REPORT = """
+CREATE TABLE IF NOT EXISTS erp_unshipped_report (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    erp_row_id      VARCHAR(100) NOT NULL DEFAULT '',
+    order_no        VARCHAR(100) NOT NULL DEFAULT '',
+    order_date      VARCHAR(20)  DEFAULT '',
+    customer_id     VARCHAR(100) DEFAULT '',
+    customer_type   VARCHAR(100) DEFAULT '',
+    customer_order_no VARCHAR(200) DEFAULT '',
+    brand           VARCHAR(200) DEFAULT '',
+    product_no      VARCHAR(200) NOT NULL DEFAULT '',
+    product_name    VARCHAR(255) DEFAULT '',
+    color           VARCHAR(200) DEFAULT '',
+    unit            VARCHAR(50)  DEFAULT '',
+    order_qty       DECIMAL(14,2) DEFAULT 0,
+    shipped_qty     DECIMAL(14,2) DEFAULT 0,
+    returned_qty    DECIMAL(14,2) DEFAULT 0,
+    unshipped_qty   DECIMAL(14,2) DEFAULT 0,
+    unshipped_amount DECIMAL(14,2) DEFAULT 0,
+    stock_qty       DECIMAL(14,2) DEFAULT 0,
+    price           DECIMAL(12,2) DEFAULT 0,
+    cost_price      DECIMAL(12,2) DEFAULT 0,
+    tag_price       DECIMAL(12,2) DEFAULT 0,
+    creator         VARCHAR(100) DEFAULT '',
+    remark          TEXT NULL,
+    unshipped_sizes_json TEXT NULL,
+    order_sizes_json     TEXT NULL,
+    synced_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_erp_row_id (erp_row_id),
+    INDEX idx_order_no (order_no),
+    INDEX idx_order_date (order_date),
+    INDEX idx_customer_id (customer_id),
+    INDEX idx_product_no (product_no),
+    INDEX idx_synced_at (synced_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
 _DDL_SYNC_CONFIG = """
 CREATE TABLE IF NOT EXISTS erp_sync_config (
     id              INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -259,6 +300,7 @@ def ensure_tables(db: Session) -> None:
     db.execute(text(_DDL_SHIPMENT_ITEMS))
     db.execute(text(_DDL_PRODUCTS))
     db.execute(text(_DDL_INVENTORY))
+    db.execute(text(_DDL_UNSHIPPED_REPORT))
     db.execute(text(_DDL_SYNC_CONFIG))
     db.execute(text(_DDL_PRODUCT_NAME_MAPPINGS))
     # 补加字段（已有表结构升级）
@@ -1126,6 +1168,137 @@ async def sync_inventory_by_product_nos(erp_client: ERPClient, product_nos: list
 
 
 # ---------------------------------------------------------------------------
+# 未发货报表同步
+# ---------------------------------------------------------------------------
+
+async def sync_unshipped_report(erp_client: ERPClient, days_back: int | None = None) -> dict[str, Any]:
+    """拉取 ERP 未发货报表，全量写入本地 erp_unshipped_report 表。"""
+    cfg = _get_db_config()
+    window_days = days_back or cfg.get("sync_days_back", 360)
+
+    db: Session = SessionLocal()
+    try:
+        ensure_tables(db)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        datee = datetime.now().strftime("%Y-%m-%d")
+        dates = (datetime.now() - timedelta(days=window_days)).strftime("%Y-%m-%d")
+
+        # 标记同步前的 synced_at，同步结束后删除未被更新的旧行
+        synced = 0
+        failed = 0
+        page = 1
+        rows_per_page = 500
+
+        while True:
+            try:
+                report = await erp_query_unshipped(
+                    erp_client,
+                    dates=dates,
+                    datee=datee,
+                    customer_id=None,
+                    brand=None,
+                    product_no=None,
+                    page=page,
+                    rows=rows_per_page,
+                )
+            except Exception as exc:
+                logger.warning("[ERP Sync] 未发货报表拉取第 %d 页失败: %s", page, exc)
+                break
+
+            for item in report.rows:
+                try:
+                    await run_in_threadpool(_upsert_unshipped_row, db, item, now_str)
+                    synced += 1
+                except Exception as exc:
+                    logger.warning("[ERP Sync] 同步未发货行 %s 失败: %s", item.id, exc)
+                    failed += 1
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+            await asyncio.sleep(0)
+
+            if page * rows_per_page >= report.total:
+                break
+            page += 1
+
+        # 删除本次未更新的旧数据（已发货/已取消的行）
+        try:
+            db.execute(
+                text("DELETE FROM erp_unshipped_report WHERE synced_at < :now"),
+                {"now": now_str},
+            )
+            db.commit()
+        except Exception:
+            logger.warning("[ERP Sync] 清理旧未发货数据失败", exc_info=True)
+
+        result = {
+            "total_found": synced + failed,
+            "synced": synced,
+            "failed": failed,
+            "synced_at": now_str,
+        }
+        logger.info("[ERP Sync] 未发货报表同步完成: %s", result)
+        return result
+
+    except Exception:
+        logger.exception("[ERP Sync] 未发货报表同步异常")
+        raise
+    finally:
+        db.close()
+
+
+def _upsert_unshipped_row(db: Session, item: Any, synced_at: str) -> None:
+    """插入或更新一条未发货报表行，唯一键为 erp_row_id"""
+    unshipped_sizes = [{"size": s.size, "qty": s.qty} for s in item.unshipped_sizes] if item.unshipped_sizes else []
+    order_sizes = [{"size": s.size, "qty": s.qty} for s in item.order_sizes] if item.order_sizes else []
+
+    data = {
+        "erp_row_id": item.id or "",
+        "order_no": item.order_no or "",
+        "order_date": item.order_date or "",
+        "customer_id": item.customer_id or "",
+        "customer_type": item.customer_type or "",
+        "customer_order_no": item.customer_order_no or "",
+        "brand": item.brand or "",
+        "product_no": item.product_no or "",
+        "product_name": item.product_name or "",
+        "color": item.color or "",
+        "unit": item.unit or "",
+        "order_qty": item.order_qty or 0,
+        "shipped_qty": item.shipped_qty or 0,
+        "returned_qty": item.returned_qty or 0,
+        "unshipped_qty": item.unshipped_qty or 0,
+        "unshipped_amount": item.unshipped_amount or 0,
+        "stock_qty": item.stock_qty or 0,
+        "price": item.price or 0,
+        "cost_price": item.cost_price or 0,
+        "tag_price": item.tag_price or 0,
+        "creator": item.creator or "",
+        "remark": item.remark or "",
+        "unshipped_sizes_json": json.dumps(unshipped_sizes, ensure_ascii=False) if unshipped_sizes else "[]",
+        "order_sizes_json": json.dumps(order_sizes, ensure_ascii=False) if order_sizes else "[]",
+        "synced_at": synced_at,
+    }
+
+    existing = db.execute(
+        text("SELECT id FROM erp_unshipped_report WHERE erp_row_id = :erp_row_id"),
+        {"erp_row_id": data["erp_row_id"]},
+    ).mappings().first()
+
+    if existing:
+        sets = ", ".join(f"{k} = :{k}" for k in data if k != "erp_row_id")
+        data["_id"] = existing["id"]
+        db.execute(text(f"UPDATE erp_unshipped_report SET {sets} WHERE id = :_id"), data)
+    else:
+        cols = ", ".join(data.keys())
+        vals = ", ".join(f":{k}" for k in data.keys())
+        db.execute(text(f"INSERT INTO erp_unshipped_report ({cols}) VALUES ({vals})"), data)
+    db.commit()
+
+
+# ---------------------------------------------------------------------------
 # 定时调度器
 # ---------------------------------------------------------------------------
 
@@ -1140,6 +1313,7 @@ _module_syncing: dict[str, bool] = {
     "shipments": False,
     "products": False,
     "inventory": False,
+    "unshipped": False,
 }
 # 记录每个模块当前同步的触发方式："scheduled"(定时) / "manual"(手动) / ""
 _sync_trigger: dict[str, str] = {
@@ -1147,6 +1321,7 @@ _sync_trigger: dict[str, str] = {
     "shipments": "",
     "products": "",
     "inventory": "",
+    "unshipped": "",
 }
 
 
@@ -1186,6 +1361,7 @@ def _record_sync_cycle_message(cycle_result: dict[str, Any], trigger: str = "定
         "shipments": "销售发货单",
         "products": "产品",
         "inventory": "库存",
+        "unshipped": "未发货报表",
     }
 
     lines: list[str] = []
@@ -1279,7 +1455,7 @@ async def _sync_loop(erp_client: ERPClient) -> None:
             _SCHEDULED_DAYS_BACK = 30
 
             # 4 个模块并发执行，各自写不同的表，互不冲突
-            r_orders, r_shipments, r_products, r_inventory = await asyncio.gather(
+            r_orders, r_shipments, r_products, r_inventory, r_unshipped = await asyncio.gather(
                 _run_module_with_retry(
                     "orders", lambda: sync_sales_orders(erp_client, days_back=_SCHEDULED_DAYS_BACK), "销售订单"),
                 _run_module_with_retry(
@@ -1288,11 +1464,14 @@ async def _sync_loop(erp_client: ERPClient) -> None:
                     "products", lambda: sync_products(erp_client), "产品"),
                 _run_module_with_retry(
                     "inventory", lambda: sync_inventory(erp_client), "库存"),
+                _run_module_with_retry(
+                    "unshipped", lambda: sync_unshipped_report(erp_client, days_back=_SCHEDULED_DAYS_BACK), "未发货报表"),
             )
             cycle_result["orders"] = r_orders or {"skipped": True}
             cycle_result["shipments"] = r_shipments or {"skipped": True}
             cycle_result["products"] = r_products or {"skipped": True}
             cycle_result["inventory"] = r_inventory or {"skipped": True}
+            cycle_result["unshipped"] = r_unshipped or {"skipped": True}
 
             cycle_result["synced_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _last_sync_result = cycle_result

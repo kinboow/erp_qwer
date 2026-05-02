@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from app.ncloud.client.erp_client import ERPClient
 from app.ncloud.schemas.sales_orders import SizeQty
@@ -10,6 +11,8 @@ from app.ncloud.schemas.unshipped_report import (
     UnshippedReportItem,
     UnshippedReportResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def query_unshipped_report(
@@ -55,49 +58,53 @@ async def query_unshipped_report(
     items = []
     for r in raw_rows:
         # Skip subtotal rows (empty dh means it's a group subtotal)
-        if not r.get("dh"):
+        dh = r.get("dh")
+        if not dh or (isinstance(dh, str) and not dh.strip()):
             continue
-        raw = ERPUnshippedReportRow.model_validate(r)
+        try:
+            raw = ERPUnshippedReportRow.model_validate(r)
 
-        unshipped_sizes = [
-            SizeQty(size=s.field, qty=s.wfhvalue or 0)
-            for s in raw.wfhchimadetail
-            if s.wfhvalue
-        ]
-        order_sizes = [
-            SizeQty(size=s.field, qty=s.value or 0)
-            for s in raw.chimadetail
-            if s.value
-        ]
+            unshipped_sizes = [
+                SizeQty(size=s.field, qty=int(s.wfhvalue or 0))
+                for s in raw.wfhchimadetail
+                if s.wfhvalue
+            ]
+            order_sizes = [
+                SizeQty(size=s.field, qty=int(s.value or 0))
+                for s in raw.chimadetail
+                if s.value
+            ]
 
-        items.append(
-            UnshippedReportItem(
-                id=raw.id,
-                order_no=raw.dh,
-                order_date=raw.zhdate,
-                customer_id=raw.khid,
-                customer_type=raw.khtype,
-                customer_order_no=raw.ddh,
-                brand=raw.spbh,
-                product_no=raw.huohao,
-                product_name=raw.spname,
-                color=raw.color,
-                unit=raw.dw,
-                order_qty=raw.zsl,
-                shipped_qty=raw.fhsl,
-                returned_qty=raw.thsl,
-                unshipped_qty=raw.wfhsl,
-                unshipped_amount=raw.wfhje,
-                stock_qty=raw.kcsl,
-                price=raw.price,
-                cost_price=raw.cbprice,
-                tag_price=raw.dp_price,
-                creator=raw.zhuser,
-                remark=raw.remark,
-                unshipped_sizes=unshipped_sizes,
-                order_sizes=order_sizes,
+            items.append(
+                UnshippedReportItem(
+                    id=raw.id,
+                    order_no=raw.dh,
+                    order_date=raw.zhdate,
+                    customer_id=raw.khid,
+                    customer_type=raw.khtype,
+                    customer_order_no=raw.ddh,
+                    brand=raw.spbh,
+                    product_no=raw.huohao,
+                    product_name=raw.spname,
+                    color=raw.color,
+                    unit=raw.dw,
+                    order_qty=raw.zsl,
+                    shipped_qty=raw.fhsl,
+                    returned_qty=raw.thsl,
+                    unshipped_qty=raw.wfhsl,
+                    unshipped_amount=raw.wfhje,
+                    stock_qty=raw.kcsl,
+                    price=raw.price,
+                    cost_price=raw.cbprice,
+                    tag_price=raw.dp_price,
+                    creator=raw.zhuser,
+                    remark=raw.remark,
+                    unshipped_sizes=unshipped_sizes,
+                    order_sizes=order_sizes,
+                )
             )
-        )
+        except Exception as exc:
+            logger.warning("跳过无法解析的未发货报表行 dh=%s: %s", dh, exc)
 
     return UnshippedReportResponse(total=total, rows=items)
 
