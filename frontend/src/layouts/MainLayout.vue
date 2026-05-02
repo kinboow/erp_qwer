@@ -920,14 +920,16 @@ onUnmounted(() => {
   padding: 20px 24px;
   background-color: var(--lark-bg-body);
   position: relative;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .lark-page-wrapper {
   height: 100%;
+  width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
 }
 
 /* 过渡动画 */

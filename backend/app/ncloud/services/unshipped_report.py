@@ -66,12 +66,12 @@ async def query_unshipped_report(
 
             unshipped_sizes = [
                 SizeQty(size=s.field, qty=int(s.wfhvalue or 0))
-                for s in raw.wfhchimadetail
+                for s in (raw.wfhchimadetail or [])
                 if s.wfhvalue
             ]
             order_sizes = [
                 SizeQty(size=s.field, qty=int(s.value or 0))
-                for s in raw.chimadetail
+                for s in (raw.chimadetail or [])
                 if s.value
             ]
 

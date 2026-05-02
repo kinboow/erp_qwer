@@ -48,12 +48,15 @@ export function useSyncStatus(module, onSyncComplete) {
       try {
         const msg = JSON.parse(evt.data)
         if (msg.event === 'sync_complete' && msg.data?.module === module) {
-          const label = MODULE_LABELS[module] || module
-          const triggerHint = msg.data?.trigger === 'scheduled' ? '（定时）' : ''
-          if (msg.data?.success) {
-            ElMessage.success(`${label}同步完成${triggerHint}`)
-          } else {
-            ElMessage.error(`${label}同步失败${triggerHint}`)
+          const isScheduled = msg.data?.trigger === 'scheduled'
+          // 定时同步不弹窗，仅手动触发时弹窗提示
+          if (!isScheduled) {
+            const label = MODULE_LABELS[module] || module
+            if (msg.data?.success) {
+              ElMessage.success(`${label}同步完成`)
+            } else {
+              ElMessage.error(`${label}同步失败`)
+            }
           }
           syncing.value = false
           trigger.value = ''

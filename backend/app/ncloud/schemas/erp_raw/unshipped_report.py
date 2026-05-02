@@ -55,6 +55,6 @@ class ERPUnshippedReportRow(BaseModel):
     ywy: str | None = ""             # 业务员
     sfwg: int | None = 0             # 是否手动完工
 
-    chimadetail: list[ERPSizeDetail] = []       # 订单尺码明细
-    wfhchimadetail: list[ERPWfhSizeDetail] = [] # 未发货尺码明细
-    kcchimadetail: list[ERPSizeDetail] = []     # 库存尺码明细
+    chimadetail: list[ERPSizeDetail] | None = []       # 订单尺码明细
+    wfhchimadetail: list[ERPWfhSizeDetail] | None = [] # 未发货尺码明细
+    kcchimadetail: list[ERPSizeDetail] | None = []     # 库存尺码明细

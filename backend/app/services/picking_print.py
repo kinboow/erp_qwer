@@ -348,44 +348,29 @@ def generate_picking_pdf(db: Session, order_no: str) -> dict[str, Any]:
     block_pages = _paginate_blocks(blocks)
     total_pages = len(block_pages)
 
-    # 4. 从 DB 读取已有 page_id（如果有的话）
-    existing_pages = db.execute(
-        text("SELECT page_index, page_id, barcode_content FROM picking_print_pages WHERE order_no = :no ORDER BY page_index"),
-        {"no": order_no},
-    ).mappings().all()
+    # 4. 每次打印都生成全新的 page_id（每张纸的 ID 唯一且不重复）
+    db.execute(text("DELETE FROM picking_print_pages WHERE order_no = :no"), {"no": order_no})
 
-    if existing_pages and len(existing_pages) == total_pages:
-        # DB 中有完整的 page_id 映射，直接复用
-        page_records = [dict(p) for p in existing_pages]
-        logger.info("拣货单: 复用 DB 中的 page_id order=%s pages=%d", order_no, total_pages)
-    else:
-        # 首次打印或页数变化：生成新的 page_id 并写入 DB
-        if existing_pages:
-            # 页数变化（明细行增减），清除旧记录重新生成
-            db.execute(text("DELETE FROM picking_print_pages WHERE order_no = :no"), {"no": order_no})
-            logger.info("拣货单: 页数变化，重新生成 page_id order=%s old=%d new=%d",
-                         order_no, len(existing_pages), total_pages)
+    page_records = []
+    for i in range(total_pages):
+        page_id = uuid.uuid4().hex[:16]
+        bc_content = f"{order_no}|{page_id}"
+        page_records.append({
+            "page_index": i,
+            "page_id": page_id,
+            "barcode_content": bc_content,
+        })
+        db.execute(
+            text("""
+                INSERT INTO picking_print_pages (order_no, page_index, page_id, barcode_content)
+                VALUES (:no, :idx, :pid, :bc)
+            """),
+            {"no": order_no, "idx": i, "pid": page_id, "bc": bc_content},
+        )
+    db.commit()
+    logger.info("拣货单: 生成新 page_id order=%s pages=%d", order_no, total_pages)
 
-        page_records = []
-        for i in range(total_pages):
-            page_id = uuid.uuid4().hex[:16]
-            bc_content = f"{order_no}|{page_id}"
-            page_records.append({
-                "page_index": i,
-                "page_id": page_id,
-                "barcode_content": bc_content,
-            })
-            db.execute(
-                text("""
-                    INSERT INTO picking_print_pages (order_no, page_index, page_id, barcode_content)
-                    VALUES (:no, :idx, :pid, :bc)
-                """),
-                {"no": order_no, "idx": i, "pid": page_id, "bc": bc_content},
-            )
-        db.commit()
-        logger.info("拣货单: 首次生成 page_id order=%s pages=%d", order_no, total_pages)
-
-    # 5. 每次都用 DB 中的 page_id 重新生成 PDF
+    # 5. 用新的 page_id 生成 PDF
     pdf_bytes = _build_picking_pdf(order, items, page_records)
 
     # 6. 上传 OSS（固定文件名，覆盖旧文件）

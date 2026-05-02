@@ -24,6 +24,40 @@ from app.utils.oss_client import oss_client
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# DDL
+# ---------------------------------------------------------------------------
+_DDL_PRINT_JOBS = """
+CREATE TABLE IF NOT EXISTS unshipped_print_jobs (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_no        VARCHAR(100) NOT NULL,
+    oss_object_name VARCHAR(500) NOT NULL DEFAULT '',
+    oss_url         VARCHAR(1000) NOT NULL DEFAULT '',
+    page_count      INT UNSIGNED NOT NULL DEFAULT 0,
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_order_no (order_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+_DDL_PRINT_PAGES = """
+CREATE TABLE IF NOT EXISTS unshipped_print_pages (
+    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    order_no        VARCHAR(100) NOT NULL,
+    page_index      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '从0开始的页码',
+    page_id         VARCHAR(64) NOT NULL COMMENT '本页唯一ID',
+    barcode_content VARCHAR(300) NOT NULL DEFAULT '' COMMENT '二维码内容 = order_no|page_id',
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_page_id (page_id),
+    INDEX idx_order_no (order_no)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+"""
+
+
+def ensure_print_tables(db: Session) -> None:
+    db.execute(text(_DDL_PRINT_JOBS))
+    db.execute(text(_DDL_PRINT_PAGES))
+    db.commit()
+
+# ---------------------------------------------------------------------------
 # 二维码生成
 # ---------------------------------------------------------------------------
 def _generate_qr_image(content: str, box_size: int = 4, border: int = 1) -> io.BytesIO:
@@ -160,74 +194,28 @@ def _paginate_blocks(blocks: list[dict]) -> list[list[dict]]:
 
 
 # ---------------------------------------------------------------------------
-# PDF 生成核心
-# ---------------------------------------------------------------------------
-def _build_unshipped_pdf(
-    order_info: dict[str, Any],
-    items: list[dict[str, Any]],
-    page_records: list[dict[str, str]],
-) -> bytes:
-    all_sizes = list(_FIXED_SIZES)
-    blocks = _group_items_to_product_blocks(items)
-    block_pages = _paginate_blocks(blocks)
-    total_pages = len(block_pages)
-
-    # 确保 page_records 数量匹配
-    while len(page_records) < total_pages:
-        pid = uuid.uuid4().hex[:16]
-        page_records.append({
-            "page_index": len(page_records),
-            "page_id": pid,
-            "barcode_content": f"UNSHIPPED|{pid}",
-        })
-
-    payload_pages = []
-    for page_idx, page_blocks in enumerate(block_pages):
-        pr = page_records[page_idx]
-        qr_buf = _generate_qr_image(pr["barcode_content"], box_size=4, border=1)
-        payload_pages.append({
-            "page_index": page_idx,
-            "page_id": pr["page_id"],
-            "barcode_content": pr["barcode_content"],
-            "show_info": page_idx == 0,
-            "qr_data_url": _image_buf_to_data_url(qr_buf),
-            "blocks": page_blocks,
-        })
-
-    payload = {
-        "title": "韩酷服饰-待发货单",
-        "order": order_info,
-        "all_sizes": all_sizes,
-        "pages": payload_pages,
-    }
-
-    script_path = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "scripts", "generate-unshipped-pdf.cjs")
-    )
-    if not os.path.isfile(script_path):
-        raise RuntimeError(f"pdfmake 生成脚本不存在: {script_path}")
-
-    proc = subprocess.run(
-        ["node", script_path],
-        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if proc.returncode != 0:
-        err = proc.stderr.decode("utf-8", errors="ignore")
-        raise RuntimeError(f"pdfmake 生成失败: {err.strip()}")
-    return proc.stdout
-
-
-# ---------------------------------------------------------------------------
 # 主入口
 # ---------------------------------------------------------------------------
+def _query_order_extra(db: Session, order_no: str) -> dict[str, Any]:
+    """从 erp_sales_orders 查询订单的客户详细信息"""
+    row = db.execute(
+        text("""
+            SELECT order_no, order_date, customer_name, customer_tel, customer_addr,
+                   creator, remark
+            FROM erp_sales_orders WHERE order_no = :no
+        """),
+        {"no": order_no},
+    ).mappings().first()
+    return dict(row) if row else {}
+
+
 def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str = "") -> dict[str, Any]:
     """
     根据传入的 unshipped report 行 ID 列表，生成待发货单 PDF。
-    支持单条或多条（批量打印）。
+    批量打印时按订单分组，每个订单独立首页、独立页码。
     """
+    ensure_print_tables(db)
+
     if not item_ids:
         raise ValueError("没有要打印的记录")
 
@@ -250,11 +238,9 @@ def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str 
     if not rows:
         raise ValueError("记录不存在")
 
-    items = []
-    total_order_qty = 0
-    total_unshipped_qty = 0
-    order_nos = set()
-
+    # 按订单号分组
+    from collections import OrderedDict
+    order_groups: OrderedDict[str, list] = OrderedDict()
     for r in rows:
         item = dict(r)
         raw = item.pop("unshipped_sizes_json", None) or "[]"
@@ -263,66 +249,134 @@ def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str 
         except Exception:
             item["unshipped_sizes"] = []
         item.pop("order_sizes_json", None)
-        items.append(item)
-        total_order_qty += int(item.get("order_qty") or 0)
-        total_unshipped_qty += int(item.get("unshipped_qty") or 0)
-        order_nos.add(item.get("order_no", ""))
+        ono = item.get("order_no", "")
+        order_groups.setdefault(ono, []).append(item)
 
-    first = items[0]
-    order_no_display = first.get("order_no", "")
-    if len(order_nos) > 1:
-        order_no_display = f"{order_no_display} 等{len(order_nos)}单"
+    # 为每个订单构建独立的 order section
+    order_sections = []
+    all_page_records = []
+    total_item_count = 0
+    total_page_count = 0
 
-    # 从销售订单主表查询客户详细信息
-    order_extra = {}
-    primary_order_no = first.get("order_no", "")
-    if primary_order_no:
-        order_row = db.execute(
-            text("""
-                SELECT order_no, order_date, customer_name, customer_tel, customer_addr,
-                       creator, remark
-                FROM erp_sales_orders WHERE order_no = :no
-            """),
-            {"no": primary_order_no},
-        ).mappings().first()
-        if order_row:
-            order_extra = dict(order_row)
+    for order_no, order_items in order_groups.items():
+        order_extra = _query_order_extra(db, order_no)
+        first = order_items[0]
+        oqty = sum(int(it.get("order_qty") or 0) for it in order_items)
+        uqty = sum(int(it.get("unshipped_qty") or 0) for it in order_items)
 
-    order_info = {
-        "order_no": order_no_display,
-        "order_date": str(order_extra.get("order_date") or first.get("order_date") or ""),
-        "customer_name": order_extra.get("customer_name") or customer_name or str(first.get("customer_id") or ""),
-        "customer_tel": str(order_extra.get("customer_tel") or ""),
-        "customer_addr": str(order_extra.get("customer_addr") or ""),
-        "creator": str(order_extra.get("creator") or ""),
-        "remark": re.sub(r"\[RV[A-Za-z0-9]+\]\s*", "", str(order_extra.get("remark") or "")).strip()[:120],
-        "total_order_qty": total_order_qty,
-        "total_unshipped_qty": total_unshipped_qty,
-    }
+        order_info = {
+            "order_no": order_no,
+            "order_date": str(order_extra.get("order_date") or first.get("order_date") or ""),
+            "customer_name": order_extra.get("customer_name") or customer_name or str(first.get("customer_id") or ""),
+            "customer_tel": str(order_extra.get("customer_tel") or ""),
+            "customer_addr": str(order_extra.get("customer_addr") or ""),
+            "creator": str(order_extra.get("creator") or ""),
+            "remark": re.sub(r"\[RV[A-Za-z0-9]+\]\s*", "", str(order_extra.get("remark") or "")).strip()[:120],
+            "total_order_qty": oqty,
+            "total_unshipped_qty": uqty,
+        }
 
-    page_records = []
-    for i in range(50):  # pre-allocate enough
-        pid = uuid.uuid4().hex[:16]
-        bc = f"UNSHIPPED|{order_no_display}|{pid}"
-        page_records.append({
-            "page_index": i,
-            "page_id": pid,
-            "barcode_content": bc,
+        blocks = _group_items_to_product_blocks(order_items)
+        block_pages = _paginate_blocks(blocks)
+        n_pages = len(block_pages)
+
+        # 生成 page_id 并写入 DB
+        db.execute(text("DELETE FROM unshipped_print_pages WHERE order_no = :no"), {"no": order_no})
+        page_records = []
+        for i in range(n_pages):
+            page_id = uuid.uuid4().hex[:16]
+            bc_content = f"{order_no}|{page_id}"
+            page_records.append({
+                "page_index": i,
+                "page_id": page_id,
+                "barcode_content": bc_content,
+            })
+            db.execute(
+                text("""
+                    INSERT INTO unshipped_print_pages (order_no, page_index, page_id, barcode_content)
+                    VALUES (:no, :idx, :pid, :bc)
+                """),
+                {"no": order_no, "idx": i, "pid": page_id, "bc": bc_content},
+            )
+
+        # 生成 QR 二维码
+        payload_pages = []
+        for page_idx, page_blocks in enumerate(block_pages):
+            pr = page_records[page_idx]
+            qr_buf = _generate_qr_image(pr["barcode_content"], box_size=4, border=1)
+            payload_pages.append({
+                "page_index": page_idx,
+                "page_id": pr["page_id"],
+                "barcode_content": pr["barcode_content"],
+                "show_info": page_idx == 0,
+                "qr_data_url": _image_buf_to_data_url(qr_buf),
+                "blocks": page_blocks,
+            })
+
+        order_sections.append({
+            "order": order_info,
+            "pages": payload_pages,
+            "page_count": n_pages,
         })
 
-    pdf_bytes = _build_unshipped_pdf(order_info, items, page_records)
+        all_page_records.extend(page_records)
+        total_item_count += len(order_items)
+        total_page_count += n_pages
+
+        # 更新 print_jobs 记录
+        db.execute(
+            text("""
+                INSERT INTO unshipped_print_jobs (order_no, oss_object_name, oss_url, page_count)
+                VALUES (:no, :obj, :url, :cnt)
+                ON DUPLICATE KEY UPDATE oss_object_name = VALUES(oss_object_name),
+                                        oss_url = VALUES(oss_url),
+                                        page_count = VALUES(page_count)
+            """),
+            {"no": order_no, "obj": f"unshipped/{order_no}.pdf", "url": "", "cnt": n_pages},
+        )
+
+    db.commit()
+    logger.info("待发货单: 生成 %d 个订单共 %d 页", len(order_sections), total_page_count)
+
+    # 构建 payload 并调用 Node 脚本
+    payload = {
+        "title": "韩酷服饰-待发货单",
+        "all_sizes": list(_FIXED_SIZES),
+        "order_sections": order_sections,
+    }
+
+    script_path = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "frontend", "scripts", "generate-unshipped-pdf.cjs")
+    )
+    if not os.path.isfile(script_path):
+        raise RuntimeError(f"pdfmake 生成脚本不存在: {script_path}")
+
+    proc = subprocess.run(
+        ["node", script_path],
+        input=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"pdfmake 生成失败: {err.strip()}")
+    pdf_bytes = proc.stdout
 
     # 上传 OSS
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    safe_name = re.sub(r'[^\w\-]', '_', order_no_display)
-    object_name = f"unshipped/{safe_name}_{ts}.pdf"
+    first_order_no = list(order_groups.keys())[0]
+    safe_name = re.sub(r'[^\w\-]', '_', first_order_no)
+    ts_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    object_name = f"unshipped/{safe_name}_{ts_str}.pdf"
     oss_client.upload_file(object_name, pdf_bytes, content_type="application/pdf")
 
     import time
-    proxy_url = f"/api/sales-orders/oss-file/{object_name}?t={int(time.time() * 1000)}"
+    ts = int(time.time() * 1000)
+    proxy_url = f"/api/sales-orders/oss-file/{object_name}?t={ts}"
 
     return {
         "oss_url": proxy_url,
-        "page_count": 1,
-        "item_count": len(items),
+        "page_count": total_page_count,
+        "item_count": total_item_count,
+        "pages": all_page_records,
     }

@@ -36,8 +36,6 @@
           <el-switch v-model="mergeByOrder" active-text="合并同单" inactive-text="" style="margin-left: 8px" />
           <template v-if="selectedRows.length > 0">
             <el-button type="primary" size="default" :loading="printing" @click="handlePrint(selectedRows)">批量打印 ({{ selectedRows.length }})</el-button>
-            <el-button type="danger" plain size="default" :loading="batchLoading" @click="handleBatchCancel">批量取消 ({{ selectedRows.length }})</el-button>
-            <el-button type="success" plain size="default" :loading="batchLoading" @click="handleBatchRestore">批量恢复 ({{ selectedRows.length }})</el-button>
           </template>
         </div>
         <div class="toolbar-right">
@@ -80,7 +78,7 @@
         <el-table-column label="下单日期" prop="order_date" width="120" align="center" sortable />
         <el-table-column label="客户名称" prop="customer_id" width="120" show-overflow-tooltip>
           <template #default="{ row }">
-            {{ customerMap[row.customer_id] || row.customer_id || '-' }}
+            {{ row.customer_name || row.customer_id || '-' }}
           </template>
         </el-table-column>
         <el-table-column label="货号" prop="product_no" width="120" show-overflow-tooltip>
@@ -176,7 +174,7 @@
         <el-table-column label="下单日期" prop="order_date" min-width="120" align="center" sortable />
         <el-table-column label="客户名称" min-width="140" show-overflow-tooltip>
           <template #default="{ row: group }">
-            {{ customerMap[group.customer_id] || group.customer_id || '-' }}
+            {{ group.customer_name || group.customer_id || '-' }}
           </template>
         </el-table-column>
         <el-table-column label="商品数" min-width="80" align="center">
@@ -238,13 +236,6 @@ const summary = ref({})
 const selectedRows = ref([])
 const tableRef = ref(null)
 const customerList = ref([])
-const customerMap = computed(() => {
-  const map = {}
-  for (const c of customerList.value) {
-    if (c.erp_customer_id) map[c.erp_customer_id] = c.customer_name
-  }
-  return map
-})
 
 const mergeByOrder = ref(false)
 
@@ -264,6 +255,7 @@ const mergedRows = computed(() => {
         order_no: row.order_no,
         order_date: row.order_date,
         customer_id: row.customer_id,
+        customer_name: row.customer_name,
         items: [],
         total_order_qty: 0,
         total_unshipped_qty: 0,
@@ -378,8 +370,7 @@ async function handlePrint(printRows) {
   if (!printRows || printRows.length === 0) return
   const ids = printRows.map(r => r.id).filter(Boolean)
   if (ids.length === 0) { ElMessage.warning('没有可打印的记录'); return }
-  const firstCustomer = printRows[0]?.customer_id
-  const cName = customerMap.value[firstCustomer] || ''
+  const cName = printRows[0]?.customer_name || ''
   printing.value = true
   try {
     const res = await printUnshipped(ids, cName)
@@ -401,7 +392,7 @@ function handleExport() {
   if (rows.value.length === 0) return
   const headers = ['订单号', '下单日期', '客户名称', '货号', '颜色', '订单数', '未发货', '未发尺码', '备注']
   const csvRows = rows.value.map(r => [
-    r.order_no, r.order_date, customerMap.value[r.customer_id] || r.customer_id || '',
+    r.order_no, r.order_date, r.customer_name || r.customer_id || '',
     r.product_no, r.color || '',
     r.order_qty || 0, r.unshipped_qty || 0,
     (r.unshipped_sizes || []).map(s => `${s.size}:${s.qty}`).join(' '),

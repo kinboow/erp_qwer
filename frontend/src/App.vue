@@ -181,4 +181,15 @@ html, body, #app {
 .el-popper.is-dark::-webkit-scrollbar-track {
   background: transparent !important;
 }
+
+/* 全局隐藏滚动条，保留滚动功能 */
+*,
+*::before,
+*::after {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+*::-webkit-scrollbar {
+  display: none !important;
+}
 </style>

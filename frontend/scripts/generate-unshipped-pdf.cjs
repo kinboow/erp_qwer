@@ -142,6 +142,16 @@ function buildInfoBlock(order) {
       margin: [0, 0, 0, infoRowGap],
     });
   }
+  // 计算已逾期天数
+  let overdueDays = '';
+  if (order.order_date) {
+    const orderDate = new Date(order.order_date);
+    const now = new Date();
+    if (!isNaN(orderDate.getTime())) {
+      const diffMs = now.getTime() - orderDate.getTime();
+      overdueDays = String(Math.floor(diffMs / (1000 * 60 * 60 * 24)));
+    }
+  }
   rows.push({
     columns: [
       {
@@ -158,7 +168,13 @@ function buildInfoBlock(order) {
           { text: `${order.total_order_qty || 0}` },
         ],
       },
-      { width: '*', text: '' },
+      {
+        width: '*',
+        text: [
+          { text: '已逾期天数：', bold: true },
+          { text: overdueDays ? `${overdueDays} 天` : '-' },
+        ],
+      },
     ],
     margin: [0, 0, 0, infoRowGap],
   });
@@ -270,67 +286,113 @@ function buildTable(page, payload) {
   };
 }
 
+// ── 计算单个 order section 的总数量 ──
+function calcSectionTotalQty(section) {
+  let total = 0;
+  for (const page of (section.pages || [])) {
+    for (const blk of (page.blocks || [])) {
+      for (const cr of (blk.color_rows || [])) {
+        const qtyMap = cr.qty_map || {};
+        for (const v of Object.values(qtyMap)) {
+          const n = Number(v) || 0;
+          if (n > 0) total += n;
+        }
+      }
+    }
+  }
+  return total;
+}
+
 // ── 文档 ──
 function buildDocument(payload) {
   const content = [];
-  const totalPages = payload.pages.length;
-  const docTotalQty = calcDocumentTotalQty(payload);
+  const sections = payload.order_sections || [];
 
-  payload.pages.forEach((page, pi) => {
-    content.push({
-      columns: [
-        { width: QR_SIZE, text: '' },
-        {
-          width: '*',
-          text: payload.title || '韩酷服饰-待发货单',
-          fontSize: 20,
+  // 兼容旧格式（单个 order + pages）
+  if (sections.length === 0 && payload.order && payload.pages) {
+    sections.push({ order: payload.order, pages: payload.pages, page_count: payload.pages.length });
+  }
+
+  // 记录每个物理页属于哪个 section，用于 footer 页码计算
+  // pageMap[physicalPage] = { sectionIdx, localPage, sectionPageCount }
+  const pageMap = [];
+  let physicalPage = 0;
+
+  sections.forEach((section, si) => {
+    const sectionPages = section.pages || [];
+    const sectionPageCount = sectionPages.length;
+    const sectionTotalQty = calcSectionTotalQty(section);
+
+    sectionPages.forEach((page, pi) => {
+      const isFirstPhysicalPage = (physicalPage > 0);
+      pageMap.push({
+        sectionIdx: si,
+        localPage: pi + 1,
+        sectionPageCount,
+      });
+
+      // 标题行 + 二维码（每个订单的每页都有）
+      content.push({
+        columns: [
+          { width: QR_SIZE, text: '' },
+          {
+            width: '*',
+            text: payload.title || '韩酷服饰-待发货单',
+            fontSize: 20,
+            bold: true,
+            alignment: 'center',
+          },
+          {
+            width: QR_SIZE,
+            stack: [
+              {
+                image: page.qr_data_url,
+                fit: [QR_SIZE, QR_SIZE],
+                alignment: 'right',
+              },
+              {
+                text: page.page_id || '',
+                alignment: 'center',
+                fontSize: 7,
+                margin: [0, 1, 0, 0],
+              },
+            ],
+          },
+        ],
+        margin: [0, isFirstPhysicalPage ? 25 : 0, 0, mm(3)],
+        pageBreak: isFirstPhysicalPage ? 'before' : undefined,
+      });
+
+      // 信息区（每个订单的首页显示）
+      if (pi === 0) {
+        content.push({
+          stack: buildInfoBlock(section.order),
+          fontSize: 11.5,
+          margin: [0, -20, 0, mm(2)],
+        });
+      } else {
+        content.push({ text: '', margin: [0, mm(3) - 15, 0, mm(1)] });
+      }
+
+      // 表格
+      const tableNode = buildTable(page, payload);
+      const leftOffset = Math.max((CONTENT_W - (tableNode._outerWidth || CONTENT_W)) / 2, 0);
+      tableNode.margin = [leftOffset, 0, 0, 0];
+      content.push(tableNode);
+
+      // 该订单最后一页显示小计
+      if (pi === sectionPageCount - 1) {
+        content.push({
+          text: `未发货小计：${sectionTotalQty} 件`,
+          alignment: 'right',
           bold: true,
-          alignment: 'center',
-        },
-        {
-          width: QR_SIZE,
-          stack: [
-            {
-              image: page.qr_data_url,
-              fit: [QR_SIZE, QR_SIZE],
-              alignment: 'right',
-            },
-            {
-              text: page.page_id || '',
-              alignment: 'center',
-              fontSize: 7,
-              margin: [0, 1, 0, 0],
-            },
-          ],
-        },
-      ],
-      margin: [0, pi > 0 ? 25 : 0, 0, mm(3)],
-      pageBreak: pi > 0 ? 'before' : undefined,
+          fontSize: 11,
+          margin: [0, mm(3), 0, 0],
+        });
+      }
+
+      physicalPage++;
     });
-    // 信息区（仅首页）
-    if (pi === 0) {
-      content.push({
-        stack: buildInfoBlock(payload.order),
-        fontSize: 11.5,
-        margin: [0, -20, 0, mm(2)],
-      });
-    } else {
-      content.push({ text: '', margin: [0, mm(3) - 15, 0, mm(1)] });
-    }
-    // 表格（X 轴居中）
-    const tableNode = buildTable(page, payload);
-    const leftOffset = Math.max((CONTENT_W - (tableNode._outerWidth || CONTENT_W)) / 2, 0);
-    tableNode.margin = [leftOffset, 0, 0, 0];
-    content.push(tableNode);
-    if (pi === totalPages - 1) {
-      content.push({
-        text: `未发货总计：${docTotalQty} 件`,
-        alignment: 'right',
-        bold: true,
-        fontSize: 11,
-        margin: [0, mm(3), 0, 0],
-      });
-    }
   });
 
   return {
@@ -350,14 +412,19 @@ function buildDocument(payload) {
       tdKey:  { alignment: 'center', valign: 'middle', fontSize: 11, bold: true, lineHeight: 1, margin: [0, 3.5, 0, 0] },
       tdBold: { alignment: 'center', fontSize: 9, bold: true, lineHeight: 1, margin: [0, 3.5, 0, 0] },
     },
-    footer(currentPage, pageCount) {
-      return {
-        text: `${currentPage} / ${pageCount}`,
-        alignment: 'center',
-        font: 'ChineseFont',
-        fontSize: 9,
-        margin: [0, 0, 0, 0],
-      };
+    footer(currentPage, _pageCount) {
+      // 按订单独立页码: "1 / 3" 是该订单内的页码
+      const info = pageMap[currentPage - 1];
+      if (info) {
+        return {
+          text: `${info.localPage} / ${info.sectionPageCount}`,
+          alignment: 'center',
+          font: 'ChineseFont',
+          fontSize: 9,
+          margin: [0, 0, 0, 0],
+        };
+      }
+      return { text: '' };
     },
   };
 }

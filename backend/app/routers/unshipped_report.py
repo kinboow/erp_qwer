@@ -45,50 +45,67 @@ def api_list_unshipped(
     params: dict[str, Any] = {"limit": page_size, "offset": (page - 1) * page_size}
 
     if dates:
-        conditions.append("order_date >= :dates")
+        conditions.append("u.order_date >= :dates")
         params["dates"] = dates
     if datee:
-        conditions.append("order_date <= :datee")
+        conditions.append("u.order_date <= :datee")
         params["datee"] = datee
     if customer_id:
-        conditions.append("customer_id = :customer_id")
+        conditions.append("u.customer_id = :customer_id")
         params["customer_id"] = customer_id
     if brand:
-        conditions.append("brand = :brand")
+        conditions.append("u.brand = :brand")
         params["brand"] = brand
     if product_no:
-        conditions.append("product_no LIKE :product_no")
+        conditions.append("u.product_no LIKE :product_no")
         params["product_no"] = f"%{product_no}%"
     if order_no:
-        conditions.append("order_no LIKE :order_no")
+        conditions.append("u.order_no LIKE :order_no")
         params["order_no"] = f"%{order_no}%"
     if keyword:
         conditions.append(
-            "(order_no LIKE :keyword OR product_no LIKE :keyword "
-            "OR product_name LIKE :keyword OR customer_id LIKE :keyword "
-            "OR color LIKE :keyword)"
+            "(u.order_no LIKE :keyword OR u.product_no LIKE :keyword "
+            "OR u.product_name LIKE :keyword OR u.customer_id LIKE :keyword "
+            "OR u.color LIKE :keyword)"
         )
         params["keyword"] = f"%{keyword}%"
 
     where_sql = " AND ".join(conditions)
-
-    # 总数
     count_params = {k: v for k, v in params.items() if k not in ("limit", "offset")}
-    total = db.execute(
-        text(f"SELECT COUNT(*) AS total FROM erp_unshipped_report WHERE {where_sql}"),
-        count_params,
-    ).mappings().first()["total"]
 
-    # 数据
+    # 总数 + 汇总统计 合并为一条查询
+    agg = db.execute(
+        text(
+            f"SELECT COUNT(*) AS total, "
+            f"COALESCE(SUM(u.order_qty), 0) AS total_order_qty, "
+            f"COALESCE(SUM(u.shipped_qty), 0) AS total_shipped_qty, "
+            f"COALESCE(SUM(u.unshipped_qty), 0) AS total_unshipped_qty, "
+            f"COALESCE(SUM(u.unshipped_amount), 0) AS total_unshipped_amount "
+            f"FROM erp_unshipped_report u WHERE {where_sql}"
+        ),
+        count_params,
+    ).mappings().first()
+
+    total = agg["total"]
+    summary = {
+        "total_order_qty": agg["total_order_qty"],
+        "total_shipped_qty": agg["total_shipped_qty"],
+        "total_unshipped_qty": agg["total_unshipped_qty"],
+        "total_unshipped_amount": agg["total_unshipped_amount"],
+    }
+
+    # 数据 — LEFT JOIN 销售订单表获取客户名称
     rows = db.execute(
         text(
-            f"SELECT id, erp_row_id, order_no, order_date, customer_id, customer_type, "
-            f"customer_order_no, brand, product_no, product_name, color, unit, "
-            f"order_qty, shipped_qty, returned_qty, unshipped_qty, unshipped_amount, "
-            f"stock_qty, price, cost_price, tag_price, creator, remark, "
-            f"unshipped_sizes_json, order_sizes_json, synced_at "
-            f"FROM erp_unshipped_report WHERE {where_sql} "
-            f"ORDER BY order_date DESC, order_no ASC, product_no ASC "
+            f"SELECT u.id, u.order_no, u.order_date, u.customer_id, "
+            f"COALESCE(o.customer_name, u.customer_id) AS customer_name, "
+            f"u.product_no, u.color, "
+            f"u.order_qty, u.unshipped_qty, u.remark, "
+            f"u.unshipped_sizes_json "
+            f"FROM erp_unshipped_report u "
+            f"LEFT JOIN erp_sales_orders o ON u.order_no = o.order_no "
+            f"WHERE {where_sql} "
+            f"ORDER BY u.order_date DESC, u.order_no ASC, u.product_no ASC "
             f"LIMIT :limit OFFSET :offset"
         ),
         params,
@@ -97,34 +114,17 @@ def api_list_unshipped(
     result = []
     for row in rows:
         item = dict(row)
-        # 解析尺码 JSON
-        for json_field, out_field in [
-            ("unshipped_sizes_json", "unshipped_sizes"),
-            ("order_sizes_json", "order_sizes"),
-        ]:
-            raw = item.pop(json_field, None) or "[]"
-            try:
-                item[out_field] = json.loads(raw)
-            except Exception:
-                item[out_field] = []
+        raw = item.pop("unshipped_sizes_json", None) or "[]"
+        try:
+            item["unshipped_sizes"] = json.loads(raw)
+        except Exception:
+            item["unshipped_sizes"] = []
         result.append(item)
-
-    # 汇总统计（当前筛选条件下）
-    summary = db.execute(
-        text(
-            f"SELECT COALESCE(SUM(order_qty), 0) AS total_order_qty, "
-            f"COALESCE(SUM(shipped_qty), 0) AS total_shipped_qty, "
-            f"COALESCE(SUM(unshipped_qty), 0) AS total_unshipped_qty, "
-            f"COALESCE(SUM(unshipped_amount), 0) AS total_unshipped_amount "
-            f"FROM erp_unshipped_report WHERE {where_sql}"
-        ),
-        count_params,
-    ).mappings().first()
 
     return json_response(data={
         "list": result,
         "total": total,
-        "summary": dict(summary) if summary else {},
+        "summary": summary,
     })
 
 

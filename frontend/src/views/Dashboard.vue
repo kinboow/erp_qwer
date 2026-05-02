@@ -434,7 +434,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 
 <style scoped>
 /* 欢迎区域 */
-.lark-dashboard { padding: 0; }
+.lark-dashboard { padding: 0; width: 100%; }
 
 .lark-welcome-panel {
   display: flex;

@@ -40,6 +40,19 @@ def _load_wechat_config() -> dict[str, Any]:
         db.close()
 
 
+def _is_truthy(val) -> bool:
+    """判断 API 返回值是否表示"真"，兼容 bool / int / str 各种格式"""
+    if val is None:
+        return False
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        return val > 0
+    if isinstance(val, str):
+        return val.lower() in ("true", "1", "yes", "online", "running")
+    return bool(val)
+
+
 async def _check_instance_status(base_url: str, api_key: str, selected_wxid: str) -> tuple[bool, str]:
     """通过 live API 检查选中实例是否已登录且运行中"""
     headers = {}
@@ -61,23 +74,29 @@ async def _check_instance_status(base_url: str, api_key: str, selected_wxid: str
             raw_data = result.get("data", {})
             instances = raw_data.get("instances", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
 
-            # 尝试按 wxid 精确匹配；如果找不到，尝试按 nickname 或其他标识匹配
+            # 尝试按 wxid 精确匹配
             inst = next((i for i in instances if i.get("wxid") == selected_wxid), None)
             if not inst:
-                # 列出所有实例的 wxid 帮助排查
                 wxids = [i.get("wxid", "?") for i in instances]
                 return False, f"实例 {selected_wxid} 不在运行列表中（现有: {wxids}）"
 
             nickname = inst.get('nickname') or selected_wxid
-            is_running = inst.get("status") or inst.get("attached")
-            is_logged_in = inst.get("login_status")
-            logger.debug("[WeChat Health] 实例 %s: status=%s, attached=%s, login_status=%s",
-                         nickname, inst.get("status"), inst.get("attached"), inst.get("login_status"))
+            raw_status = inst.get("status")
+            raw_attached = inst.get("attached")
+            raw_login = inst.get("login_status")
+
+            logger.info("[WeChat Health] 实例 %s 原始字段: status=%r, attached=%r, login_status=%r, pid=%r",
+                        nickname, raw_status, raw_attached, raw_login, inst.get("pid"))
+
+            # 判断运行中：status 或 attached 任一为真，或者有 pid
+            is_running = _is_truthy(raw_status) or _is_truthy(raw_attached) or _is_truthy(inst.get("pid"))
+            # 判断已登录：login_status 为真，或者有 nickname（已登录才有昵称）
+            is_logged_in = _is_truthy(raw_login) or bool(inst.get("nickname"))
 
             if not is_running:
-                return False, f"实例 {nickname} 未运行（status={inst.get('status')}, attached={inst.get('attached')}）"
+                return False, f"实例 {nickname} 未运行（status={raw_status}, attached={raw_attached}, pid={inst.get('pid')}）"
             if not is_logged_in:
-                return False, f"实例 {nickname} 未登录（login_status={inst.get('login_status')}）"
+                return False, f"实例 {nickname} 未登录（login_status={raw_login}）"
 
             return True, ""
     except Exception as exc:
