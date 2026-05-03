@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
@@ -28,13 +29,94 @@ from app.ncloud.routers import unshipped_report as ncloud_unshipped_report, inve
 
 logger = logging.getLogger(__name__)
 
+@asynccontextmanager
+async def lifespan(application: FastAPI):
+    # ---- startup ----
+    from app.database import engine, Base
+    from app import models  # noqa: F401
+    Base.metadata.create_all(bind=engine)
+
+    try:
+        from app.services.erp_sync import _get_db_config
+        from app.ncloud.config import settings as ncloud_settings
+        cfg = _get_db_config()
+        ncloud_settings._override = {
+            "NCLOUD_BASE_URL": cfg.get("erp_base_url") or "",
+            "NCLOUD_USERNAME": cfg.get("erp_username") or "",
+            "NCLOUD_PASSWORD": cfg.get("erp_password") or "",
+            "NCLOUD_QR_IMAGE_PATH": cfg.get("erp_qr_image_path") or "",
+        }
+        logger.info("[Startup] 已从数据库加载 ERP 配置, base_url=%s", cfg.get("erp_base_url"))
+    except Exception as e:
+        logger.warning("[Startup] 加载数据库 ERP 配置失败（可能表不存在）: %s", e)
+
+    http_client = httpx.AsyncClient(
+        headers={
+            "User-Agent": "ncloud2api/0.2",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+        },
+        follow_redirects=False,
+        trust_env=False,
+        timeout=httpx.Timeout(30, connect=10),
+    )
+    erp_client = ERPClient(http_client)
+    application.state.http_client = http_client
+    application.state.erp_client = erp_client
+
+    from app.services.erp_bridge import set_erp_client
+    set_erp_client(erp_client)
+
+    await wechat_ws_service.auto_connect_from_saved_config()
+
+    from app.services.erp_sync import start_sync_scheduler
+    start_sync_scheduler(erp_client)
+
+    start_erp_health_checker(interval_seconds=20)
+    start_wechat_health_checker(interval_seconds=15)
+    start_room_cache_refresher(interval_seconds=300)
+
+    root_logger = logging.getLogger()
+    if root_logger.level > logging.INFO:
+        root_logger.setLevel(logging.INFO)
+
+    from app.services.db_log_handler import DatabaseLogHandler
+    db_handler = DatabaseLogHandler(SessionLocal, level=logging.INFO)
+    db_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger.addHandler(db_handler)
+    logger.info("[Startup] 系统日志 DB handler 已注册")
+
+    from app.services.log_cleanup import start_log_cleanup
+    start_log_cleanup()
+
+    from app.services.at_order_handler import rescan_unrecognized_messages
+    asyncio.create_task(rescan_unrecognized_messages())
+    logger.info("[Startup] 未识别消息补扫任务已启动")
+
+    yield
+
+    # ---- shutdown ----
+    stop_erp_health_checker()
+    stop_wechat_health_checker()
+    stop_room_cache_refresher()
+
+    from app.services.log_cleanup import stop_log_cleanup
+    stop_log_cleanup()
+
+    if http_client:
+        try:
+            await http_client.aclose()
+        except Exception:
+            pass
+
+
 # 创建FastAPI应用实例
 app = FastAPI(
     title="工厂智能化管理系统API",
     description="基于FastAPI的工厂管理系统后端接口",
     version="1.0.0",
-    docs_url="/docs",  # Swagger文档地址
-    redoc_url="/redoc"  # ReDoc文档地址
+    docs_url="/docs",
+    redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # 配置跨域中间件
@@ -83,104 +165,6 @@ app.include_router(ncloud_inventory.router, prefix="/api/erp", tags=["ERP-库存
 
 # 注册 ncloud 异常处理器
 register_ncloud_exception_handlers(app)
-
-
-@app.on_event("startup")
-async def startup_event():
-    # 自动创建缺失的数据库表
-    from app.database import engine, Base
-    from app import models  # noqa: F401 – 确保所有 ORM 模型已导入
-    Base.metadata.create_all(bind=engine)
-
-    # 从数据库加载 ERP 配置到 ncloud settings（这样无需每次手动点保存）
-    try:
-        from app.services.erp_sync import _get_db_config
-        from app.ncloud.config import settings as ncloud_settings
-        cfg = _get_db_config()
-        ncloud_settings._override = {
-            "NCLOUD_BASE_URL": cfg.get("erp_base_url") or "",
-            "NCLOUD_USERNAME": cfg.get("erp_username") or "",
-            "NCLOUD_PASSWORD": cfg.get("erp_password") or "",
-            "NCLOUD_QR_IMAGE_PATH": cfg.get("erp_qr_image_path") or "",
-        }
-        logger.info("[Startup] 已从数据库加载 ERP 配置, base_url=%s", cfg.get("erp_base_url"))
-    except Exception as e:
-        logger.warning("[Startup] 加载数据库 ERP 配置失败（可能表不存在）: %s", e)
-
-    # 初始化 ncloud2 ERP 客户端
-    http_client = httpx.AsyncClient(
-        headers={
-            "User-Agent": "ncloud2api/0.2",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-        },
-        follow_redirects=False,
-        trust_env=False,
-        timeout=httpx.Timeout(30, connect=10),
-    )
-    erp_client = ERPClient(http_client)
-    app.state.http_client = http_client
-    app.state.erp_client = erp_client
-
-    # 注入 ERPClient 到 erp_bridge，供审核/下单/替换等操作使用
-    from app.services.erp_bridge import set_erp_client
-    set_erp_client(erp_client)
-
-    # 恢复企业微信 WebSocket 连接
-    await wechat_ws_service.auto_connect_from_saved_config()
-
-    # 启动 ERP 销售订单定时同步
-    from app.services.erp_sync import start_sync_scheduler
-    start_sync_scheduler(erp_client)
-
-    # 启动 ERP 健康检查轮询（每20秒）
-    start_erp_health_checker(interval_seconds=20)
-
-    # 启动企微健康检查轮询（每15秒）
-    start_wechat_health_checker(interval_seconds=15)
-
-    # 启动企微群聊名称缓存刷新（每5分钟）
-    start_room_cache_refresher(interval_seconds=300)
-
-    # 设置根日志级别为 INFO，确保 INFO/WARNING/ERROR 都能被记录
-    root_logger = logging.getLogger()
-    if root_logger.level > logging.INFO:
-        root_logger.setLevel(logging.INFO)
-
-    # 注册系统日志 DB handler
-    from app.services.db_log_handler import DatabaseLogHandler
-    db_handler = DatabaseLogHandler(SessionLocal, level=logging.INFO)
-    db_handler.setFormatter(logging.Formatter("%(message)s"))
-    root_logger.addHandler(db_handler)
-    logger.info("[Startup] 系统日志 DB handler 已注册")
-
-    # 启动日志清理定时任务（15天）
-    from app.services.log_cleanup import start_log_cleanup
-    start_log_cleanup()
-
-    # 补扫未识别的图片/文件消息
-    from app.services.at_order_handler import rescan_unrecognized_messages
-    asyncio.create_task(rescan_unrecognized_messages())
-    logger.info("[Startup] 未识别消息补扫任务已启动")
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    # 停止健康检查轮询
-    stop_erp_health_checker()
-    stop_wechat_health_checker()
-    stop_room_cache_refresher()
-
-    # 停止日志清理
-    from app.services.log_cleanup import stop_log_cleanup
-    stop_log_cleanup()
-
-    # 关闭 ERP HTTP 客户端
-    http_client = getattr(app.state, "http_client", None)
-    if http_client:
-        try:
-            await http_client.aclose()
-        except Exception:
-            pass
 
 
 @app.api_route("/qwmspush", methods=["GET", "POST"], summary="兼容 NGCBot HTTP 回调", tags=["企业微信运行时"])

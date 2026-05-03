@@ -685,6 +685,60 @@ def _minimal_test_pdf(printer_name: str) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# SumatraPDF 检测
+# ---------------------------------------------------------------------------
+_SUMATRA_DOWNLOAD_URL = "https://www.sumatrapdfreader.org/download-free-pdf-viewer"
+
+
+def _check_sumatra_installed() -> bool:
+    """检查 SumatraPDF 是否已安装"""
+    return _find_sumatra() is not None
+
+
+def _prompt_install_sumatra() -> bool:
+    """弹窗提示用户安装 SumatraPDF，返回用户是否已完成安装"""
+    root = tk.Tk()
+    root.withdraw()
+
+    while True:
+        answer = messagebox.askyesno(
+            "需要安装 SumatraPDF",
+            "本程序依赖 SumatraPDF 进行 PDF 静默打印。\n"
+            "检测到系统未安装 SumatraPDF。\n\n"
+            "点击「是」打开下载页面进行安装，\n"
+            "安装完成后再次点击「是」继续。\n\n"
+            "点击「否」退出程序。",
+        )
+        if not answer:
+            root.destroy()
+            return False
+
+        import webbrowser
+        webbrowser.open(_SUMATRA_DOWNLOAD_URL)
+
+        messagebox.showinfo(
+            "等待安装",
+            "请在浏览器中下载并安装 SumatraPDF。\n\n"
+            "安装完成后点击「确定」继续。",
+        )
+
+        if _check_sumatra_installed():
+            messagebox.showinfo("检测成功", "SumatraPDF 已检测到，程序即将启动。")
+            root.destroy()
+            return True
+        else:
+            retry = messagebox.askretrycancel(
+                "未检测到",
+                "仍未检测到 SumatraPDF，请确认已安装。\n\n"
+                "点击「重试」重新检测，\n"
+                "点击「取消」退出程序。",
+            )
+            if not retry:
+                root.destroy()
+                return False
+
+
+# ---------------------------------------------------------------------------
 # 入口
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -697,6 +751,10 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
+
+    if not _check_sumatra_installed():
+        if not _prompt_install_sumatra():
+            sys.exit(1)
 
     app = PrintClientApp()
     app.run()

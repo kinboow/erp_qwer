@@ -1,0 +1,6 @@
+README.md
+setup_msi.py
+ERP_PrintClient.egg-info/PKG-INFO
+ERP_PrintClient.egg-info/SOURCES.txt
+ERP_PrintClient.egg-info/dependency_links.txt
+ERP_PrintClient.egg-info/top_level.txt

@@ -14,6 +14,9 @@
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "ERP"
 #define MyAppExeName "ERP打印客户端.exe"
+#ifndef SumatraInstaller
+  #define SumatraInstaller "SumatraPDF-3.5.2-64-install.exe"
+#endif
 
 [Setup]
 AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}
@@ -48,7 +51,7 @@ Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 ; 图标文件
 Source: "logo.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; SumatraPDF 安装包 (放在 deps 目录下)
-Source: "deps\SumatraPDF-*.exe"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall; Check: ShouldInstallSumatra
+Source: "deps\{#SumatraInstaller}"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall; Check: ShouldInstallSumatra
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\logo.ico"
@@ -61,7 +64,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 ; 静默安装 SumatraPDF
-Filename: "{tmp}\SumatraPDF-3.5.2-64-install.exe"; Parameters: "-s"; StatusMsg: "正在安装 SumatraPDF..."; Flags: waituntilterminated; Check: ShouldInstallSumatra
+Filename: "{tmp}\{#SumatraInstaller}"; Parameters: "-s"; StatusMsg: "正在安装 SumatraPDF..."; Flags: waituntilterminated; Check: ShouldInstallSumatra
 ; 安装完成后启动程序
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 

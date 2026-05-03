@@ -525,6 +525,20 @@ const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 const activeTab = ref(route.meta.tab || 'employees')
+
+const pageTitle = computed(() => {
+  const m = { employees: '员工管理', customers: '下游客户', 'wechat-rooms': '企微群聊' }
+  return m[activeTab.value] || '员工管理'
+})
+const pageDesc = computed(() => {
+  const m = {
+    employees: '管理企业内部员工账号与角色',
+    customers: '管理下游客户信息',
+    'wechat-rooms': '管理企微监控群聊',
+  }
+  return m[activeTab.value] || ''
+})
+
 const loading = ref(false)
 const tableData = ref([])
 const searchKeyword = ref('')

@@ -86,6 +86,7 @@
               <template #dropdown>
                 <el-dropdown-menu>
                   <el-dropdown-item v-if="!room.is_internal" command="set-shipping">设为发货群</el-dropdown-item>
+                  <el-dropdown-item v-if="!room.is_internal" command="set-notification">设为通知群</el-dropdown-item>
                   <el-dropdown-item v-if="room.is_internal" command="unset-internal" divided>取消内部群</el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -146,7 +147,7 @@ const memberLoading = ref(false)
 const memberError = ref('')
 const memberCache = reactive({})
 
-const INTERNAL_TYPE_LABELS = { shipping: '发货群' }
+const INTERNAL_TYPE_LABELS = { shipping: '发货群', notification: '通知群' }
 
 function internalTypeLabel(t) {
   return INTERNAL_TYPE_LABELS[t] || t || '未知'
@@ -221,19 +222,22 @@ function toggleRoom(room) {
 }
 
 async function handleRoomAction(cmd, room) {
-  if (cmd === 'set-shipping') {
+  if (cmd === 'set-shipping' || cmd === 'set-notification') {
+    const isShipping = cmd === 'set-shipping'
+    const label = isShipping ? '发货群' : '通知群'
+    const roomType = isShipping ? 'shipping' : 'notification'
     try {
       await ElMessageBox.confirm(
-        `确认将「${room.room_name || room.room_id}」设为发货群？`,
+        `确认将「${room.room_name || room.room_id}」设为${label}？`,
         '设为内部群',
         { confirmButtonText: '确定', cancelButtonText: '取消', type: 'info' }
       )
       await request({
         url: '/api/wechat/rooms/set-internal',
         method: 'post',
-        data: { room_id: room.room_id, room_name: room.room_name, room_type: 'shipping' }
+        data: { room_id: room.room_id, room_name: room.room_name, room_type: roomType }
       })
-      ElMessage.success('已设为发货群')
+      ElMessage.success(`已设为${label}`)
       loadRooms()
     } catch (e) {
       if (e !== 'cancel' && e?.toString() !== 'cancel') {

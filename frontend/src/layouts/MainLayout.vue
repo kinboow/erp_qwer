@@ -546,7 +546,7 @@ function startMsgPoll() {
 
 const activeMenu = computed(() => {
   const p = route.path
-  if (p === '/customers') return '/users'
+  if (p === '/customers' || p === '/wechat-rooms') return '/users'
   if (p.startsWith('/sales/')) return '/sales'
   if (p.startsWith('/shipments/')) return '/shipments'
   if (p.startsWith('/unshipped-report/')) return '/unshipped-report'

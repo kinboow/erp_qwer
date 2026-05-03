@@ -76,6 +76,10 @@ class DatabaseLogHandler(logging.Handler):
         # ERP 同步成功日志只记入系统消息，不写入系统日志；仅保留 WARNING 及以上
         if record.name.startswith('app.services.erp_sync') and record.levelno < logging.WARNING:
             return
+        # 健康检查轮询日志只保留 WARNING 及以上，过滤掉高频 INFO
+        _health_modules = ('app.services.wechat_health', 'app.services.erp_health')
+        if any(record.name.startswith(m) for m in _health_modules) and record.levelno < logging.WARNING:
+            return
 
         try:
             msg = self.format(record)

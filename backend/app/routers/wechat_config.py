@@ -306,60 +306,59 @@ async def get_rooms_all_status(
     except Exception as exc:
         return json_response(code=502, message=f"获取群聊列表失败: {exc}")
 
-    # 2) 从 DB 查客户群关联
-    customer_map: dict[str, dict] = {}
+    # 2) 从 DB 查所有已分类群聊（统一表）
+    _ensure_internal_rooms_table(db)
+    room_db_map: dict[str, dict] = {}
     try:
         rows = db.execute(text(
-            "SELECT r.room_id, r.customer_id, c.customer_name, c.contact_person, c.erp_customer_id "
+            "SELECT r.room_id, r.room_type, r.remark, r.customer_id, "
+            "c.customer_name, c.contact_person, c.erp_customer_id "
             "FROM downstream_customer_wechat_rooms r "
-            "INNER JOIN downstream_customers c ON c.id = r.customer_id "
-            "WHERE c.deleted_at IS NULL AND c.status = 1"
+            "LEFT JOIN downstream_customers c ON c.id = r.customer_id "
+            "AND c.deleted_at IS NULL AND c.status = 1"
         )).mappings().all()
         for r in rows:
-            customer_map[r["room_id"]] = {
+            entry = {
+                "room_type": r["room_type"] or "",
+                "remark": r["remark"] or "",
                 "customer_id": r["customer_id"],
-                "customer_name": r["customer_name"],
-                "contact_person": r["contact_person"],
-                "erp_customer_id": r["erp_customer_id"],
             }
+            if r["customer_id"] and r["customer_name"]:
+                entry["customer"] = {
+                    "customer_id": r["customer_id"],
+                    "customer_name": r["customer_name"],
+                    "contact_person": r["contact_person"],
+                    "erp_customer_id": r["erp_customer_id"],
+                }
+            room_db_map[r["room_id"]] = entry
     except Exception:
         pass
 
-    # 3) 从 DB 查内部群
-    internal_map: dict[str, dict] = {}
-    try:
-        _ensure_internal_rooms_table(db)
-        irows = db.execute(text(
-            "SELECT room_id, room_type, remark FROM internal_wechat_rooms"
-        )).mappings().all()
-        for r in irows:
-            internal_map[r["room_id"]] = {
-                "room_type": r["room_type"],
-                "remark": r["remark"],
-            }
-    except Exception:
-        pass
-
-    # 4) 合并
+    # 3) 合并
     merged = []
     name_map: dict[str, str] = {}
     for room in all_rooms:
         rid = room.get("conversation_id") or room.get("room_id") or ""
-        # 去掉 R: 前缀用于 DB 匹配
         rid_clean = rid[2:] if rid.startswith("R:") else rid
-        cust = customer_map.get(rid_clean) or customer_map.get(rid)
-        intern = internal_map.get(rid_clean) or internal_map.get(rid)
+        db_info = room_db_map.get(rid_clean) or room_db_map.get(rid)
         room_name = room.get("nickname") or room.get("room_name") or room.get("name") or ""
+
+        room_type = (db_info.get("room_type") or "") if db_info else ""
+        is_customer = room_type == "customer"
+        is_internal = room_type in ("shipping", "notification")
+        customer = db_info.get("customer") if db_info else None
+
         merged.append({
             "conversation_id": rid,
             "room_id": rid_clean,
             "room_name": room_name,
             "member_count": room.get("member_count") or room.get("total") or 0,
             "owner": room.get("owner") or "",
-            "is_customer": cust is not None,
-            "customer": cust,
-            "is_internal": intern is not None,
-            "internal": intern,
+            "type": room_type,
+            "is_customer": is_customer,
+            "customer": customer,
+            "is_internal": is_internal,
+            "internal": {"room_type": room_type, "remark": db_info.get("remark", "")} if is_internal else None,
         })
         if rid_clean and room_name:
             name_map[rid_clean] = room_name
@@ -401,15 +400,14 @@ async def set_internal_room(
     # 检查是否已关联客户
     cust = db.execute(text(
         "SELECT r.room_id FROM downstream_customer_wechat_rooms r "
-        "INNER JOIN downstream_customers c ON c.id = r.customer_id "
-        "WHERE r.room_id = :rid AND c.deleted_at IS NULL AND c.status = 1 LIMIT 1"
+        "WHERE r.room_id = :rid AND r.room_type = 'customer' AND r.customer_id IS NOT NULL LIMIT 1"
     ), {"rid": rid}).mappings().first()
     if cust:
         return json_response(code=400, message="该群聊已关联客户，不能设置为内部群")
     try:
         db.execute(text(
-            "INSERT INTO internal_wechat_rooms (room_id, room_name, room_type, remark) "
-            "VALUES (:room_id, :room_name, :room_type, :remark) "
+            "INSERT INTO downstream_customer_wechat_rooms (room_id, room_name, room_type, remark, customer_id) "
+            "VALUES (:room_id, :room_name, :room_type, :remark, NULL) "
             "ON DUPLICATE KEY UPDATE room_name = :room_name, room_type = :room_type, remark = :remark"
         ), {
             "room_id": rid,
@@ -436,7 +434,10 @@ async def unset_internal_room(
 ):
     _ensure_internal_rooms_table(db)
     try:
-        db.execute(text("DELETE FROM internal_wechat_rooms WHERE room_id = :rid"), {"rid": data.room_id})
+        db.execute(text(
+            "DELETE FROM downstream_customer_wechat_rooms "
+            "WHERE room_id = :rid AND room_type != 'customer'"
+        ), {"rid": data.room_id})
         db.commit()
         return json_response(message="已取消内部群")
     except Exception as exc:

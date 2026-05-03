@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['print_client.py'],
+    ['f:\\代码\\erp\\print_client\\print_client.py'],
     pathex=[],
     binaries=[],
-    datas=[('logo.ico', '.')],
+    datas=[('f:\\代码\\erp\\print_client\\logo.ico', '.')],
     hiddenimports=['win32print', 'win32api', 'pystray', 'PIL'],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['logo.ico'],
+    icon=['f:\\代码\\erp\\print_client\\logo.ico'],
 )

@@ -91,7 +91,13 @@ def replace_customer_rooms(db: Session, customer_id: int, rooms: Optional[List[C
         if not room.instance_id or not room.room_id:
             continue
         db.execute(
-            text("INSERT INTO downstream_customer_wechat_rooms (customer_id, instance_id, room_id, room_name) VALUES (:customer_id, :instance_id, :room_id, :room_name)"),
+            text(
+                "INSERT INTO downstream_customer_wechat_rooms "
+                "(customer_id, instance_id, room_id, room_name, room_type) "
+                "VALUES (:customer_id, :instance_id, :room_id, :room_name, 'customer') "
+                "ON DUPLICATE KEY UPDATE customer_id = :customer_id, instance_id = :instance_id, "
+                "room_name = :room_name, room_type = 'customer'"
+            ),
             {
                 "customer_id": customer_id,
                 "instance_id": room.instance_id,
