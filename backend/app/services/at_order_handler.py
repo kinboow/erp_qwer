@@ -1130,7 +1130,7 @@ def _restore_payload(msg: dict[str, Any]) -> dict[str, Any]:
 
 async def rescan_unrecognized_messages() -> None:
     """扫描最近未被 AI 识别的图片/文件消息和 @bot 消息，重新触发识别流程。"""
-    from app.services.message_logs import get_unrecognized_media_messages, get_unrecognized_at_messages
+    from app.services.message_logs import get_unrecognized_media_messages, get_unrecognized_at_messages, increment_rescan_count
 
     db = SessionLocal()
     try:
@@ -1165,8 +1165,42 @@ async def rescan_unrecognized_messages() -> None:
                 db2.close()
 
             if not customer:
-                logger.info("[启动补扫] 跳过媒体 id=%d: room=%s 无绑定客户", msg_id, room_id)
-                _mark_msg_recognized(msg_id)
+                # 不是客户群 → 检查是否为发货群
+                from app.services.shipping_scan_handler import resolve_shipping_room, handle_shipping_scan
+                db3 = SessionLocal()
+                try:
+                    shipping_room = resolve_shipping_room(db3, room_id)
+                finally:
+                    db3.close()
+
+                if shipping_room and message_type in ("image", "img", "picture"):
+                    # 递增重试计数，超过2次不再重试
+                    db_cnt = SessionLocal()
+                    try:
+                        count = increment_rescan_count(db_cnt, msg_id)
+                    finally:
+                        db_cnt.close()
+                    if count > 2:
+                        logger.info("[启动补扫] 发货扫码已重试%d次，放弃 id=%d", count, msg_id)
+                        _mark_msg_recognized(msg_id)
+                        # 通知群：已放弃
+                        from app.services.shipping_scan_handler import _notify_scan_failure
+                        asyncio.create_task(_notify_scan_failure(
+                            room_id, sender_id, msg_id,
+                            f"多次补扫仍识别失败，已放弃 (重试{count}次)", instance_id,
+                        ))
+                    else:
+                        logger.info("[启动补扫] 重新触发发货扫码 id=%d room=%s (第%d次)", msg_id, room_id, count)
+                        asyncio.create_task(handle_shipping_scan(
+                            room_id=room_id,
+                            sender_id=sender_id,
+                            msg_log_id=msg_id,
+                            instance_id=instance_id,
+                            payload=payload,
+                        ))
+                else:
+                    logger.info("[启动补扫] 跳过媒体 id=%d: room=%s 无绑定客户也非发货群", msg_id, room_id)
+                    _mark_msg_recognized(msg_id)
                 continue
 
             logger.info("[启动补扫] 重新触发媒体 id=%d room=%s type=%s", msg_id, room_id, message_type)

@@ -95,7 +95,7 @@ def _generate_qr_image(content: str, box_size: int = 4, border: int = 1) -> io.B
     """生成 QR Code PNG 图片，返回 BytesIO"""
     qr = qrcode.QRCode(
         version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
         box_size=box_size,
         border=border,
     )
@@ -258,7 +258,7 @@ def _build_picking_pdf(
     payload_pages = []
     for page_idx, page_blocks in enumerate(block_pages):
         pr = page_records[page_idx]
-        qr_buf = _generate_qr_image(pr["barcode_content"], box_size=4, border=1)
+        qr_buf = _generate_qr_image(pr["barcode_content"], box_size=8, border=2)
         payload_pages.append({
             "page_index": page_idx,
             "page_id": pr["page_id"],

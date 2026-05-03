@@ -156,7 +156,7 @@ async def refresh_room_cache() -> int:
             _room_cache.clear()
             _room_cache.update(new_cache)
             _last_refreshed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            logger.info("[RoomCache] 已刷新群聊缓存，共 %d 个群聊", len(_room_cache))
+            logger.debug("[RoomCache] 已刷新群聊缓存，共 %d 个群聊", len(_room_cache))
 
             # 同时回写到 DB 中的审核记录
             _backfill_review_room_names(new_cache)

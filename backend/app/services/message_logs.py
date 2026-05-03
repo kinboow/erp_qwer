@@ -52,6 +52,7 @@ def ensure_message_logs_table(db: Session):
         "ALTER TABLE message_logs ADD COLUMN ai_recognized TINYINT NOT NULL DEFAULT 0 AFTER payload_json",
         "ALTER TABLE message_logs ADD COLUMN is_at_bot TINYINT NOT NULL DEFAULT 0 AFTER ai_recognized",
         "ALTER TABLE message_logs ADD COLUMN oss_key VARCHAR(500) DEFAULT '' AFTER is_at_bot",
+        "ALTER TABLE message_logs ADD COLUMN rescan_count TINYINT NOT NULL DEFAULT 0 AFTER oss_key",
     ):
         try:
             db.execute(text(col_sql))
@@ -223,6 +224,23 @@ def mark_ai_recognized(db: Session, msg_log_id: int, recognized: bool = True) ->
         db.commit()
     except Exception:
         pass
+
+
+def increment_rescan_count(db: Session, msg_log_id: int) -> int:
+    """递增补扫重试次数，返回递增后的值"""
+    try:
+        db.execute(
+            text("UPDATE message_logs SET rescan_count = rescan_count + 1 WHERE id = :id"),
+            {"id": msg_log_id},
+        )
+        db.commit()
+        row = db.execute(
+            text("SELECT rescan_count FROM message_logs WHERE id = :id"),
+            {"id": msg_log_id},
+        ).first()
+        return row[0] if row else 0
+    except Exception:
+        return 0
 
 
 def get_unrecognized_media_messages(db: Session, limit: int = 15) -> list[dict[str, Any]]:

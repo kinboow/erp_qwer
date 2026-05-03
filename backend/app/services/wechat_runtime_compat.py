@@ -251,15 +251,19 @@ async def ingest_runtime_message(
         except Exception as exc:
             logger.warning("媒体接单检测异常: %s", exc)
 
-    # 发货群图片扫码检测（仅图片消息，非员工）
+    # 发货群图片扫码检测（仅图片消息）
+    # 注意：发货群图片不受 sender_is_employee 限制，员工也可能转发发货单图片
     shipping_scan_triggered = False
-    if not sender_is_employee and not at_order_triggered and not media_order_triggered:
+    if not at_order_triggered and not media_order_triggered:
         try:
             log_msg_type = str((log_result or {}).get("message_type") or "").lower()
+            log_room_id = str((log_result or {}).get("room_id") or "").strip()
+            logger.debug("发货扫码检测: msg_type=%s room=%s sender_employee=%s log_result=%s",
+                         log_msg_type, log_room_id, sender_is_employee, bool(log_result))
             if log_msg_type in ("image", "img", "picture"):
-                log_room_id = str((log_result or {}).get("room_id") or "").strip()
                 if log_room_id:
                     shipping_room = resolve_shipping_room(db, log_room_id)
+                    logger.debug("发货扫码检测: resolve_shipping_room(%s) → %s", log_room_id, shipping_room)
                     if shipping_room:
                         log_sender_id = str((log_result or {}).get("sender_id") or _sender_id or "").strip()
                         log_id = (log_result or {}).get("id") or 0
@@ -271,7 +275,8 @@ async def ingest_runtime_message(
                             payload=normalized_payload,
                         ))
                         shipping_scan_triggered = True
-                        logger.info("发货扫码: 已触发 room=%s", log_room_id)
+                        logger.info("发货扫码: 已触发 room=%s sender=%s log_id=%d",
+                                    log_room_id, log_sender_id, log_id)
         except Exception as exc:
             logger.warning("发货扫码检测异常: %s", exc)
 

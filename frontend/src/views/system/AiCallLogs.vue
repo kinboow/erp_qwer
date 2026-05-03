@@ -136,7 +136,7 @@ function callerLabel(c) { return CALLER_MAP[c] || c || '-' }
 function callerTagType(c) {
   if (c === 'test_connection') return 'info'
   if (c === 'reparse_with_hints') return 'warning'
-  return ''
+  return 'info'
 }
 
 function handleSearch() {

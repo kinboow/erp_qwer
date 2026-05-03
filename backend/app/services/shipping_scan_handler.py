@@ -21,6 +21,7 @@ import base64
 import io
 import json
 import logging
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 SHIPPING_SCAN_DEDUP_WINDOW = 15  # 同一条消息防重复窗口（秒）
 _processed_scans: dict[int, float] = {}  # msg_log_id → monotonic timestamp
+_opencv_qr_detector = None
+_QR_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{3,}\|[A-Fa-f0-9]{8,64}$")
 
 # ---------------------------------------------------------------------------
 # AI 提示词：解析发货表格图片
@@ -74,32 +77,193 @@ _SHIPPING_TABLE_PARSE_PROMPT = """\
 
 
 # ---------------------------------------------------------------------------
-# 二维码识别（非AI，使用 pyzbar）
+# 二维码识别 — 纯二维码库路线（ZXing → pyzbar → OpenCV）
 # ---------------------------------------------------------------------------
-def decode_qr_from_bytes(image_bytes: bytes) -> list[str]:
-    """从图片字节解码所有二维码内容，返回解码文本列表"""
+def _normalize_qr_text(value: str) -> str:
+    return str(value or "").replace("\n", "").replace("\r", "").strip()
+
+
+def _is_valid_qr_text(value: str) -> bool:
+    text_val = _normalize_qr_text(value)
+    if not text_val:
+        return False
+    return bool(_QR_TEXT_RE.match(text_val))
+
+
+def _dedupe_texts(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for v in values:
+        text_val = _normalize_qr_text(v)
+        if text_val and text_val not in seen and _is_valid_qr_text(text_val):
+            seen.add(text_val)
+            result.append(text_val)
+    return result
+
+
+def _get_opencv_qr_detector():
+    global _opencv_qr_detector
+    if _opencv_qr_detector is None:
+        import cv2
+        _opencv_qr_detector = cv2.QRCodeDetector()
+    return _opencv_qr_detector
+
+
+def _pyzbar_decode(img_array) -> list[str]:
+    """pyzbar 解码（速度最快）"""
+    from pyzbar.pyzbar import decode as pyzbar_decode
+    from PIL import Image as PILImage
+    pil = PILImage.fromarray(img_array) if not isinstance(img_array, PILImage.Image) else img_array
+    results = pyzbar_decode(pil)
+    return _dedupe_texts([r.data.decode("utf-8").strip() for r in results if r.data])
+
+
+def _zxing_decode(image_obj) -> list[str]:
+    """zxing-cpp 解码。"""
     try:
-        from PIL import Image
-        from pyzbar.pyzbar import decode as pyzbar_decode
-    except ImportError as e:
-        logger.error("二维码识别依赖未安装: %s (pip install Pillow pyzbar)", e)
+        import zxingcpp
+    except ImportError:
         return []
 
     try:
-        img = Image.open(io.BytesIO(image_bytes))
-        results = pyzbar_decode(img)
-        decoded = []
-        for r in results:
-            try:
-                text_val = r.data.decode("utf-8").strip()
-                if text_val:
-                    decoded.append(text_val)
-            except Exception:
-                pass
-        return decoded
-    except Exception as exc:
-        logger.warning("二维码解码失败: %s", exc)
+        results = zxingcpp.read_barcodes(
+            image_obj,
+            formats=zxingcpp.BarcodeFormat.QRCode,
+            try_rotate=True,
+            try_downscale=True,
+            try_invert=True,
+            binarizer=zxingcpp.Binarizer.LocalAverage,
+            return_errors=False,
+        )
+    except Exception:
         return []
+
+    return _dedupe_texts([getattr(r, "text", "") for r in results if getattr(r, "text", "")])
+
+
+def _opencv_qr_decode(bgr_img) -> list[str]:
+    """OpenCV QRCodeDetector 解码"""
+    detector = _get_opencv_qr_detector()
+    val, _, _ = detector.detectAndDecode(bgr_img)
+    if val:
+        return _dedupe_texts([val.strip()])
+    # 多码检测
+    ok, decoded_info, _, _ = detector.detectAndDecodeMulti(bgr_img)
+    if ok and decoded_info:
+        return _dedupe_texts([s.strip() for s in decoded_info if s.strip()])
+    return []
+
+
+def _decode_with_fast_engines(bgr_img, rgb_img, label: str) -> list[str]:
+    """不依赖视觉检测模型的快速解码链路。"""
+    engine_calls = [
+        ("zxing", lambda: _zxing_decode(rgb_img)),
+        ("pyzbar", lambda: _pyzbar_decode(rgb_img)),
+        ("opencv", lambda: _opencv_qr_decode(bgr_img)),
+    ]
+    for engine_name, fn in engine_calls:
+        try:
+            res = fn()
+            if res:
+                logger.info("二维码: %s %s 识别成功 → %s", label, engine_name, res)
+                return res
+        except Exception as exc:
+            logger.debug("二维码: %s %s 异常: %s", label, engine_name, exc)
+    return []
+
+
+def _build_crop_variants(crop_bgr):
+    import cv2
+
+    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 8)
+
+    variants = [
+        ("color", crop_bgr),
+        ("gray", cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)),
+        ("clahe", cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR)),
+        ("otsu", cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)),
+        ("adaptive", cv2.cvtColor(adaptive, cv2.COLOR_GRAY2BGR)),
+    ]
+
+    result = []
+    for name, img in variants:
+        bordered = cv2.copyMakeBorder(img, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        result.append((name, bordered, cv2.cvtColor(bordered, cv2.COLOR_BGR2RGB)))
+    return result
+
+
+def _iter_corner_crops(bgr_img):
+    h, w = bgr_img.shape[:2]
+    crop_w = max(int(w * 0.38), 160)
+    crop_h = max(int(h * 0.38), 160)
+    boxes = [
+        ("top_left", 0, 0, min(w, crop_w), min(h, crop_h)),
+        ("top_right", max(0, w - crop_w), 0, w, min(h, crop_h)),
+        ("bottom_left", 0, max(0, h - crop_h), min(w, crop_w), h),
+        ("bottom_right", max(0, w - crop_w), max(0, h - crop_h), w, h),
+    ]
+    for name, x1, y1, x2, y2 in boxes:
+        crop = bgr_img[y1:y2, x1:x2]
+        if crop.size != 0:
+            yield name, crop
+
+
+def decode_qr_from_bytes(image_bytes: bytes) -> list[str]:
+    """从图片字节解码二维码，返回解码文本列表。
+
+    策略（逐层升级，任一层成功即返回）：
+    1. 全图 ZXing / pyzbar / OpenCV 快速扫描
+    2. 全图灰度/增强快速扫描
+    3. 四角区域快速扫描（适配拣货单二维码通常位于角落）
+    """
+    import cv2
+    import numpy as np
+
+    started_at = time.perf_counter()
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if cv_img is None:
+        logger.warning("二维码: 无法解码图片字节")
+        return []
+    rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+    h, w = cv_img.shape[:2]
+    logger.info("二维码: 图片尺寸 %dx%d (%d bytes)", w, h, len(image_bytes))
+
+    # --- 1) 快速全图路径 ---
+    res = _decode_with_fast_engines(cv_img, rgb, "full")
+    if res:
+        logger.info("二维码: 总耗时 %.3fs", time.perf_counter() - started_at)
+        return res
+
+    gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
+    gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    clahe_bgr = cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR)
+
+    for label, bgr_variant in (("gray", gray_bgr), ("clahe", clahe_bgr)):
+        res = _decode_with_fast_engines(label=label, bgr_img=bgr_variant, rgb_img=cv2.cvtColor(bgr_variant, cv2.COLOR_BGR2RGB))
+        if res:
+            logger.info("二维码: 总耗时 %.3fs", time.perf_counter() - started_at)
+            return res
+
+    # --- 3) 四角区域快速扫描 ---
+    for corner_name, crop in _iter_corner_crops(cv_img):
+        for scale in (1, 2, 3, 4):
+            if scale == 1:
+                scaled = crop
+            else:
+                scaled = cv2.resize(crop, (crop.shape[1] * scale, crop.shape[0] * scale), interpolation=cv2.INTER_LANCZOS4)
+            for src_label, v_bgr, v_rgb in _build_crop_variants(scaled):
+                res = _decode_with_fast_engines(v_bgr, v_rgb, f"corner:{corner_name}:{scale}x:{src_label}")
+                if res:
+                    logger.info("二维码: 总耗时 %.3fs", time.perf_counter() - started_at)
+                    return res
+
+    logger.warning("二维码: 所有引擎均未识别到，耗时 %.3fs", time.perf_counter() - started_at)
+    return []
 
 
 def parse_qr_content(qr_text: str) -> dict[str, str]:
@@ -214,35 +378,74 @@ def _resolve_wechat_runtime(db: Session, instance_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # CDN 下载图片
 # ---------------------------------------------------------------------------
-def _extract_cdn_params(payload: dict[str, Any]) -> dict[str, Any]:
+def _extract_cdn_params(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """提取 CDN 下载参数，返回多个候选方案（按图片质量从高到低排序）。
+
+    优先级：原图 c2c file_type=1 → wx_download 最大尺寸 → wx_download 标准。
+    """
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     data = message.get("data") if isinstance(message.get("data"), dict) else {}
     cdn = data.get("cdn") if isinstance(data.get("cdn"), dict) else {}
     c2c = data.get("c2c_cdn") if isinstance(data.get("c2c_cdn"), dict) else {}
 
-    url = cdn.get("url") or data.get("url") or ""
     auth_key = cdn.get("auth_key") or data.get("auth_key") or ""
     aes_key = cdn.get("aes_key") or c2c.get("aes_key") or data.get("aes_key") or ""
-    size = cdn.get("size") or c2c.get("file_size") or c2c.get("size") or data.get("size") or 0
-    try:
-        size = int(size)
-    except (ValueError, TypeError):
-        size = 0
 
-    if url and auth_key and aes_key and size:
-        return {"mode": "wx_download", "url": url, "auth_key": auth_key, "aes_key": aes_key, "size": size}
+    candidates: list[dict[str, Any]] = []
 
+    # 方案A: c2c_download file_type=1 (原图)
     file_id = c2c.get("file_id") or data.get("file_id") or ""
     if file_id and aes_key:
-        return {"mode": "c2c_download", "file_id": file_id, "aes_key": aes_key, "file_size": size, "file_type": 2}
+        c2c_size = c2c.get("file_size") or c2c.get("size") or data.get("size") or 0
+        try:
+            c2c_size = int(c2c_size)
+        except (ValueError, TypeError):
+            c2c_size = 0
+        candidates.append({"mode": "c2c_download", "file_id": file_id,
+                           "aes_key": aes_key, "file_size": c2c_size, "file_type": 1})
 
-    return {}
+    # 方案B: wx_download — 选最大尺寸的 URL
+    url_options = []
+    for url_key, size_key in [("url", "size"), ("md_url", "md_size"), ("ld_url", "ld_size")]:
+        u = cdn.get(url_key) or ""
+        s = cdn.get(size_key) or 0
+        try:
+            s = int(s)
+        except (ValueError, TypeError):
+            s = 0
+        if u and s:
+            url_options.append((s, u))
+    # data 级别的 url
+    data_url = data.get("url") or ""
+    data_size = data.get("size") or 0
+    try:
+        data_size = int(data_size)
+    except (ValueError, TypeError):
+        data_size = 0
+    if data_url and data_size:
+        url_options.append((data_size, data_url))
+
+    # 按 size 从大到小排序，取最大的
+    url_options.sort(key=lambda x: x[0], reverse=True)
+    seen_urls: set[str] = set()
+    for size_val, url_val in url_options:
+        if url_val in seen_urls:
+            continue
+        seen_urls.add(url_val)
+        if auth_key and aes_key:
+            candidates.append({"mode": "wx_download", "url": url_val,
+                               "auth_key": auth_key, "aes_key": aes_key, "size": size_val})
+
+    return candidates
 
 
 async def download_image(db: Session, payload: dict[str, Any], instance_id: str, msg_log_id: int) -> Optional[bytes]:
-    """从企微CDN下载图片，返回字节"""
-    cdn_params = _extract_cdn_params(payload)
-    if not cdn_params:
+    """从企微CDN下载图片，返回字节。
+
+    依次尝试多个下载方案（原图 → 大图 → 标准），取第一个成功的。
+    """
+    candidates = _extract_cdn_params(payload)
+    if not candidates:
         logger.debug("[发货扫码] 无CDN参数 msg_log_id=%s", msg_log_id)
         return None
 
@@ -253,46 +456,68 @@ async def download_image(db: Session, payload: dict[str, Any], instance_id: str,
 
     download_dir = Path(__file__).resolve().parents[2] / "temp" / "shipping_scan"
     download_dir.mkdir(parents=True, exist_ok=True)
-    save_path = download_dir / f"scan_{msg_log_id}.png"
-
-    mode = cdn_params.pop("mode")
-    api_route = f"cdn/{mode}"
-    cdn_params["save_path"] = str(save_path)
 
     headers: dict[str, str] = {}
     if runtime.get("api_key"):
         headers["X-API-Key"] = runtime["api_key"]
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
-                json=cdn_params,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            resp_data = resp.json()
+    best_bytes: Optional[bytes] = None
 
-        if isinstance(resp_data, dict) and resp_data.get("code") not in (0, None):
-            logger.warning("[发货扫码] CDN返回错误: %s", resp_data.get("msg"))
-            return None
+    for idx, params in enumerate(candidates):
+        mode = params.pop("mode")
+        api_route = f"cdn/{mode}"
+        save_path = download_dir / f"scan_{msg_log_id}_{idx}.dat"
+        params["save_path"] = str(save_path)
 
-        if not save_path.is_file():
-            data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
-            for key in ("save_path", "path", "file_path"):
-                possible = str(data_body.get(key) or "").strip()
-                if possible and Path(possible).is_file():
-                    save_path = Path(possible)
-                    break
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
+                    json=params,
+                    headers=headers,
+                )
+                resp.raise_for_status()
+                resp_data = resp.json()
 
-        if not save_path.is_file():
-            logger.warning("[发货扫码] 文件未出现 msg_log_id=%s", msg_log_id)
-            return None
+            # 检查 API 错误
+            if isinstance(resp_data, dict):
+                data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+                err_code = data_body.get("error_code", 0)
+                if resp_data.get("code") not in (0, None) or err_code:
+                    logger.debug("[发货扫码] CDN方案%d(%s) 返回错误: code=%s err=%s",
+                                 idx, mode, resp_data.get("code"), err_code)
+                    continue
 
-        return save_path.read_bytes()
-    except Exception as exc:
-        logger.warning("[发货扫码] 下载失败 msg_log_id=%s: %s", msg_log_id, exc)
-        return None
+            # 查找实际保存路径
+            actual_path = save_path
+            if not actual_path.is_file():
+                data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+                for key in ("save_path", "path", "file_path"):
+                    possible = str(data_body.get(key) or "").strip()
+                    if possible and Path(possible).is_file():
+                        actual_path = Path(possible)
+                        break
+
+            if actual_path.is_file():
+                file_bytes = actual_path.read_bytes()
+                file_size = len(file_bytes)
+                logger.info("[发货扫码] CDN方案%d(%s) 下载成功: %d bytes path=%s",
+                            idx, mode, file_size, actual_path)
+                # 取最大的文件（更高质量）
+                if best_bytes is None or file_size > len(best_bytes):
+                    best_bytes = file_bytes
+                # c2c 原图如果成功直接返回
+                if mode == "c2c_download":
+                    return best_bytes
+        except Exception as exc:
+            logger.debug("[发货扫码] CDN方案%d(%s) 异常: %s", idx, mode, exc)
+            continue
+
+    if best_bytes:
+        logger.info("[发货扫码] 最终下载 %d bytes, msg_log_id=%s", len(best_bytes), msg_log_id)
+    else:
+        logger.warning("[发货扫码] 所有CDN方案均失败 msg_log_id=%s", msg_log_id)
+    return best_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -542,22 +767,75 @@ async def send_notification_to_groups(
 # 判断群是否为发货群
 # ---------------------------------------------------------------------------
 def resolve_shipping_room(db: Session, room_id: str) -> Optional[dict[str, str]]:
-    """检查 room_id 是否为发货群，返回群信息或 None"""
+    """检查 room_id 是否为发货群，返回群信息或 None。
+
+    兼容 room_id 有/无 'R:' 前缀的情况（前端存不带前缀，消息日志带前缀）。
+    """
     if not room_id:
         return None
+    rid_clean = room_id[2:] if room_id.startswith("R:") else room_id
+    candidates = [room_id, rid_clean] if room_id != rid_clean else [room_id]
     try:
+        placeholders = ", ".join(f":rid{i}" for i in range(len(candidates)))
+        params: dict[str, str] = {f"rid{i}": c for i, c in enumerate(candidates)}
         row = db.execute(
             text(
-                "SELECT room_id, room_name FROM downstream_customer_wechat_rooms "
-                "WHERE room_id = :rid AND room_type = 'shipping' LIMIT 1"
+                f"SELECT room_id, room_name FROM downstream_customer_wechat_rooms "
+                f"WHERE room_id IN ({placeholders}) AND room_type = 'shipping' LIMIT 1"
             ),
-            {"rid": room_id},
+            params,
         ).mappings().first()
         if row:
             return {"room_id": row["room_id"], "room_name": row["room_name"] or ""}
     except Exception:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# 标记消息已被识别（与客户群逻辑一致）
+# ---------------------------------------------------------------------------
+def _mark_msg_recognized(msg_log_id: int) -> None:
+    """标记消息日志已被 AI 识别处理"""
+    if not msg_log_id:
+        return
+    db = SessionLocal()
+    try:
+        from app.services.message_logs import mark_ai_recognized
+        mark_ai_recognized(db, msg_log_id)
+    except Exception as exc:
+        logger.warning("标记 ai_recognized 失败 id=%d: %s", msg_log_id, exc)
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
+# 扫码失败通知（发货群@发送人 + 通知群）
+# ---------------------------------------------------------------------------
+async def _notify_scan_failure(
+    room_id: str, sender_id: str, msg_log_id: int,
+    reason: str, instance_id: str = "",
+) -> None:
+    """扫码失败时：在发货群@发送人提示 + 通知群推送"""
+    db = SessionLocal()
+    try:
+        # 1) 在发货群@发送人
+        at_list = [sender_id] if sender_id else None
+        tip = f"❌ 发货单识别失败\n原因：{reason}\n请重新拍照，确保图片清晰、二维码完整可见"
+        try:
+            await send_room_at(db, room_id, tip, at_list=at_list)
+        except Exception as exc:
+            logger.warning("[发货扫码] 发货群通知失败: %s", exc)
+
+        # 2) 通知群推送
+        await send_notification_to_groups(
+            db, "", "", False, {},
+            f"发货群图片识别失败 (log_id={msg_log_id}): {reason}",
+        )
+    except Exception as exc:
+        logger.warning("[发货扫码] 失败通知异常: %s", exc)
+    finally:
+        db.close()
 
 
 # ---------------------------------------------------------------------------
@@ -597,13 +875,17 @@ async def handle_shipping_scan(
             db.close()
 
         if not image_bytes:
-            logger.info("[发货扫码] 图片下载失败，跳过 log_id=%d", msg_log_id)
+            logger.info("[发货扫码] 图片下载失败 log_id=%d", msg_log_id)
+            await _notify_scan_failure(room_id, sender_id, msg_log_id, "图片下载失败", instance_id)
+            # 不标记 ai_recognized，留给补扫重试
             return
 
         # 2. 二维码识别（非AI）
         qr_texts = decode_qr_from_bytes(image_bytes)
         if not qr_texts:
-            logger.info("[发货扫码] 未识别到二维码，跳过 log_id=%d", msg_log_id)
+            logger.info("[发货扫码] 未识别到二维码 log_id=%d", msg_log_id)
+            await _notify_scan_failure(room_id, sender_id, msg_log_id, "二维码识别失败，请拍清晰", instance_id)
+            # 不标记 ai_recognized，留给补扫重试
             return
 
         qr_text = qr_texts[0]  # 取第一个二维码
@@ -613,6 +895,7 @@ async def handle_shipping_scan(
 
         if not order_no or not paper_id:
             logger.warning("[发货扫码] 二维码内容格式异常: %s", qr_text)
+            _mark_msg_recognized(msg_log_id)
             return
 
         logger.info("[发货扫码] 二维码识别成功 order=%s paper=%s", order_no, paper_id)
@@ -622,6 +905,7 @@ async def handle_shipping_scan(
         try:
             if is_paper_used(db, paper_id):
                 logger.info("[发货扫码] 纸张ID已使用，跳过 paper=%s", paper_id)
+                _mark_msg_recognized(msg_log_id)
                 return
 
             # 创建扫码记录
@@ -654,6 +938,7 @@ async def handle_shipping_scan(
             logger.error("[发货扫码] AI解析失败 record=%d: %s", record_id, exc)
             # 通知群推送失败
             await send_notification_to_groups(db, order_no, "", False, {}, f"AI解析失败: {exc}")
+            _mark_msg_recognized(msg_log_id)
             return
         finally:
             db.close()
@@ -665,6 +950,7 @@ async def handle_shipping_scan(
                 await send_notification_to_groups(db, order_no, "", False, {}, "AI未识别到有效发货内容")
             finally:
                 db.close()
+            _mark_msg_recognized(msg_log_id)
             return
 
         logger.info("[发货扫码] AI解析成功 record=%d items=%d", record_id, len(parsed_items))
@@ -679,6 +965,7 @@ async def handle_shipping_scan(
                 await send_notification_to_groups(db, order_no, "", False, {}, f"查询订单 {order_no} 失败: {exc}")
             finally:
                 db.close()
+            _mark_msg_recognized(msg_log_id)
             return
 
         # 6. 创建销售发货单
@@ -692,6 +979,7 @@ async def handle_shipping_scan(
                 await send_notification_to_groups(db, order_no, "", False, {}, f"创建发货单失败: {exc}")
             finally:
                 db.close()
+            _mark_msg_recognized(msg_log_id)
             return
 
         # 7. 计算发货状态
@@ -711,6 +999,9 @@ async def handle_shipping_scan(
         finally:
             db.close()
 
+        # 标记消息已识别
+        _mark_msg_recognized(msg_log_id)
+
         logger.info("[发货扫码] 完成 record=%d shipment=%s full=%s",
                      record_id, shipment_no, shipping_status.get("is_full"))
 
@@ -722,3 +1013,4 @@ async def handle_shipping_scan(
                 update_scan_record(db, record_id, scan_status="failed", error_message=str(exc))
             finally:
                 db.close()
+        _mark_msg_recognized(msg_log_id)

@@ -13,7 +13,7 @@ const MARGIN_R = mm(15);
 const MARGIN_T = mm(12);
 const MARGIN_B = mm(14);
 const CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R;
-const QR_SIZE = mm(22);
+const QR_SIZE = mm(32);
 
 const HEADER_ROW_H = mm(9);
 const DATA_ROW_H = mm(7);
@@ -275,19 +275,9 @@ function buildDocument(payload) {
         },
         {
           width: QR_SIZE,
-          stack: [
-            {
-              image: page.qr_data_url,
-              fit: [QR_SIZE, QR_SIZE],
-              alignment: 'right',
-            },
-            {
-              text: page.page_id || '',
-              alignment: 'center',
-              fontSize: 7,
-              margin: [0, 1, 0, 0],
-            },
-          ],
+          image: page.qr_data_url,
+          fit: [QR_SIZE, QR_SIZE],
+          alignment: 'right',
         },
       ],
       margin: [0, pi > 0 ? 25 : 0, 0, mm(3)],

@@ -53,30 +53,6 @@
         </el-descriptions>
       </div>
 
-      <!-- 配货单打印记录 -->
-      <div class="info-section" v-if="printHistory.length > 0">
-        <h3 class="section-title">配货单打印记录</h3>
-        <el-table :data="printHistory" size="small" stripe class="print-history-table">
-          <el-table-column label="页码ID" width="180">
-            <template #default="{ row }">
-              <span :class="{ 'voided-id': row.status === 'voided' }">{{ row.page_id }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="页码" width="80" align="center">
-            <template #default="{ row }">第 {{ row.page_index + 1 }} 页</template>
-          </el-table-column>
-          <el-table-column label="状态" width="100" align="center">
-            <template #default="{ row }">
-              <el-tag v-if="row.status === 'active'" type="success" size="small">有效</el-tag>
-              <el-tag v-else type="danger" size="small" effect="plain">已废除</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="生成时间" width="180">
-            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
-          </el-table-column>
-        </el-table>
-      </div>
-
       <!-- 明细行 -->
       <div class="items-section">
         <h3 class="section-title">订单明细 <span class="item-count" v-if="items.length">（{{ items.length }} 项）</span></h3>
@@ -119,14 +95,36 @@
         <el-empty v-else-if="!loading" description="无明细数据" :image-size="64" />
       </div>
     </div>
+    <!-- 打印历史记录弹窗 -->
+    <el-dialog v-model="historyDialogVisible" title="配货单打印记录" width="600px" destroy-on-close>
+      <el-table :data="printHistory" size="small" stripe>
+        <el-table-column label="页码ID" width="180">
+          <template #default="{ row }">
+            <span :class="{ 'voided-id': row.status === 'voided' }">{{ row.page_id }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="页码" width="80" align="center">
+          <template #default="{ row }">第 {{ row.page_index + 1 }} 页</template>
+        </el-table-column>
+        <el-table-column label="状态" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.status === 'active'" type="success" size="small">有效</el-tag>
+            <el-tag v-else type="danger" size="small" effect="plain">已废除</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="生成时间" width="180">
+          <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, h } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Printer, ArrowDown } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { getOrderDetail, printPicking, getPickingPrintHistory } from '@/api/salesOrders'
 
 const route = useRoute()
@@ -136,6 +134,7 @@ const order = ref({})
 const items = ref([])
 const printing = ref(false)
 const printHistory = ref([])
+const historyDialogVisible = ref(false)
 
 const formatDateTime = (val) => {
   if (!val) return '-'
@@ -192,12 +191,8 @@ async function handlePrintCommand(command) {
   }
 }
 
-async function handlePrintPicking() {
+async function doPrint() {
   const orderNo = order.value.order_no
-  if (!orderNo) {
-    ElMessage.warning('订单信息未加载')
-    return
-  }
   printing.value = true
   try {
     const res = await printPicking(orderNo)
@@ -216,6 +211,42 @@ async function handlePrintPicking() {
   }
 }
 
+async function handlePrintPicking() {
+  const orderNo = order.value.order_no
+  if (!orderNo) {
+    ElMessage.warning('订单信息未加载')
+    return
+  }
+  // 先查打印记录
+  await fetchPrintHistory()
+  if (printHistory.value.length > 0) {
+    // 已打印过，弹窗确认（含查看历史记录按钮）
+    ElMessageBox({
+      title: '提示',
+      message: h('div', null, [
+        h('p', { style: 'margin: 0 0 12px' }, '此单已打印过，是否重新打印？'),
+        h('a', {
+          style: 'color: var(--el-color-primary); cursor: pointer; font-size: 13px',
+          onClick: () => { historyDialogVisible.value = true }
+        }, '查看历史打印记录')
+      ]),
+      confirmButtonText: '重新打印',
+      cancelButtonText: '取消',
+      distinguishCancelAndClose: true,
+      type: 'warning',
+      showCancelButton: true,
+    }).then(() => {
+      doPrint()
+    }).catch(() => {})
+    return
+  }
+  await doPrint()
+}
+
+function showPrintHistory() {
+  historyDialogVisible.value = true
+}
+
 async function fetchPrintHistory() {
   const orderNo = route.params.orderNo
   if (!orderNo) return
@@ -229,7 +260,6 @@ async function fetchPrintHistory() {
 
 onMounted(async () => {
   await fetchDetail()
-  await fetchPrintHistory()
 })
 </script>
 
