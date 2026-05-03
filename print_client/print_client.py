@@ -255,6 +255,14 @@ class PrintClientApp:
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_minimize_to_tray)
 
+        # 设置窗口图标
+        _icon_path = _EXE_DIR / "logo.ico"
+        if _icon_path.exists():
+            try:
+                self.root.iconbitmap(str(_icon_path))
+            except Exception:
+                pass
+
         self._build_ui()
         self._load_config_to_ui()
         self._init_connection_from_saved_config()
@@ -548,6 +556,12 @@ class PrintClientApp:
 
     # ---- 系统托盘 ----
     def _create_tray_image(self) -> Any:
+        _icon_path = _EXE_DIR / "logo.ico"
+        if _icon_path.exists():
+            try:
+                return Image.open(str(_icon_path))
+            except Exception:
+                pass
         img = Image.new("RGB", (64, 64), "white")
         d = ImageDraw.Draw(img)
         d.rectangle([4, 4, 60, 60], fill="#4CAF50" if self.connected else "#F44336")

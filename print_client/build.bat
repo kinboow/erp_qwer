@@ -16,10 +16,12 @@ if errorlevel 1 (
 echo [2/3] 开始打包 ...
 pyinstaller --noconfirm --onefile --windowed ^
     --name "ERP打印客户端" ^
-    --icon NUL ^
-    --add-data "README.md;." ^
+    --icon "logo.ico" ^
+    --add-data "logo.ico;." ^
     --hidden-import win32print ^
     --hidden-import win32api ^
+    --hidden-import pystray ^
+    --hidden-import PIL ^
     print_client.py
 
 echo.
