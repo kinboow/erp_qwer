@@ -1,5 +1,6 @@
 """
-打印机管理 API — 配置 + 打印队列（供打印客户端轮询）
+打印机管理 API — 配置 + 打印队列 + 客户端心跳
+客户端接口（/queue/*）无需登录认证，管理接口需要登录。
 """
 from __future__ import annotations
 
@@ -13,12 +14,18 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.dependencies import get_current_user
-from app.utils.response import json_response
 
 router = APIRouter(prefix="/api/printer", tags=["打印机管理"])
 
 
-# ---- 配置 ----
+def json_response(code=200, message="success", data=None):
+    resp = {"code": code, "message": message}
+    if data is not None:
+        resp["data"] = data
+    return resp
+
+
+# ---- 配置（需要登录） ----
 
 @router.get("/config", summary="获取打印机配置")
 def api_get_config(
@@ -32,6 +39,8 @@ def api_get_config(
 class PrinterConfigPayload(BaseModel):
     printer_name: str = ""
     printer_auto_print: str = "false"
+    printer_target_client: str = ""
+    printer_target_printer: str = ""
 
 
 @router.put("/config", summary="保存打印机配置")
@@ -45,16 +54,66 @@ def api_save_config(
     return json_response(data=cfg, message="打印机配置已保存")
 
 
-# ---- 打印队列（供客户端轮询） ----
+# ---- 客户端心跳（无需登录） ----
+
+class HeartbeatPayload(BaseModel):
+    hostname: str = ""
+    printer_name: str = ""
+    printers: list[str] = []
+
+
+@router.post("/queue/heartbeat", summary="客户端上报心跳")
+def api_heartbeat(payload: HeartbeatPayload) -> dict[str, Any]:
+    from app.services.printer_service import update_client_heartbeat
+    update_client_heartbeat(payload.hostname, payload.printer_name, payload.printers)
+    return json_response(message="ok")
+
+
+@router.get("/client-status", summary="查询打印客户端在线状态（需登录）")
+def api_client_status(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.printer_service import get_client_status
+    return json_response(data=get_client_status())
+
+
+@router.get("/clients", summary="查询所有打印客户端状态（需登录）")
+def api_clients(
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.printer_service import list_client_statuses
+    return json_response(data=list_client_statuses())
+
+
+class TestPrintPayload(BaseModel):
+    target_client: str = ""
+    target_printer: str = ""
+
+
+@router.post("/test-print", summary="发送测试打印任务（需登录）")
+def api_test_print(
+    payload: TestPrintPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.printer_service import enqueue_test_print_job
+    result = enqueue_test_print_job(db, payload.target_client, payload.target_printer)
+    return json_response(data=result, message="测试打印任务已发送")
+
+
+# ---- 打印队列 — 客户端接口（无需登录） ----
 
 @router.get("/queue/poll", summary="客户端轮询待打印任务")
 def api_poll_queue(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    hostname: str = Query(default="", description="客户端主机名，用于心跳"),
+    printer_name: str = Query(default="", description="客户端打印机名"),
     limit: int = Query(default=10, le=50),
 ) -> dict[str, Any]:
-    from app.services.printer_service import poll_print_jobs
-    jobs = poll_print_jobs(db, limit)
+    from app.services.printer_service import poll_print_jobs, update_client_heartbeat
+    if hostname:
+        update_client_heartbeat(hostname, printer_name)
+    jobs = poll_print_jobs(db, hostname=hostname, limit=limit)
     return json_response(data=jobs)
 
 
@@ -68,7 +127,6 @@ class AckPayload(BaseModel):
 def api_ack_job(
     payload: AckPayload,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     from app.services.printer_service import ack_print_job
     ack_print_job(db, payload.job_id, payload.success, payload.error)
@@ -79,7 +137,6 @@ def api_ack_job(
 def api_download_pdf(
     object_path: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
 ):
     import io
     from app.utils.oss_client import oss_client
@@ -94,7 +151,7 @@ def api_download_pdf(
         return json_response(code=404, message=f"文件不存在: {exc}")
 
 
-# ---- 手动入队 ----
+# ---- 手动入队（需要登录） ----
 
 class EnqueuePayload(BaseModel):
     order_no: str

@@ -10,9 +10,11 @@ ERP 配货单自动打印客户端
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -27,6 +29,34 @@ from typing import Any
 
 import requests
 
+try:
+    from pystray import Icon as TrayIcon, MenuItem as TrayMenuItem, Menu as TrayMenu
+    from PIL import Image, ImageDraw
+    _HAS_TRAY = True
+except ImportError:
+    _HAS_TRAY = False
+
+# ---------------------------------------------------------------------------
+# 单实例互斥锁
+# ---------------------------------------------------------------------------
+_MUTEX_NAME = "Global\\ERP_PrintClient_SingleInstance"
+_mutex_handle = None
+
+
+def _acquire_single_instance() -> bool:
+    """Windows 平台通过 Named Mutex 保证只运行一个实例"""
+    global _mutex_handle
+    try:
+        kernel32 = ctypes.windll.kernel32
+        _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+        last_err = kernel32.GetLastError()
+        if last_err == 183:  # ERROR_ALREADY_EXISTS
+            return False
+        return True
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # 日志
 # ---------------------------------------------------------------------------
@@ -35,17 +65,20 @@ logging.basicConfig(level=logging.INFO, format=LOG_FMT)
 logger = logging.getLogger("PrintClient")
 
 # ---------------------------------------------------------------------------
-# 配置文件路径（与 exe 同目录或用户目录）
+# 常量
 # ---------------------------------------------------------------------------
-_SCRIPT_DIR = Path(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))))
-CONFIG_PATH = _SCRIPT_DIR / "print_client_config.json"
+DEFAULT_PORT = 8900
+
+# ---------------------------------------------------------------------------
+# 配置文件路径（与 exe 同目录）
+# ---------------------------------------------------------------------------
+_EXE_DIR = Path(os.path.dirname(os.path.abspath(sys.argv[0] if getattr(sys, "frozen", False) else __file__)))
+CONFIG_PATH = _EXE_DIR / "print_client_config.json"
 
 DEFAULT_CONFIG = {
-    "server_url": "",
-    "username": "",
-    "password": "",
+    "server_ip": "",
     "printer_name": "",
-    "poll_interval": 5,
+    "poll_interval": 3,
 }
 
 
@@ -79,7 +112,6 @@ def list_printers() -> list[str]:
         printers = []
         for p in win32print.EnumPrinters(2, None, 2):
             printers.append(p["pPrinterName"])
-        # 将默认打印机放到首位
         if default and default in printers:
             printers.remove(default)
             printers.insert(0, default)
@@ -87,14 +119,6 @@ def list_printers() -> list[str]:
     except ImportError:
         logger.error("win32print 不可用，请安装 pywin32: pip install pywin32")
         return []
-
-
-def get_default_printer() -> str:
-    try:
-        import win32print
-        return win32print.GetDefaultPrinter()
-    except Exception:
-        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +145,6 @@ def print_pdf(pdf_bytes: bytes, printer_name: str) -> None:
         tmp_path = tmp.name
         tmp.close()
 
-        # 方式1: SumatraPDF 静默打印
         sumatra = _find_sumatra()
         if sumatra:
             cmd = [sumatra, "-print-to", printer_name, "-silent", tmp_path]
@@ -132,7 +155,6 @@ def print_pdf(pdf_bytes: bytes, printer_name: str) -> None:
                 return
             logger.warning("SumatraPDF 失败 (code=%d)", proc.returncode)
 
-        # 方式2: ShellExecute
         try:
             import win32api
             win32api.ShellExecute(0, "printto", tmp_path, f'"{printer_name}"', ".", 0)
@@ -154,32 +176,38 @@ def _safe_remove(path: str):
 
 
 # ---------------------------------------------------------------------------
-# API 客户端
+# API 客户端（无需登录）
 # ---------------------------------------------------------------------------
 class ERPPrintAPI:
     def __init__(self, server_url: str):
         self.base = server_url.rstrip("/")
-        self.token: str = ""
         self.session = requests.Session()
+        self.hostname = platform.node() or "unknown"
 
-    def login(self, username: str, password: str) -> bool:
-        url = f"{self.base}/api/auth/login"
+    def test_connection(self) -> bool:
         try:
-            r = self.session.post(url, json={"username": username, "password": password}, timeout=10)
+            r = self.session.get(f"{self.base}/api/printer/queue/poll?limit=1&hostname={self.hostname}", timeout=5)
             r.raise_for_status()
-            data = r.json()
-            self.token = data.get("data", {}).get("access_token") or data.get("access_token", "")
-            if self.token:
-                self.session.headers["Authorization"] = f"Bearer {self.token}"
-                return True
-            return False
+            return r.json().get("code") == 200
         except Exception as e:
-            logger.error("登录失败: %s", e)
+            logger.error("连接测试失败: %s", e)
             return False
 
-    def poll_jobs(self) -> list[dict]:
+    def heartbeat(self, printer_name: str = "", printers: list[str] | None = None) -> bool:
         try:
-            r = self.session.get(f"{self.base}/api/printer/queue/poll?limit=10", timeout=10)
+            self.session.post(
+                f"{self.base}/api/printer/queue/heartbeat",
+                json={"hostname": self.hostname, "printer_name": printer_name, "printers": printers or []},
+                timeout=5,
+            )
+            return True
+        except Exception:
+            return False
+
+    def poll_jobs(self, printer_name: str = "") -> list[dict]:
+        try:
+            params = f"limit=10&hostname={self.hostname}&printer_name={requests.utils.quote(printer_name)}"
+            r = self.session.get(f"{self.base}/api/printer/queue/poll?{params}", timeout=10)
             r.raise_for_status()
             return r.json().get("data", [])
         except Exception as e:
@@ -214,16 +242,27 @@ class PrintClientApp:
         self.cfg = load_config()
         self.api: ERPPrintAPI | None = None
         self.running = False
+        self.app_running = True
+        self.connected = False
         self.poll_thread: threading.Thread | None = None
-        self.logged_in = False
+        self.heartbeat_thread: threading.Thread | None = None
+
+        self.tray_icon: Any = None
 
         self.root = tk.Tk()
         self.root.title("ERP 配货单打印客户端")
-        self.root.geometry("620x580")
+        self.root.geometry("580x420")
         self.root.resizable(False, False)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_minimize_to_tray)
 
         self._build_ui()
         self._load_config_to_ui()
+        self._init_connection_from_saved_config()
+
+        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+        self.heartbeat_thread.start()
+
+        self._auto_start_if_configured()
 
     # ---- UI 构建 ----
     def _build_ui(self):
@@ -233,27 +272,20 @@ class PrintClientApp:
         frame_srv = ttk.LabelFrame(root, text=" 服务器连接 ", padding=10)
         frame_srv.pack(fill="x", padx=12, pady=(10, 6))
 
-        ttk.Label(frame_srv, text="服务器地址:").grid(row=0, column=0, sticky="w", pady=3)
-        self.entry_url = ttk.Entry(frame_srv, width=45)
-        self.entry_url.grid(row=0, column=1, columnspan=2, sticky="we", pady=3, padx=(6, 0))
-
-        ttk.Label(frame_srv, text="用户名:").grid(row=1, column=0, sticky="w", pady=3)
-        self.entry_user = ttk.Entry(frame_srv, width=20)
-        self.entry_user.grid(row=1, column=1, sticky="we", pady=3, padx=(6, 0))
-
-        ttk.Label(frame_srv, text="密码:").grid(row=2, column=0, sticky="w", pady=3)
-        self.entry_pass = ttk.Entry(frame_srv, width=20, show="*")
-        self.entry_pass.grid(row=2, column=1, sticky="we", pady=3, padx=(6, 0))
+        ttk.Label(frame_srv, text="服务器 IP:").grid(row=0, column=0, sticky="w", pady=3)
+        self.entry_ip = ttk.Entry(frame_srv, width=30)
+        self.entry_ip.grid(row=0, column=1, sticky="we", pady=3, padx=(6, 0))
+        ttk.Label(frame_srv, text=f"  端口: {DEFAULT_PORT} (固定)").grid(row=0, column=2, sticky="w", pady=3, padx=(6, 0))
 
         btn_frame = ttk.Frame(frame_srv)
-        btn_frame.grid(row=3, column=0, columnspan=3, pady=(6, 0))
-        self.btn_login = ttk.Button(btn_frame, text="测试连接并登录", command=self._on_login)
-        self.btn_login.pack(side="left", padx=4)
+        btn_frame.grid(row=1, column=0, columnspan=3, pady=(6, 0))
+        self.btn_connect = ttk.Button(btn_frame, text="测试连接", command=self._on_connect)
+        self.btn_connect.pack(side="left", padx=4)
         self.btn_save = ttk.Button(btn_frame, text="保存配置", command=self._on_save)
         self.btn_save.pack(side="left", padx=4)
 
-        self.lbl_login_status = ttk.Label(frame_srv, text="未连接", foreground="gray")
-        self.lbl_login_status.grid(row=3, column=2, sticky="e", pady=(6, 0))
+        self.lbl_conn_status = ttk.Label(frame_srv, text="未连接", foreground="gray")
+        self.lbl_conn_status.grid(row=1, column=2, sticky="e", pady=(6, 0))
 
         frame_srv.columnconfigure(1, weight=1)
 
@@ -272,25 +304,12 @@ class PrintClientApp:
 
         frame_ptr.columnconfigure(1, weight=1)
 
-        # 轮询间隔
-        frame_poll = ttk.LabelFrame(root, text=" 轮询设置 ", padding=10)
-        frame_poll.pack(fill="x", padx=12, pady=6)
-
-        ttk.Label(frame_poll, text="轮询间隔 (秒):").grid(row=0, column=0, sticky="w")
-        self.spin_interval = ttk.Spinbox(frame_poll, from_=2, to=60, width=6)
-        self.spin_interval.grid(row=0, column=1, sticky="w", padx=(6, 0))
-
-        # 启动/停止按钮
+        # 状态栏
         frame_ctrl = ttk.Frame(root)
         frame_ctrl.pack(fill="x", padx=12, pady=6)
 
-        self.btn_start = ttk.Button(frame_ctrl, text="▶ 启动监听", command=self._on_start)
-        self.btn_start.pack(side="left", padx=4)
-        self.btn_stop = ttk.Button(frame_ctrl, text="■ 停止", command=self._on_stop, state="disabled")
-        self.btn_stop.pack(side="left", padx=4)
-
         self.lbl_status = ttk.Label(frame_ctrl, text="就绪", foreground="gray")
-        self.lbl_status.pack(side="right", padx=4)
+        self.lbl_status.pack(side="left", padx=4)
 
         # 日志区域
         frame_log = ttk.LabelFrame(root, text=" 日志 ", padding=6)
@@ -304,29 +323,31 @@ class PrintClientApp:
 
     # ---- 配置读写 ----
     def _load_config_to_ui(self):
-        self.entry_url.insert(0, self.cfg.get("server_url", ""))
-        self.entry_user.insert(0, self.cfg.get("username", ""))
-        self.entry_pass.insert(0, self.cfg.get("password", ""))
-        self.spin_interval.delete(0, "end")
-        self.spin_interval.insert(0, str(self.cfg.get("poll_interval", 5)))
+        self.entry_ip.insert(0, self.cfg.get("server_ip", ""))
         self._refresh_printers()
         saved = self.cfg.get("printer_name", "")
         if saved and saved in self.cmb_printer["values"]:
             self.cmb_printer.set(saved)
 
+    def _get_server_url(self) -> str:
+        ip = self.entry_ip.get().strip()
+        if not ip:
+            return ""
+        return f"http://{ip}:{DEFAULT_PORT}"
+
     def _collect_config(self) -> dict:
         return {
-            "server_url": self.entry_url.get().strip(),
-            "username": self.entry_user.get().strip(),
-            "password": self.entry_pass.get().strip(),
+            "server_ip": self.entry_ip.get().strip(),
             "printer_name": self.cmb_printer.get().strip(),
-            "poll_interval": int(self.spin_interval.get() or 5),
+            "poll_interval": self.cfg.get("poll_interval", 3),
         }
 
     def _on_save(self):
         self.cfg = self._collect_config()
         save_config(self.cfg)
-        self._log("配置已保存到 " + str(CONFIG_PATH))
+        self._log("配置已保存")
+        self._ensure_api()
+        self._start_polling()
 
     # ---- 打印机 ----
     def _refresh_printers(self):
@@ -352,64 +373,116 @@ class PrintClientApp:
             self._log(f"❌ 测试打印失败: {e}")
             messagebox.showerror("失败", str(e))
 
-    # ---- 登录 ----
-    def _on_login(self):
-        cfg = self._collect_config()
-        if not cfg["server_url"]:
-            messagebox.showwarning("提示", "请输入服务器地址")
-            return
-        if not cfg["username"] or not cfg["password"]:
-            messagebox.showwarning("提示", "请输入用户名和密码")
-            return
+    # ---- 连接测试 ----
+    def _on_connect(self):
+        ok = self._connect_server()
+        if not ok:
+            self._log("❌ 连接失败，请检查 IP 地址和服务器是否运行")
 
-        self._log(f"正在连接 {cfg['server_url']} ...")
-        self.api = ERPPrintAPI(cfg["server_url"])
-        ok = self.api.login(cfg["username"], cfg["password"])
+    def _init_connection_from_saved_config(self):
+        self._ensure_api()
+        if self.api:
+            self._connect_server(silent=True)
+
+    def _ensure_api(self):
+        url = self._get_server_url()
+        if not url:
+            self.api = None
+            return
+        if self.api and self.api.base == url.rstrip("/"):
+            return
+        self.api = ERPPrintAPI(url)
+
+    def _set_connected(self, ok: bool, reason: str = ""):
+        if ok == self.connected:
+            return
+        self.connected = ok
+
+        def _update_ui():
+            if ok:
+                self.lbl_conn_status.config(text="已连接 ✓", foreground="green")
+                if reason:
+                    self._log(reason)
+            else:
+                self.lbl_conn_status.config(text="连接失败", foreground="red")
+                if reason:
+                    self._log(reason)
+
+        self.root.after(0, _update_ui)
+
+    def _connect_server(self, silent: bool = False) -> bool:
+        self._ensure_api()
+        if not self.api:
+            if not silent:
+                messagebox.showwarning("提示", "请输入服务器 IP 地址")
+            self._set_connected(False)
+            return False
+
+        if not silent:
+            self._log(f"正在连接 {self.api.base} ...")
+        ok = self.api.test_connection()
         if ok:
-            self.logged_in = True
-            self.lbl_login_status.config(text="已连接 ✓", foreground="green")
-            self._log("✅ 登录成功")
+            self._set_connected(True, "✅ 连接成功")
         else:
-            self.logged_in = False
-            self.lbl_login_status.config(text="连接失败", foreground="red")
-            self._log("❌ 登录失败，请检查地址/账号/密码")
+            self._set_connected(False)
+        return ok
+
+    def _heartbeat_loop(self):
+        while self.app_running:
+            try:
+                self._ensure_api()
+                if self.api:
+                    printer = self.cmb_printer.get().strip()
+                    printers = list(self.cmb_printer["values"]) if self.cmb_printer["values"] else []
+                    ok = self.api.heartbeat(printer_name=printer, printers=printers)
+                    if ok:
+                        self._set_connected(True)
+                    elif self.connected:
+                        self._set_connected(False, "⚠️ 与服务器连接已断开")
+            except Exception:
+                pass
+
+            for _ in range(20):
+                if not self.app_running:
+                    return
+                time.sleep(0.5)
 
     # ---- 轮询控制 ----
-    def _on_start(self):
-        if not self.logged_in:
-            self._on_login()
-            if not self.logged_in:
-                return
+    def _auto_start_if_configured(self):
+        if self.cfg.get("server_ip") and self.cfg.get("printer_name"):
+            self._start_polling()
+
+    def _start_polling(self):
+        if self.running:
+            return
+
+        if not self._connect_server(silent=True):
+            self._log("⚠️ 无法连接服务器，等待心跳自动重连后启动监听")
 
         printer = self.cmb_printer.get()
         if not printer:
-            messagebox.showwarning("提示", "请先选择打印机")
+            self._log("⚠️ 未选择打印机，无法启动监听")
             return
 
-        # 保存当前配置
-        self.cfg = self._collect_config()
-        save_config(self.cfg)
-
         self.running = True
-        self.btn_start.config(state="disabled")
-        self.btn_stop.config(state="normal")
-        self.lbl_status.config(text="监听中...", foreground="green")
-        self._log(f"▶ 开始监听，打印机: {printer}，间隔: {self.cfg['poll_interval']}s")
+
+        def _update_status():
+            self.lbl_status.config(text="监听中...", foreground="green")
+
+        self.root.after(0, _update_status)
+        self._log(f"▶ 开始监听，打印机: {printer}，间隔: {self.cfg.get('poll_interval', 3)}s")
 
         self.poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self.poll_thread.start()
 
-    def _on_stop(self):
-        self.running = False
-        self.btn_start.config(state="normal")
-        self.btn_stop.config(state="disabled")
-        self.lbl_status.config(text="已停止", foreground="gray")
-        self._log("■ 已停止监听")
-
     def _poll_loop(self):
-        while self.running:
+        while self.running and self.app_running:
+            if not self.connected or not self.api:
+                time.sleep(3)
+                continue
+            printer = self.cmb_printer.get()
             try:
-                jobs = self.api.poll_jobs()
+                jobs = self.api.poll_jobs(printer_name=printer)
                 if jobs:
                     self._log(f"📋 获取到 {len(jobs)} 个待打印任务")
                 for job in jobs:
@@ -419,29 +492,31 @@ class PrintClientApp:
             except Exception as e:
                 self._log(f"轮询异常: {e}")
 
-            interval = self.cfg.get("poll_interval", 5)
+            interval = self.cfg.get("poll_interval", 3)
             for _ in range(interval * 2):
-                if not self.running:
+                if not self.running or not self.app_running:
                     return
                 time.sleep(0.5)
 
     def _process_job(self, job: dict):
         job_id = job["id"]
         order_no = job["order_no"]
+        doc_type = job.get("doc_type", "picking")
         pdf_obj = job["pdf_object"]
-        printer = self.cmb_printer.get()
+        printer = job.get("target_printer") or self.cmb_printer.get()
         attempts = job.get("attempts", 0)
 
-        self._log(f"🖨️  处理任务 #{job_id}: 订单 {order_no} (第{attempts + 1}次)")
+        self._log(f"🖨️  处理任务 #{job_id}: {doc_type} / {order_no} (第{attempts + 1}次)")
 
-        # 下载 PDF
-        pdf_bytes = self.api.download_pdf(pdf_obj)
-        if not pdf_bytes:
-            self.api.ack_job(job_id, False, "下载 PDF 失败")
-            self._log(f"❌ #{job_id} 下载 PDF 失败")
-            return
+        if doc_type == "test":
+            pdf_bytes = _generate_test_page(printer)
+        else:
+            pdf_bytes = self.api.download_pdf(pdf_obj)
+            if not pdf_bytes:
+                self.api.ack_job(job_id, False, "下载 PDF 失败")
+                self._log(f"❌ #{job_id} 下载 PDF 失败")
+                return
 
-        # 打印（失败重试 2 次）
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
@@ -470,6 +545,57 @@ class PrintClientApp:
             self.txt_log.config(state="disabled")
 
         self.root.after(0, _append)
+
+    # ---- 系统托盘 ----
+    def _create_tray_image(self) -> Any:
+        img = Image.new("RGB", (64, 64), "white")
+        d = ImageDraw.Draw(img)
+        d.rectangle([4, 4, 60, 60], fill="#4CAF50" if self.connected else "#F44336")
+        d.text((14, 18), "P", fill="white")
+        return img
+
+    def _on_tray_show(self, icon=None, item=None):
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self.root.after(0, self._show_window)
+
+    def _show_window(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _on_tray_quit(self, icon=None, item=None):
+        self.running = False
+        self.app_running = False
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self.root.after(0, self.root.destroy)
+
+    def _on_minimize_to_tray(self):
+        if _HAS_TRAY:
+            self.root.withdraw()
+            self._log("已最小化到系统托盘，后台继续运行")
+            if self.tray_icon is None:
+                menu = TrayMenu(
+                    TrayMenuItem("显示窗口", self._on_tray_show, default=True),
+                    TrayMenuItem("退出", self._on_tray_quit),
+                )
+                self.tray_icon = TrayIcon("ERP打印客户端", self._create_tray_image(), "ERP打印客户端", menu)
+                threading.Thread(target=self.tray_icon.run, daemon=True).start()
+        else:
+            if messagebox.askyesno("关闭", "关闭窗口将停止打印服务。\n确定要退出吗？"):
+                self.running = False
+                self.app_running = False
+                self.root.destroy()
+
+    def _on_real_close(self):
+        self.running = False
+        self.app_running = False
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.root.destroy()
 
     def run(self):
         self.root.mainloop()
@@ -516,7 +642,6 @@ def _generate_test_page(printer_name: str) -> bytes:
         c.save()
         return buf.getvalue()
     except ImportError:
-        # reportlab 不可用时生成极简 PDF
         return _minimal_test_pdf(printer_name)
 
 
@@ -524,7 +649,6 @@ def _minimal_test_pdf(printer_name: str) -> bytes:
     """不依赖 reportlab 的极简 PDF"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     content = f"ERP Print Client Test Page\nPrinter: {printer_name}\nTime: {now}\nIf you can read this, printing works."
-    # 极简 PDF 1.4
     objs = []
     objs.append(b"1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj")
     objs.append(b"2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj")
@@ -550,5 +674,15 @@ def _minimal_test_pdf(printer_name: str) -> bytes:
 # 入口
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    if not _acquire_single_instance():
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showwarning("提示", "打印客户端已经在运行中，不能重复打开！")
+            root.destroy()
+        except Exception:
+            pass
+        sys.exit(1)
+
     app = PrintClientApp()
     app.run()

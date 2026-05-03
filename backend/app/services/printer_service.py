@@ -1,9 +1,10 @@
 """
-打印机服务 — 打印任务队列 + 配置管理（打印由独立客户端完成）
+打印机服务 — 打印任务队列 + 配置管理 + 客户端心跳（打印由独立客户端完成）
 """
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from sqlalchemy import text
@@ -12,13 +13,57 @@ from sqlalchemy.orm import Session
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# 客户端心跳（内存级，重启归零）
+# ---------------------------------------------------------------------------
+_CLIENT_TTL_SECONDS = 30
+_client_heartbeats: dict[str, dict[str, Any]] = {}
+
+
+def update_client_heartbeat(hostname: str, printer_name: str = "", printers: list[str] | None = None) -> None:
+    if not hostname:
+        return
+    _client_heartbeats[hostname] = {
+        "hostname": hostname,
+        "printer_name": printer_name or "",
+        "printers": printers or [],
+        "last_seen": time.time(),
+    }
+
+
+def list_client_statuses() -> list[dict[str, Any]]:
+    now = time.time()
+    rows: list[dict[str, Any]] = []
+    for host, item in _client_heartbeats.items():
+        last_seen = float(item.get("last_seen") or 0)
+        elapsed = now - last_seen if last_seen else 999999
+        rows.append(
+            {
+                "hostname": host,
+                "printer_name": item.get("printer_name", ""),
+                "printers": item.get("printers", []) or [],
+                "last_seen": last_seen if last_seen else None,
+                "seconds_ago": round(elapsed, 1),
+                "online": elapsed < _CLIENT_TTL_SECONDS,
+            }
+        )
+    rows.sort(key=lambda x: (0 if x["online"] else 1, x["hostname"]))
+    return rows
+
+
+def get_client_status() -> dict[str, Any]:
+    rows = list_client_statuses()
+    if not rows:
+        return {"online": False, "hostname": "", "printer_name": "", "last_seen": None, "seconds_ago": None}
+    return rows[0]
+
+# ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
 _DDL_PRINTER_CONFIG = """
 CREATE TABLE IF NOT EXISTS printer_config (
     id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     config_key  VARCHAR(100) NOT NULL,
-    config_value TEXT NOT NULL DEFAULT '',
+    config_value TEXT NOT NULL,
     updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uk_key (config_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -30,6 +75,8 @@ CREATE TABLE IF NOT EXISTS print_queue (
     order_no    VARCHAR(100) NOT NULL,
     doc_type    VARCHAR(50)  NOT NULL DEFAULT 'picking' COMMENT 'picking=配货单',
     pdf_object  VARCHAR(500) NOT NULL DEFAULT '' COMMENT 'OSS object name',
+    target_client VARCHAR(255) NOT NULL DEFAULT '' COMMENT '目标客户端主机名，空=任意客户端',
+    target_printer VARCHAR(255) NOT NULL DEFAULT '' COMMENT '目标打印机，空=客户端当前选择',
     status      VARCHAR(20)  NOT NULL DEFAULT 'pending' COMMENT 'pending/printing/done/failed',
     attempts    INT UNSIGNED NOT NULL DEFAULT 0,
     error_msg   VARCHAR(500) NOT NULL DEFAULT '',
@@ -44,6 +91,14 @@ CREATE TABLE IF NOT EXISTS print_queue (
 def ensure_printer_tables(db: Session) -> None:
     db.execute(text(_DDL_PRINTER_CONFIG))
     db.execute(text(_DDL_PRINT_QUEUE))
+    try:
+        cols = {r["Field"] for r in db.execute(text("SHOW COLUMNS FROM print_queue")).mappings().all()}
+        if "target_client" not in cols:
+            db.execute(text("ALTER TABLE print_queue ADD COLUMN target_client VARCHAR(255) NOT NULL DEFAULT ''"))
+        if "target_printer" not in cols:
+            db.execute(text("ALTER TABLE print_queue ADD COLUMN target_printer VARCHAR(255) NOT NULL DEFAULT ''"))
+    except Exception:
+        logger.warning("print_queue 表结构兼容升级失败，跳过", exc_info=True)
     db.commit()
 
 
@@ -86,29 +141,49 @@ def enqueue_print_job(db: Session, order_no: str, doc_type: str = "picking") -> 
     else:
         raise ValueError(f"不支持的文档类型: {doc_type}")
 
+    cfg = get_printer_config(db)
+    target_client = cfg.get("printer_target_client", "")
+    target_printer = cfg.get("printer_target_printer", "")
+
     db.execute(
         text(
-            "INSERT INTO print_queue (order_no, doc_type, pdf_object, status) "
-            "VALUES (:no, :dt, :obj, 'pending')"
+            "INSERT INTO print_queue (order_no, doc_type, pdf_object, target_client, target_printer, status) "
+            "VALUES (:no, :dt, :obj, :tc, :tp, 'pending')"
         ),
-        {"no": order_no, "dt": doc_type, "obj": pdf_object},
+        {"no": order_no, "dt": doc_type, "obj": pdf_object, "tc": target_client, "tp": target_printer},
     )
     db.commit()
     logger.info("打印任务已入队: order=%s doc_type=%s", order_no, doc_type)
     return {"queued": True, "order_no": order_no, "doc_type": doc_type}
 
 
-def poll_print_jobs(db: Session, limit: int = 10) -> list[dict[str, Any]]:
+def enqueue_test_print_job(db: Session, target_client: str, target_printer: str) -> dict[str, Any]:
+    """入队一个测试打印任务"""
+    ensure_printer_tables(db)
+    test_order_no = f"TEST-{int(time.time())}"
+    db.execute(
+        text(
+            "INSERT INTO print_queue (order_no, doc_type, pdf_object, target_client, target_printer, status) "
+            "VALUES (:no, 'test', '', :tc, :tp, 'pending')"
+        ),
+        {"no": test_order_no, "tc": target_client or "", "tp": target_printer or ""},
+    )
+    db.commit()
+    return {"queued": True, "order_no": test_order_no, "doc_type": "test"}
+
+
+def poll_print_jobs(db: Session, hostname: str = "", limit: int = 10) -> list[dict[str, Any]]:
     """获取待打印任务（pending 或 failed 且重试<3次）"""
     ensure_printer_tables(db)
     rows = db.execute(
         text(
-            "SELECT id, order_no, doc_type, pdf_object, status, attempts, error_msg, created_at "
+            "SELECT id, order_no, doc_type, pdf_object, target_client, target_printer, status, attempts, error_msg, created_at "
             "FROM print_queue "
             "WHERE status IN ('pending', 'failed') AND attempts < 3 "
+            "  AND (target_client = '' OR target_client = :host) "
             "ORDER BY created_at ASC LIMIT :lim"
         ),
-        {"lim": limit},
+        {"lim": limit, "host": hostname or ""},
     ).mappings().all()
     return [dict(r) for r in rows]
 

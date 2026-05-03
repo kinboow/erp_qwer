@@ -11,3 +11,15 @@ export const savePrinterConfig = (data) => {
 export const enqueuePrint = (orderNo, docType = 'picking') => {
   return request({ url: '/api/printer/queue/enqueue', method: 'post', data: { order_no: orderNo, doc_type: docType } })
 }
+
+export const getPrinterClients = () => {
+  return request({ url: '/api/printer/clients', method: 'get' })
+}
+
+export const sendTestPrint = (targetClient, targetPrinter) => {
+  return request({
+    url: '/api/printer/test-print',
+    method: 'post',
+    data: { target_client: targetClient || '', target_printer: targetPrinter || '' },
+  })
+}

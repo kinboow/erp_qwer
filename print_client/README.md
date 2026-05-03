@@ -1,61 +1,53 @@
-# ERP 配货单自动打印客户端
+# ERP 配货单打印客户端
 
-独立运行在连接打印机的 Windows 电脑上，自动从 ERP 服务器获取待打印的配货单并发送到本地打印机。
+独立运行在连接打印机的 Windows 电脑上，轮询服务器获取待打印任务并自动打印。
 
-## 安装依赖
+## 快速开始
+
+1. 运行 `ERP打印客户端.exe`（每台电脑只能开一个）
+2. 输入服务器 IP 地址（端口固定 8900，无需登录）
+3. 点击「测试连接」
+4. 选择本地打印机
+5. 点击「启动监听」
+
+客户端会自动轮询服务器获取待打印任务，下载 PDF 后发送到所选打印机。
+
+## 特性
+
+- **无需登录** — 只需输入服务器 IP 即可连接
+- **单实例** — 每台电脑只允许运行一个客户端
+- **心跳上报** — 前端可实时查看客户端在线/离线状态
+- **自动重试** — 打印失败自动重试最多 3 次
+
+## 依赖（仅源码运行时需要）
 
 ```bash
 pip install requests pywin32
 ```
 
-可选（推荐）：安装 [SumatraPDF](https://www.sumatrapdfreader.org/download-free-pdf-viewer) 以获得最佳静默打印效果。
-
-如需打印测试页功能，额外安装：
-
-```bash
-pip install reportlab
-```
-
-## 使用方法
-
-```bash
-python print_client.py
-```
-
-1. 填写 ERP 服务器地址（如 `http://192.168.1.100:8000`）
-2. 填写登录账号和密码
-3. 点击「测试连接并登录」确认连接正常
-4. 选择本地打印机，可点击「打印测试页」验证
-5. 点击「保存配置」，配置会保存到本地 `print_client_config.json`
-6. 点击「▶ 启动监听」开始自动打印
-
-## 工作原理
-
-```
-ERP 系统 (审核下单/替换旧单)
-    ↓ 生成 PDF → 加入 print_queue 表
-打印客户端 (本程序)
-    ↓ 轮询 GET /api/printer/queue/poll
-    ↓ 下载 GET /api/printer/queue/download/{path}
-    ↓ 本地打印 (SumatraPDF / ShellExecute)
-    ↓ 回报 POST /api/printer/queue/ack
-```
+推荐安装 [SumatraPDF](https://www.sumatrapdfreader.org/download-free-pdf-viewer) 以获得最佳静默打印效果。
 
 ## 配置文件
 
-`print_client_config.json` 示例：
+配置保存在 `print_client_config.json`（与 EXE 同目录），下次启动自动加载。
 
 ```json
 {
-  "server_url": "http://192.168.1.100:8000",
-  "username": "admin",
-  "password": "your_password",
+  "server_ip": "192.168.1.100",
   "printer_name": "HP LaserJet Pro",
   "poll_interval": 5
 }
 ```
 
-- `server_url` — ERP 服务器地址
-- `username` / `password` — ERP 系统登录凭证
+- `server_ip` — 服务器 IP 地址（端口固定 8900）
 - `printer_name` — 本地打印机名称
 - `poll_interval` — 轮询间隔（秒），默认 5 秒
+
+## 打包为 EXE
+
+```bash
+pip install pyinstaller
+pyinstaller --onefile --windowed --name "ERP打印客户端" --hidden-import win32print --hidden-import win32api print_client.py
+```
+
+输出文件在 `dist/ERP打印客户端.exe`。

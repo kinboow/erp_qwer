@@ -27,7 +27,7 @@
         </el-tab-pane>
         <el-tab-pane name="printer">
           <template #label>
-            <span class="tab-label"><el-icon><Printer /></el-icon>打印机测试</span>
+            <span class="tab-label"><el-icon><Printer /></el-icon>远程打印机</span>
           </template>
           <PrinterConfig v-if="activeTab === 'printer'" />
         </el-tab-pane>
