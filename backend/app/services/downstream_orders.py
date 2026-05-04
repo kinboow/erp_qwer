@@ -675,12 +675,18 @@ def query_product_context_for_nos(db: Session, product_nos: list[str]) -> str:
     return "\n".join(lines)
 
 
-def query_current_year_catalog(db: Session) -> list[dict[str, str]]:
-    """查询所有本年产品库的产品号及其名称映射，供 AI 第一步款号匹配使用。
+def query_current_year_catalog(db: Session) -> list[dict[str, Any]]:
+    """查询所有本年产品库的产品号及其名称映射、可选颜色和尺码，供 AI 款号匹配和上下文解析使用。
 
     返回:
         [
-            {"product_no": "1234", "product_name": "...", "aliases": ["别名1", "别名2"]},
+            {
+                "product_no": "1234",
+                "product_name": "...",
+                "aliases": ["别名1", "别名2"],
+                "color": "黑色,白色",
+                "spec": "M,L,XL",
+            },
             ...
         ]
     """
@@ -688,7 +694,7 @@ def query_current_year_catalog(db: Session) -> list[dict[str, str]]:
     ensure_tables(db)
 
     rows = db.execute(
-        text("SELECT product_no, product_name FROM erp_products WHERE is_current_year = 1 ORDER BY product_no"),
+        text("SELECT product_no, product_name, color, spec FROM erp_products WHERE is_current_year = 1 ORDER BY product_no"),
     ).mappings().all()
 
     catalog: list[dict[str, Any]] = []
@@ -698,7 +704,13 @@ def query_current_year_catalog(db: Session) -> list[dict[str, str]]:
         if not pno or pno in pno_set:
             continue
         pno_set.add(pno)
-        catalog.append({"product_no": pno, "product_name": (r["product_name"] or "").strip(), "aliases": []})
+        catalog.append({
+            "product_no": pno,
+            "product_name": (r["product_name"] or "").strip(),
+            "aliases": [],
+            "color": (r["color"] or "").strip(),
+            "spec": (r["spec"] or "").strip(),
+        })
 
     # 加载映射关系
     try:
@@ -717,6 +729,59 @@ def query_current_year_catalog(db: Session) -> list[dict[str, str]]:
         pass
 
     return catalog
+
+
+def build_context_from_catalog(
+    catalog: list[dict[str, Any]],
+    product_nos: list[str],
+) -> dict[str, Any]:
+    """从已加载的 catalog 中提取指定款号的可选颜色/尺码/映射，无需再查 DB。
+
+    返回格式与 query_product_context_structured 一致。
+    """
+    # 构建 catalog 查找表
+    catalog_map: dict[str, dict[str, Any]] = {item["product_no"]: item for item in catalog}
+
+    # 收集所有映射关系
+    mappings: dict[str, str] = {}
+    for item in catalog:
+        for alias in item.get("aliases") or []:
+            mappings[alias] = item["product_no"]
+
+    products: dict[str, dict[str, list[str]]] = {}
+    all_sizes: list[str] = []
+    all_colors: list[str] = []
+    seen_sizes: set[str] = set()
+    seen_colors: set[str] = set()
+
+    for pno in product_nos:
+        # 先解析别名
+        resolved_pno = mappings.get(pno, pno)
+        item = catalog_map.get(resolved_pno)
+        if not item:
+            continue
+
+        pno_colors: list[str] = []
+        for c in (item.get("color") or "").split(","):
+            c = c.strip()
+            if c:
+                pno_colors.append(c)
+                if c not in seen_colors:
+                    seen_colors.add(c)
+                    all_colors.append(c)
+
+        pno_sizes: list[str] = []
+        for s in (item.get("spec") or "").split(","):
+            s = s.strip()
+            if s:
+                pno_sizes.append(s)
+                if s not in seen_sizes:
+                    seen_sizes.add(s)
+                    all_sizes.append(s)
+
+        products[pno] = {"sizes": pno_sizes, "colors": pno_colors}
+
+    return {"products": products, "sizes": all_sizes, "colors": all_colors, "mappings": mappings}
 
 
 def query_product_context_structured(db: Session, product_nos: list[str]) -> dict[str, Any]:
@@ -829,18 +894,27 @@ def ensure_review_state(db: Session):
 def resolve_customer_by_room(db: Session, room_id: str, instance_id: Optional[str] = None) -> Optional[dict[str, Any]]:
     if not room_id:
         return None
-    params = {"room_id": room_id}
+    # 兼容 room_id 有/无 'R:' 前缀（回调消息带前缀，前端保存不带前缀）
+    rid_clean = room_id[2:] if room_id.startswith("R:") else room_id
+    params: dict[str, Any] = {"rid1": rid_clean, "rid2": f"R:{rid_clean}"}
     sql = (
         "SELECT c.id, c.customer_name, c.contact_person, c.phone, c.address, c.erp_customer_id, r.instance_id, r.room_id, r.room_name "
         "FROM downstream_customer_wechat_rooms r "
         "INNER JOIN downstream_customers c ON c.id = r.customer_id "
-        "WHERE r.room_id = :room_id AND c.deleted_at IS NULL AND c.status = 1"
+        "WHERE r.room_id IN (:rid1, :rid2) AND c.deleted_at IS NULL AND c.status = 1"
     )
     if instance_id:
-        sql += " AND (r.instance_id = :instance_id OR r.instance_id IS NULL)"
-        params["instance_id"] = int(instance_id)
+        try:
+            params["instance_id"] = int(instance_id)
+            sql += " AND (r.instance_id = :instance_id OR r.instance_id IS NULL)"
+        except (ValueError, TypeError):
+            pass
     sql += " ORDER BY c.id ASC LIMIT 1"
-    return db.execute(text(sql), params).mappings().first()
+    result = db.execute(text(sql), params).mappings().first()
+    if result is None:
+        _log = logging.getLogger(__name__)
+        _log.info("resolve_customer_by_room: 未匹配 room_id=%r(%r) instance_id=%r", room_id, rid_clean, instance_id)
+    return result
 
 
 def _lookup_room_names(db: Session, room_ids: list[str]) -> dict[str, str]:
@@ -1030,8 +1104,20 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
         logger.info("[AI Parse] review=%d 本年产品目录: %d 个产品", review_id, len(catalog))
         extract_result = await ai_order_parser.extract_product_nos(context_messages, db=db, catalog=catalog)
         product_nos = extract_result.get("product_nos") or []
+        no_match = extract_result.get("no_match", not product_nos)
         rotation_angle = extract_result.get("rotation_angle") or 0
-        logger.info("[AI Parse] review=%d 提取到款号: %s rotation=%d°", review_id, product_nos, rotation_angle)
+        logger.info("[AI Parse] review=%d 步骤1: product_nos=%s no_match=%s rotation=%d°", review_id, product_nos, no_match, rotation_angle)
+
+        # === 步骤 1 校验：款号必须在本年产品目录中，否则中止 ===
+        if catalog and not product_nos:
+            err_msg = "客户提到的内容在本年产品目录中没有匹配项" if no_match else "未识别到任何有效款号信息"
+            logger.warning("[AI Parse] review=%d 步骤1未匹配到有效款号，中止解析 no_match=%s", review_id, no_match)
+            db.execute(
+                text("UPDATE downstream_order_reviews SET parse_status = 'failed', ai_error = :err, updated_at = NOW() WHERE id = :id"),
+                {"id": review_id, "err": err_msg},
+            )
+            db.commit()
+            raise AIOrderParserError(err_msg)
 
         # === 步骤 1.5：根据 AI 判断的角度旋转图片 ===
         if rotation_angle and rotation_angle != 0:
@@ -1039,8 +1125,8 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
             context_messages = rotate_images_in_messages(context_messages, rotation_angle)
             logger.info("[AI Parse] review=%d 图片已旋转 %d°", review_id, rotation_angle)
 
-        # === 步骤 2：查询产品表可选颜色/尺码/映射 ===
-        context_data = await run_in_threadpool(query_product_context_structured, db, product_nos) if product_nos else {}
+        # === 步骤 2：从商品列表（catalog）获取可选颜色/尺码/映射 ===
+        context_data = build_context_from_catalog(catalog, product_nos) if product_nos else {}
         logger.info("[AI Parse] review=%d 步骤2: sizes=%s colors=%d mappings=%d",
                      review_id, context_data.get("sizes"), len(context_data.get("colors", [])),
                      len(context_data.get("mappings", {})))
@@ -1057,14 +1143,30 @@ async def parse_review_content(db: Session, review_id: int) -> dict[str, Any]:
 
         normalized = _normalize_order(parsed, customer_hint)
 
-        # 软校验：标记不在本年产品目录中的款号（但不过滤，保留所有数据）
+        # 硬校验：过滤掉不在本年产品目录中的款号
         if catalog:
             valid_pnos = {item["product_no"] for item in catalog}
-            unknown_pnos = {it.get("product_no") for it in (normalized.get("items") or [])
-                           if it.get("product_no") and it["product_no"] not in valid_pnos}
-            if unknown_pnos:
-                logger.warning("[AI Parse] review=%d 以下款号不在本年产品目录中(保留不过滤): %s",
-                               review_id, unknown_pnos)
+            original_items = normalized.get("items") or []
+            filtered_items = [it for it in original_items
+                              if it.get("product_no") and it["product_no"] in valid_pnos]
+            removed_pnos = {it.get("product_no") for it in original_items
+                            if it.get("product_no") and it["product_no"] not in valid_pnos}
+            if removed_pnos:
+                logger.warning("[AI Parse] review=%d 以下款号不在本年产品目录中(已过滤): %s",
+                               review_id, removed_pnos)
+            normalized["items"] = filtered_items
+
+            if not filtered_items:
+                hint = "、".join(sorted(removed_pnos)[:5]) if removed_pnos else ""
+                err_msg = f"解析到的款号 [{hint}] 均不在本年产品目录中，非我司产品" if hint else "未解析到有效的产品款号"
+                logger.warning("[AI Parse] review=%d 步骤3后所有款号均不在目录中，中止", review_id)
+                db.execute(
+                    text("UPDATE downstream_order_reviews SET parse_status = 'failed', ai_error = :err, updated_at = NOW() WHERE id = :id"),
+                    {"id": review_id, "err": err_msg},
+                )
+                db.commit()
+                raise AIOrderParserError(err_msg)
+
         db.execute(
             text("UPDATE downstream_order_reviews SET parse_status = 'success', ai_error = '', parsed_order_json = :parsed_order_json, updated_at = NOW() WHERE id = :id"),
             {"id": review_id, "parsed_order_json": _json_dumps(normalized)},

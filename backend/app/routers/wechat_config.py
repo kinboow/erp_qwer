@@ -3,7 +3,7 @@ import logging
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -14,6 +14,32 @@ from app.models import User
 from app.services.wechat_ws_service import wechat_ws_service
 
 router = APIRouter(tags=["企微全局配置"])
+
+
+def _filter_bound_rooms(db: Session, rooms: list[dict], current_customer_id: int) -> list[dict]:
+    """过滤已被其他客户绑定的群聊，保留当前客户已绑定的和未绑定的"""
+    try:
+        bound_rows = db.execute(text(
+            "SELECT room_id, customer_id FROM downstream_customer_wechat_rooms "
+            "WHERE room_type = 'customer' AND customer_id IS NOT NULL"
+        )).mappings().all()
+        # 构建 room_id → customer_id 映射（同时处理 R: 前缀）
+        bound_map: dict[str, int] = {}
+        for r in bound_rows:
+            rid = r["room_id"] or ""
+            cid = r["customer_id"]
+            clean_rid = rid[2:] if rid.startswith("R:") else rid
+            bound_map[rid] = cid
+            bound_map[clean_rid] = cid
+        # 只保留：未绑定的 + 当前客户已绑定的
+        return [
+            room for room in rooms
+            if bound_map.get(room["room_id"]) is None
+            or bound_map.get(room["room_id"]) == current_customer_id
+        ]
+    except Exception as exc:
+        logging.getLogger(__name__).warning("过滤已绑定群聊失败: %s", exc)
+        return rooms
 
 
 class WechatConfigDto(BaseModel):
@@ -420,6 +446,7 @@ async def get_rooms_all_status(
 async def get_synced_rooms(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
+    exclude_customer_id: Optional[int] = Query(None, description="排除已绑定到其他客户的群聊，传入当前客户ID以保留其已绑定群"),
 ):
     """从数据库 wechat_room_listeners 获取已同步的群聊，不调用外部 API，速度快且可靠"""
     cfg = db.execute(text(
@@ -446,18 +473,27 @@ async def get_synced_rooms(
         all_status = await get_rooms_all_status(db=db, current_user=current_user)
         data = all_status.get("data") or []
         if data:
-            return json_response(data=[
+            fallback_result = [
                 {
                     "room_id": (item.get("room_id") or item.get("conversation_id") or "").replace("R:", "", 1),
                     "room_name": item.get("room_name") or "未命名群聊"
                 }
                 for item in data
                 if item.get("room_id") or item.get("conversation_id")
-            ])
-    return json_response(data=[
+            ]
+            if exclude_customer_id is not None:
+                fallback_result = _filter_bound_rooms(db, fallback_result, exclude_customer_id)
+            return json_response(data=fallback_result)
+    result = [
         {"room_id": r["room_id"], "room_name": r["room_name"] or "未命名群聊"}
         for r in rows if r.get("room_id")
-    ])
+    ]
+
+    # 过滤已被其他客户绑定的群聊（一个群只能绑定一个客户）
+    if exclude_customer_id is not None:
+        result = _filter_bound_rooms(db, result, exclude_customer_id)
+
+    return json_response(data=result)
 
 
 # ---- 设置 / 取消内部群 ----

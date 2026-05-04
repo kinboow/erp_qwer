@@ -84,12 +84,28 @@ def get_customer_rooms(db: Session, customer_id: int):
 
 
 def replace_customer_rooms(db: Session, customer_id: int, rooms: Optional[List[CustomerWechatRoomDto]]):
-    db.execute(text("DELETE FROM downstream_customer_wechat_rooms WHERE customer_id = :customer_id"), {"customer_id": customer_id})
+    db.execute(text("DELETE FROM downstream_customer_wechat_rooms WHERE customer_id = :customer_id AND room_type = 'customer'"), {"customer_id": customer_id})
     if not rooms:
         return
+    # 校验：一个群只能绑定一个客户
     for room in rooms:
         if not room.room_id:
             continue
+        clean_rid = room.room_id[2:] if room.room_id.startswith("R:") else room.room_id
+        conflict = db.execute(text(
+            "SELECT customer_id, room_name FROM downstream_customer_wechat_rooms "
+            "WHERE room_id IN (:rid1, :rid2) AND room_type = 'customer' "
+            "AND customer_id IS NOT NULL AND customer_id != :cid LIMIT 1"
+        ), {"rid1": room.room_id, "rid2": clean_rid, "cid": customer_id}).mappings().first()
+        if conflict:
+            other_name = db.execute(text(
+                "SELECT customer_name FROM downstream_customers WHERE id = :id"
+            ), {"id": conflict["customer_id"]}).scalar() or f"ID={conflict['customer_id']}"
+            room_label = room.room_name or room.room_id
+            raise HTTPException(
+                status_code=400,
+                detail=f"群聊「{room_label}」已被客户「{other_name}」绑定，一个群聊只能绑定一个客户"
+            )
         db.execute(
             text(
                 "INSERT INTO downstream_customer_wechat_rooms "

@@ -834,9 +834,12 @@ const fetchSyncedWechatRooms = async (instanceId) => {
 const fetchWechatRoomsForCustomer = async () => {
   wechatRoomLoaded.value = false
   wechatRoomLoading.value = true
+  const currentCustomerId = bindTarget.id
   try {
     // 优先从数据库读取已同步的群聊（快且可靠，不依赖外部 API）
-    const syncedRes = await getSyncedRooms()
+    // 传入 exclude_customer_id 排除已被其他客户绑定的群聊
+    const syncParams = currentCustomerId ? { exclude_customer_id: currentCustomerId } : {}
+    const syncedRes = await getSyncedRooms(syncParams)
     let rooms = Array.isArray(syncedRes.data) ? syncedRes.data : []
     rooms = rooms.map(r => ({
       room_id: r.room_id || '',
@@ -849,7 +852,7 @@ const fetchWechatRoomsForCustomer = async () => {
       if (bound?.id) {
         try {
           await syncRooms(bound.id)
-          const res2 = await getSyncedRooms()
+          const res2 = await getSyncedRooms(syncParams)
           rooms = (Array.isArray(res2.data) ? res2.data : [])
             .map(r => ({ room_id: r.room_id || '', room_name: r.room_name || '未命名群聊' }))
             .filter(r => r.room_id)
@@ -860,7 +863,10 @@ const fetchWechatRoomsForCustomer = async () => {
     if (rooms.length === 0) {
       try {
         const allStatusRes = await getRoomsAllStatus()
-        rooms = (Array.isArray(allStatusRes.data) ? allStatusRes.data : [])
+        const allRooms = Array.isArray(allStatusRes.data) ? allStatusRes.data : []
+        // 手动过滤：排除已被其他客户绑定的群聊
+        rooms = allRooms
+          .filter(r => !r.is_customer || (r.customer && r.customer.customer_id === currentCustomerId))
           .map(r => ({
             room_id: r.room_id || r.conversation_id || '',
             room_name: r.room_name || '未命名群聊'

@@ -1,18 +1,138 @@
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.services.downstream_orders import create_review_from_callback, resolve_customer_by_room
+from app.database import SessionLocal
+from app.services.downstream_orders import create_review_from_callback, resolve_customer_by_room, _extract_callback_message
 from app.services.media_archive import download_and_archive_background
-from app.services.message_logs import record_message_log
-from app.services.at_order_handler import extract_trigger_info, handle_at_order, handle_media_order, is_at_bot
+from app.services.message_logs import mark_recalled, record_message_log
+from app.services.ai_order_parser import AIOrderParser
+from app.services.at_order_handler import is_at_bot
 from app.services.shipping_scan_handler import handle_shipping_scan, resolve_shipping_room
+from app.services.wechat_reply import send_room_at
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 客户群消息：回复"收到"后走通用审核链 create_review_from_callback
+# ---------------------------------------------------------------------------
+STARTUP_GRACE_SECONDS = 30   # 启动后多少秒内的消息不回复"收到"（避免积压消息被批量回复）
+
+# 模块加载时间（服务启动时）
+_startup_time = time.monotonic()
+
+# message_server_id → asyncio.Task  用于撤回时取消延迟任务（保留用于撤回检测）
+_pending_delayed_tasks: dict[str, asyncio.Task] = {}
+
+
+def _is_after_startup() -> bool:
+    """判断当前是否已过启动宽限期，只有过了宽限期的消息才回复'收到'"""
+    return (time.monotonic() - _startup_time) > STARTUP_GRACE_SECONDS
+
+
+async def _reply_received(room_id: str, sender_id: str, instance_id: str) -> None:
+    """在客户群中回复「收到」（使用独立 DB session）"""
+    db = SessionLocal()
+    try:
+        inst_id = int(instance_id) if instance_id.isdigit() else None
+        await send_room_at(db, room_id, "收到",
+                           at_list=[sender_id], instance_id=inst_id)
+    except Exception as exc:
+        logger.warning("回复收到失败: room=%s err=%s", room_id, exc)
+    finally:
+        db.close()
+
+
+def _build_validate_context(
+    extracted: dict[str, Any],
+    log_result: Optional[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """根据 _extract_callback_message 的结果构建 validate_order 所需的 context_messages。
+
+    返回空列表表示没有可验证的内容。
+    """
+    msg_type = extracted.get("message_type") or "text"
+    content_text = (extracted.get("content_text") or "").strip()
+    attachment_base64 = extracted.get("attachment_base64") or ""
+    attachment_name = extracted.get("attachment_name") or ""
+
+    # 补充 content_text：如果 extracted 没有，从 log_result 取
+    if not content_text and log_result:
+        content_text = str(log_result.get("content_preview") or "").strip()
+
+    msgs: list[dict[str, Any]] = []
+
+    if msg_type == "image":
+        if attachment_base64:
+            mime = extracted.get("attachment_mime") or "image/png"
+            msgs.append({"type": "image", "base64": attachment_base64, "mime": mime})
+        elif content_text:
+            # 图片无 base64 但有说明文字，用文字验证
+            msgs.append({"type": "text", "content": content_text})
+        # 图片既没 base64 也没文字 → 返回空，保守放行（由调用方兜底）
+    elif msg_type == "file":
+        if attachment_base64 and attachment_name.lower().endswith((".xlsx", ".xls")):
+            from app.services.downstream_orders import _extract_excel_summary
+            summary = _extract_excel_summary(attachment_base64)
+            if summary:
+                msgs.append({"type": "file", "file_name": attachment_name, "excel_summary": summary})
+        elif content_text:
+            msgs.append({"type": "text", "content": content_text})
+    else:
+        # 文字类消息
+        if content_text:
+            msgs.append({"type": "text", "content": content_text})
+
+    return msgs
+
+
+def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: str) -> bool:
+    """检测并处理撤回消息（type=11123）。返回 True 表示本消息是撤回事件并已处理。"""
+    message = normalized_payload.get("message") if isinstance(normalized_payload.get("message"), dict) else {}
+    msg_type = message.get("type")
+    # 也兼容顶层 type
+    if msg_type is None:
+        msg_type = normalized_payload.get("type")
+    try:
+        msg_type = int(msg_type)
+    except (TypeError, ValueError):
+        return False
+
+    if msg_type != 11123:
+        return False
+
+    msg_data = message.get("data") if isinstance(message.get("data"), dict) else {}
+    if not msg_data:
+        msg_data = normalized_payload.get("data") if isinstance(normalized_payload.get("data"), dict) else {}
+
+    recalled_server_id = str(msg_data.get("message_server_id") or "").strip()
+    recall_room_id = str(msg_data.get("room_id") or msg_data.get("room_wxid") or "").strip()
+
+    if not recalled_server_id:
+        logger.info("撤回消息: 无 message_server_id，跳过")
+        return True
+
+    logger.info("撤回消息: 检测到 server_id=%s room=%s", recalled_server_id, recall_room_id)
+
+    # 标记数据库中的原始消息为已撤回
+    recalled_msg_id = mark_recalled(db, recalled_server_id, recall_room_id)
+    if recalled_msg_id:
+        logger.info("撤回消息: 已标记 msg_log_id=%d server_id=%s", recalled_msg_id, recalled_server_id)
+    else:
+        logger.info("撤回消息: 未找到对应原始消息 server_id=%s", recalled_server_id)
+
+    # 取消延迟任务
+    pending_task = _pending_delayed_tasks.pop(recalled_server_id, None)
+    if pending_task and not pending_task.done():
+        pending_task.cancel()
+        logger.info("撤回消息: 已取消延迟任务 server_id=%s", recalled_server_id)
+
+    return True
 
 
 def _safe_text(value: Any) -> str:
@@ -113,6 +233,20 @@ async def ingest_runtime_message(
         except Exception:
             pass
 
+    # ===== 撤回消息检测：type=11123 → 标记原消息已撤回 + 取消延迟任务 =====
+    if _handle_recall(db, normalized_payload, resolved_instance_id):
+        return {
+            "instanceId": resolved_instance_id,
+            "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
+            "received": True,
+            "log": log_result,
+            "review": None,
+            "at_order_triggered": False,
+            "media_order_triggered": False,
+            "shipping_scan_triggered": False,
+            "recall_handled": True,
+        }
+
     # 图片/文件消息自动归档到 OSS
     if log_result:
         _log_msg_type = str(log_result.get("message_type") or "").lower()
@@ -154,38 +288,55 @@ async def ingest_runtime_message(
     except Exception:
         pass
 
-    # ===== 发货群图片扫码检测（优先检测，避免被后续慢速 AI 解析阻塞/取消） =====
+    room_id = str((log_result or {}).get("room_id") or "").strip()
+    log_msg_type = str((log_result or {}).get("message_type") or "").lower()
+    log_sender_id = str((log_result or {}).get("sender_id") or _sender_id or "").strip()
+
+    logger.info("消息分流诊断: room_id=%r msg_type=%r sender=%r instance=%r employee=%r log_ok=%s",
+                room_id, log_msg_type, log_sender_id, resolved_instance_id,
+                sender_is_employee, log_result is not None)
+
+    shipping_room = None
+    customer = None
+    if room_id:
+        try:
+            shipping_room = resolve_shipping_room(db, room_id)
+        except Exception as _e:
+            logger.warning("resolve_shipping_room 异常: room=%s err=%s", room_id, _e)
+            shipping_room = None
+        try:
+            customer = resolve_customer_by_room(db, room_id, resolved_instance_id)
+        except Exception as _e:
+            logger.warning("resolve_customer_by_room 异常: room=%s instance=%s err=%s", room_id, resolved_instance_id, _e)
+            customer = None
+        logger.info("消息分流结果: room=%s → shipping_room=%s customer=%s",
+                    room_id, shipping_room is not None, customer.get("customer_name") if customer else None)
+    else:
+        logger.warning("消息分流: room_id 为空，无法分流。log_result=%s", log_result)
+
+    # ===== 发货群专线：只走发货扫码/发货AI，不进入客户群审核链 =====
     # 不受 sender_is_employee 限制，员工也可能转发发货单图片
     shipping_scan_triggered = False
     try:
-        _log_msg_type_early = str((log_result or {}).get("message_type") or "").lower()
-        _log_room_id_early = str((log_result or {}).get("room_id") or "").strip()
-        if _log_msg_type_early in ("image", "img", "picture") and _log_room_id_early:
-            from app.database import SessionLocal as _SL
-            _scan_db = _SL()
-            try:
-                shipping_room = resolve_shipping_room(_scan_db, _log_room_id_early)
-            finally:
-                _scan_db.close()
-            logger.info("发货扫码检测: resolve_shipping_room(%s) → %s", _log_room_id_early, shipping_room)
-            if shipping_room:
-                _log_sender_id_early = str((log_result or {}).get("sender_id") or _sender_id or "").strip()
-                _log_id_early = (log_result or {}).get("id") or 0
+        if shipping_room and log_msg_type in ("image", "img", "picture") and room_id:
+            logger.info("发货扫码检测: resolve_shipping_room(%s) → %s", room_id, shipping_room)
+            _log_id_early = (log_result or {}).get("id") or 0
+            if _log_id_early:
                 asyncio.create_task(handle_shipping_scan(
-                    room_id=_log_room_id_early,
-                    sender_id=_log_sender_id_early,
+                    room_id=room_id,
+                    sender_id=log_sender_id,
                     msg_log_id=_log_id_early,
                     instance_id=resolved_instance_id,
                     payload=normalized_payload,
                 ))
                 shipping_scan_triggered = True
                 logger.info("发货扫码: 已触发 room=%s sender=%s log_id=%d",
-                            _log_room_id_early, _log_sender_id_early, _log_id_early)
+                            room_id, log_sender_id, _log_id_early)
     except Exception as exc:
         logger.warning("发货扫码检测异常: %s", exc, exc_info=True)
 
-    # 发货群图片已触发扫码，无需走审核/接单流程，立即返回
-    if shipping_scan_triggered:
+    # 发货群全部消息都不进入客户群审核/接单流程
+    if shipping_room:
         return {
             "instanceId": resolved_instance_id,
             "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
@@ -194,114 +345,113 @@ async def ingest_runtime_message(
             "review": None,
             "at_order_triggered": False,
             "media_order_triggered": False,
-            "shipping_scan_triggered": True,
+            "shipping_scan_triggered": shipping_scan_triggered,
         }
 
-    # ===== 以下为客户群/其他群的处理流程 =====
+    # ===== 客户群专线：统一走通用审核链 create_review_from_callback =====
     review_result = None
-    if not sender_is_employee:
-        try:
-            review_result = await create_review_from_callback(db, normalized_payload, resolved_instance_id or None)
-        except Exception as exc:
-            logger.warning("create_review_from_callback failed: %s", exc)
-            try:
-                db.rollback()
-            except Exception:
-                pass
 
-    # @机器人 自动接单检测（员工消息跳过，不再要求关键词，AI 预判）
-    at_order_triggered = False
-    media_order_triggered = False
-    try:
-        bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
-        if not sender_is_employee and (bot_wxid or resolved_instance_id) and is_at_bot(normalized_payload, bot_wxid, resolved_instance_id):
-            # 标记此消息为 @bot 消息
-            _log_id = (log_result or {}).get("id")
-            if _log_id:
-                try:
-                    db.execute(text("UPDATE message_logs SET is_at_bot = 1 WHERE id = :id"), {"id": _log_id})
-                    db.commit()
-                except Exception:
-                    pass
-            trigger_info = extract_trigger_info(normalized_payload, resolved_instance_id)
-            trigger_room_id = trigger_info.get("room_id") or ""
-            trigger_sender_id = trigger_info.get("sender_id") or ""
-            trigger_content = trigger_info.get("content") or ""
-            if trigger_room_id and trigger_sender_id:
-                customer = resolve_customer_by_room(db, trigger_room_id, resolved_instance_id)
-                if customer:
-                    trigger_msg_id = (log_result or {}).get("id") or 0
-                    asyncio.create_task(handle_at_order(
-                        room_id=trigger_room_id,
-                        sender_id=trigger_sender_id,
-                        customer=dict(customer),
-                        trigger_msg_id=trigger_msg_id,
-                        instance_id=trigger_info.get("instance_id") or "",
-                        trigger_content=trigger_content,
-                    ))
-                    at_order_triggered = True
-                    logger.info("@接单: 已触发（AI将预判）room=%s sender=%s",
-                                trigger_room_id, trigger_sender_id)
-    except Exception as exc:
-        logger.warning("@接单检测异常: %s", exc)
+    if not customer:
+        logger.info("客户群专线跳过: customer 未找到 room=%s instance=%s", room_id, resolved_instance_id)
+    elif sender_is_employee:
+        logger.info("客户群专线跳过: 发送者是员工 sender=%s room=%s", log_sender_id, room_id)
 
-    # 图片/文件自动接单检测（客户群内非员工消息）
-    # 图片：直接触发；文件：仅 Excel（.xlsx/.xls）触发，其余忽略
-    if not sender_is_employee and not at_order_triggered:
+    if customer and not sender_is_employee:
         try:
-            log_msg_type = str((log_result or {}).get("message_type") or "").lower()
+            # 标记 @bot 消息
+            _is_at = False
+            bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
+            if (bot_wxid or resolved_instance_id) and is_at_bot(normalized_payload, bot_wxid, resolved_instance_id):
+                _is_at = True
+                _log_id = (log_result or {}).get("id")
+                if _log_id:
+                    try:
+                        db.execute(text("UPDATE message_logs SET is_at_bot = 1 WHERE id = :id"), {"id": _log_id})
+                        db.commit()
+                    except Exception:
+                        pass
+
+            # 判断消息子类型
             is_image = log_msg_type in ("image", "img", "picture")
-            is_file = log_msg_type == "file"
-
-            should_trigger = False
-            media_type = "image"
-            if is_image:
-                should_trigger = True
-                media_type = "image"
-            elif is_file:
-                # 仅 Excel 文件触发，提取文件名判断扩展名
-                _content_preview = str((log_result or {}).get("content_preview") or "").lower()
+            is_excel = False
+            if log_msg_type == "file":
                 _msg_data = (normalized_payload.get("message") or {}).get("data") or normalized_payload.get("data") or {}
                 if isinstance(_msg_data, str):
                     _msg_data = {}
                 _file_name = str(
                     _msg_data.get("file_name") or _msg_data.get("filename")
                     or normalized_payload.get("file_name") or normalized_payload.get("filename")
-                    or _content_preview or ""
+                    or (log_result or {}).get("content_preview") or ""
                 ).lower()
-                if _file_name.endswith((".xlsx", ".xls")):
-                    should_trigger = True
-                    media_type = "file"
+                is_excel = _file_name.endswith((".xlsx", ".xls"))
 
-            if should_trigger:
-                log_room_id = str((log_result or {}).get("room_id") or "").strip()
-                log_sender_id = str((log_result or {}).get("sender_id") or _sender_id or "").strip()
-                if log_room_id:
-                    customer = resolve_customer_by_room(db, log_room_id, resolved_instance_id)
-                    if customer:
-                        log_id = (log_result or {}).get("id") or 0
-                        asyncio.create_task(handle_media_order(
-                            room_id=log_room_id,
-                            sender_id=log_sender_id,
-                            customer=dict(customer),
-                            msg_log_id=log_id,
-                            instance_id=resolved_instance_id,
-                            payload=normalized_payload,
-                            message_type=media_type,
-                        ))
-                        media_order_triggered = True
-                        logger.info("媒体接单: 已触发（AI将预判）room=%s type=%s",
-                                    log_room_id, media_type)
+            # ---- 报货验证：先判断是否为报货信息再回复 ----
+            extracted = _extract_callback_message(normalized_payload, resolved_instance_id or None)
+            ctx_msgs = _build_validate_context(extracted, log_result)
+            is_order = False
+            if ctx_msgs:
+                try:
+                    parser = AIOrderParser()
+                    validation = await parser.validate_order(ctx_msgs, db=db)
+                    is_order = validation.get("is_order", False)
+                    logger.info("报货验证: room=%s is_order=%s reason=%s",
+                                room_id, is_order, validation.get("reason", ""))
+                except Exception as val_exc:
+                    # AI 验证失败时保守处理：当作报货
+                    is_order = True
+                    logger.warning("报货验证异常，保守处理为报货: room=%s err=%s", room_id, val_exc)
+            else:
+                # 无可验证内容（如图片暂无 base64），保守当作报货处理
+                is_order = is_image or is_excel
+                logger.debug("报货验证: 无可验证内容，保守判定 is_order=%s room=%s type=%s",
+                             is_order, room_id, log_msg_type)
+
+            if not is_order:
+                logger.info("客户群非报货消息，跳过: room=%s type=%s", room_id, log_msg_type)
+                return {
+                    "instanceId": resolved_instance_id,
+                    "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
+                    "received": True,
+                    "log": log_result,
+                    "review": None,
+                    "shipping_scan_triggered": False,
+                    "order_validated": False,
+                }
+
+            # ---- 是报货消息：回复"收到" ----
+            if (_is_at or is_image or is_excel) and _is_after_startup():
+                asyncio.create_task(_reply_received(room_id, log_sender_id, resolved_instance_id))
+
+            # 通用审核链：创建审核记录 + AI 自动解析
+            review_result = await create_review_from_callback(db, normalized_payload, resolved_instance_id or None)
+            logger.info("客户群审核: room=%s review=%s", room_id,
+                        review_result.get("id") if isinstance(review_result, dict) and not review_result.get("skipped") else "skipped")
         except Exception as exc:
-            logger.warning("媒体接单检测异常: %s", exc)
+            logger.warning("客户群审核创建异常: %s", exc)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+        return {
+            "instanceId": resolved_instance_id,
+            "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
+            "received": True,
+            "log": log_result,
+            "review": review_result,
+            "shipping_scan_triggered": False,
+        }
+
+    # ===== 其他群 / 未分类群：不处理、不回复，仅记录日志 =====
+    logger.debug("未分类群消息，跳过处理 room=%s", room_id)
 
     return {
         "instanceId": resolved_instance_id,
         "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
         "received": True,
         "log": log_result,
-        "review": review_result,
-        "at_order_triggered": at_order_triggered,
-        "media_order_triggered": media_order_triggered,
+        "review": None,
+        "at_order_triggered": False,
+        "media_order_triggered": False,
         "shipping_scan_triggered": shipping_scan_triggered,
     }

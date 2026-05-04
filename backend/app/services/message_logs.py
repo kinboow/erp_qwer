@@ -59,6 +59,9 @@ def ensure_message_logs_table(db: Session):
         "ALTER TABLE message_logs ADD COLUMN is_at_bot TINYINT NOT NULL DEFAULT 0 AFTER ai_recognized",
         "ALTER TABLE message_logs ADD COLUMN oss_key VARCHAR(500) DEFAULT '' AFTER is_at_bot",
         "ALTER TABLE message_logs ADD COLUMN rescan_count TINYINT NOT NULL DEFAULT 0 AFTER oss_key",
+        "ALTER TABLE message_logs ADD COLUMN message_server_id VARCHAR(100) DEFAULT '' AFTER rescan_count",
+        "ALTER TABLE message_logs ADD COLUMN is_recalled TINYINT NOT NULL DEFAULT 0 AFTER message_server_id",
+        "ALTER TABLE message_logs ADD INDEX idx_message_server_id (message_server_id)",
     ):
         try:
             db.execute(text(col_sql))
@@ -181,6 +184,14 @@ def _extract_log_item(payload: Any, source: str, instance_id: Optional[str] = No
         content_preview = f"{content_preview[:MESSAGE_LOG_PREVIEW_LIMIT]}..."
 
     inferred_instance_id = _safe_text(instance_id or normalized_payload.get("instanceId") or normalized_payload.get("instance_id") or normalized_payload.get("wxid"))
+    # 提取 message_server_id（用于撤回消息匹配）
+    msg_server_id = _safe_text(
+        message_data.get("message_server_id")
+        or message_data.get("server_id")
+        or message_data.get("svr_id")
+        or normalized_payload.get("message_server_id")
+        or ""
+    )
     return {
         "source": source,
         "instance_id": inferred_instance_id,
@@ -191,6 +202,7 @@ def _extract_log_item(payload: Any, source: str, instance_id: Optional[str] = No
         "message_type": _infer_message_type(normalized_payload),
         "content_preview": content_preview,
         "payload_json": _json_dumps(normalized_payload),
+        "message_server_id": msg_server_id,
     }
 
 
@@ -201,9 +213,9 @@ def record_message_log(db: Session, payload: Any, *, source: str, instance_id: O
     result = db.execute(
         text(
             "INSERT INTO message_logs ("
-            "msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json"
+            "msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json, message_server_id"
             ") VALUES ("
-            ":msg_uid, :source, :instance_id, :room_id, :room_name, :sender_id, :sender_name, :message_type, :content_preview, :payload_json"
+            ":msg_uid, :source, :instance_id, :room_id, :room_name, :sender_id, :sender_name, :message_type, :content_preview, :payload_json, :message_server_id"
             ")"
         ),
         item,
@@ -219,6 +231,35 @@ def record_message_log_background(payload: Any, *, source: str, instance_id: Opt
         record_message_log(db, payload, source=source, instance_id=instance_id)
     finally:
         db.close()
+
+
+def mark_recalled(db: Session, message_server_id: str, room_id: str = "") -> int:
+    """根据 message_server_id 标记消息为已撤回，返回被标记的 message_log id（0 表示未找到）"""
+    if not message_server_id:
+        return 0
+    try:
+        conditions = "message_server_id = :sid AND is_recalled = 0"
+        params: dict[str, Any] = {"sid": message_server_id}
+        if room_id:
+            clean_rid = room_id[2:] if room_id.startswith("R:") else room_id
+            conditions += " AND room_id IN (:rid1, :rid2)"
+            params["rid1"] = room_id
+            params["rid2"] = clean_rid
+        row = db.execute(
+            text(f"SELECT id FROM message_logs WHERE {conditions} ORDER BY id DESC LIMIT 1"),
+            params,
+        ).first()
+        if not row:
+            return 0
+        msg_id = row[0]
+        db.execute(
+            text("UPDATE message_logs SET is_recalled = 1, ai_recognized = 1 WHERE id = :id"),
+            {"id": msg_id},
+        )
+        db.commit()
+        return msg_id
+    except Exception:
+        return 0
 
 
 def mark_ai_recognized(db: Session, msg_log_id: int, recognized: bool = True) -> None:
@@ -258,7 +299,7 @@ def get_unrecognized_media_messages(db: Session, limit: int = 15) -> list[dict[s
             "SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, "
             "message_type, content_preview, payload_json, ai_recognized, created_at "
             "FROM message_logs "
-            "WHERE message_type IN ('image', 'file') AND ai_recognized = 0 "
+            "WHERE message_type IN ('image', 'file') AND ai_recognized = 0 AND is_recalled = 0 "
             "ORDER BY id DESC LIMIT :limit"
         ),
         {"limit": limit},
@@ -274,7 +315,7 @@ def get_unrecognized_at_messages(db: Session, limit: int = 15) -> list[dict[str,
             "SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, "
             "message_type, content_preview, payload_json, ai_recognized, is_at_bot, created_at "
             "FROM message_logs "
-            "WHERE is_at_bot = 1 AND ai_recognized = 0 "
+            "WHERE is_at_bot = 1 AND ai_recognized = 0 AND is_recalled = 0 "
             "ORDER BY id DESC LIMIT :limit"
         ),
         {"limit": limit},
@@ -313,7 +354,7 @@ def list_message_logs(
         params["end_date"] = f"{end_date} 23:59:59"
     where_sql = " AND ".join(conditions)
     rows = db.execute(
-        text(f"SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json, ai_recognized, is_at_bot, created_at FROM message_logs WHERE {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+        text(f"SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, message_type, content_preview, payload_json, ai_recognized, is_at_bot, is_recalled, created_at FROM message_logs WHERE {where_sql} ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
         params,
     ).mappings().all()
     count_params = {key: value for key, value in params.items() if key not in {"limit", "offset"}}

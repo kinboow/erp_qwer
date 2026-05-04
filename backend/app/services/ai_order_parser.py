@@ -25,6 +25,8 @@ class AIOrderParserError(Exception):
 ORDER_VALIDATOR_SYSTEM_PROMPT = """你是一个服装行业报货信息验证助手。
 你的唯一任务是判断客户发来的内容（文字、图片、表格）是否包含实际的报货/下单数据。
 
+【图片识别注意】如果图片中有纸张背面透过来的文字（颜色较浅、方向相反、镜像或模糊的印刷/手写痕迹），请完全忽略这些背面透字，只识别纸张正面清晰可见的内容。
+
 完整的报货信息需要四个要素：款号（货号）、颜色、尺码、对应数量。
 
 判断规则（按优先级执行）：
@@ -64,6 +66,7 @@ missing_fields 只能包含这四个值：款号、颜色、尺码、数量
 # ==========================================================================
 ORDER_PARSER_SYSTEM_PROMPT = """你是一个服装订单解析助手。请把客户通过企微发送的文本、图片、表格内容解析成结构化订单 JSON。
 要求：
+0. 【图片识别注意】如果图片中有纸张背面透过来的文字（颜色较浅、方向相反、镜像或模糊的印刷/手写痕迹），请完全忽略这些背面透字，只识别纸张正面清晰可见的内容。
 1. 只提取货号、颜色、尺码、数量、备注信息，不需要识别客户名、联系人、下单日期等无关信息。
 2. items 中每个款号+颜色单独成行，sizes 包含所有识别到的尺码和数量。
 3. 如果信息不确定，保留在 uncertainties 数组中，不要编造。
@@ -535,18 +538,19 @@ class AIOrderParser:
         db: Optional[Session] = None,
         catalog: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, Any]:
-        """智能体A: AI 提取原始文本 → 代码层精确匹配本年产品目录。
+        """智能体A: AI 从本年产品目录中匹配款号。
 
         流程:
-            1. AI 从内容中提取所有可能的款号/货号原始文本 (raw_texts)
-            2. 代码将 raw_texts 与 catalog 中的 product_no 和 aliases 做精确匹配
-            3. 匹配到的 alias 自动映射回 product_no
+            1. 将 catalog 注入提示词作为备选项
+            2. AI 从备选目录中匹配客户提到的产品
+            3. AI 返回 product_nos + no_match 标记
+            4. 代码层校验确保 AI 返回的款号确实在目录中
 
         Args:
             catalog: 本年产品目录列表，由 query_current_year_catalog() 返回。
 
         Returns:
-            {"product_nos": ["1234", "5678"], "rotation_angle": 0}
+            {"product_nos": ["1234"], "no_match": False, "rotation_angle": 0}
         """
         cfg = self._load_config(db)
         has_image = any(m.get("type") == "image" for m in context_messages)
@@ -554,12 +558,13 @@ class AIOrderParser:
 
         user_parts = self._build_multimodal_parts(context_messages)
         if not user_parts:
-            return {"product_nos": [], "rotation_angle": 0}
+            return {"product_nos": [], "no_match": True, "rotation_angle": 0}
 
         user_content: Any = user_parts if len(user_parts) > 1 else user_parts[0].get("text", "")
 
-        # 提示词不再包含目录，AI 只负责提取原始文本
-        system_prompt = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE
+        # 将产品目录注入提示词
+        catalog_text = _build_catalog_text(catalog) if catalog else "（目录为空）"
+        system_prompt = _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE.format(catalog_text=catalog_text)
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -582,24 +587,28 @@ class AIOrderParser:
             if rotation_angle not in (0, 90, -90, 180, -180, 270, -270):
                 rotation_angle = 0
 
-            # AI 返回的原始文本列表
-            raw_texts = result.get("raw_texts") or result.get("product_nos") or []
-            raw_texts = [str(t).strip() for t in raw_texts if str(t).strip()]
-            logger.info("智能体A 提取到原始文本: %s", raw_texts)
+            # AI 直接返回匹配的款号
+            ai_product_nos = result.get("product_nos") or []
+            ai_product_nos = [str(p).strip() for p in ai_product_nos if str(p).strip()]
+            no_match = bool(result.get("no_match", not ai_product_nos))
 
-            # 代码层精确匹配
-            if catalog:
-                matched = _match_catalog(raw_texts, catalog)
-                logger.info("智能体A 精确匹配结果: %s (从 %d 条原始文本中匹配到 %d 个款号)",
-                            matched, len(raw_texts), len(matched))
-                return {"product_nos": matched, "rotation_angle": rotation_angle}
-            else:
-                # 无目录降级：直接返回 AI 提取的原始文本
-                return {"product_nos": raw_texts, "rotation_angle": rotation_angle}
+            # 代码层校验：确保 AI 返回的款号确实在目录中
+            if catalog and ai_product_nos:
+                valid_pnos = {item.get("product_no", "").strip() for item in catalog if item.get("product_no")}
+                verified = [p for p in ai_product_nos if p in valid_pnos]
+                removed = set(ai_product_nos) - set(verified)
+                if removed:
+                    logger.warning("智能体A 过滤不在目录中的款号: %s", removed)
+                ai_product_nos = verified
+                if not ai_product_nos:
+                    no_match = True
+
+            logger.info("智能体A 匹配结果: product_nos=%s no_match=%s", ai_product_nos, no_match)
+            return {"product_nos": ai_product_nos, "no_match": no_match, "rotation_angle": rotation_angle}
 
         except Exception as exc:
-            logger.warning("智能体A(款号提取)失败: %s", exc)
-            return {"product_nos": [], "rotation_angle": rotation_angle}
+            logger.warning("智能体A(款号匹配)失败: %s", exc)
+            return {"product_nos": [], "no_match": True, "rotation_angle": rotation_angle}
 
     async def extract_product_nos_from_text(
         self, text_content: str, db: Optional[Session] = None,
@@ -695,31 +704,24 @@ class AIOrderParser:
 # 智能体 A — 款号提取 Agent（从本年产品目录中匹配款号）
 # ==========================================================================
 _PRODUCT_NO_EXTRACT_PROMPT_TEMPLATE = """你是一个服装行业订单内容提取助手。
+
+以下是本年产品目录（备选项），你只能从这个目录中选择款号：
+{catalog_text}
+
 你有两个任务：
 
-任务1：从客户发来的内容（文字、图片、表格）中，提取出所有可能用来识别产品的文本。
-需要提取两类信息：
-A. 款号/货号/卡号/编号（纯数字或字母数字组合）
-   - 图片或表格中可能存在"款号"、"货号"、"卡号"、"编号"等列，里面的值都要提取
-   - 文字消息中出现的类似款号/编号的字符串也要提取
-   - 不要把价格、数量、尺码、日期等数字误认为款号
-B. 产品名称（如"空气层弯刀裤82761"、"砂洗云朵裤直筒裤95890"、"天丝牛仔裤82892"等）
-   - 表格标题行、产品描述中出现的完整产品名称也要提取
-   - 产品名称通常包含面料/款式描述+款号，如"钛金棉青花瓷溜溜裤82861"
-   - 把完整的产品名称文本（包含名称和款号）原样提取
+任务1：从客户发来的内容（文字、图片、表格）中，识别出客户想要订购的产品，然后从上方备选目录中匹配对应的款号。
+- 客户可能用款号、产品名称、别名来指代产品，你需要智能匹配到目录中的款号
+- 匹配成功的款号放入 product_nos 数组（只填款号，不填名称）
+- 如果客户提到的内容在备选目录中找不到任何匹配，将 no_match 设为 true
 
-将所有提取到的原始文本（款号和产品名称都放）放入 raw_texts 数组。
-
-任务2：如果输入包含图片，判断图片中的纸张/内容需要顺时针旋转多少度才能变成正向可读。
+任务2：如果输入包含图片，判断图片需要顺时针旋转多少度才能正向可读。
 - rotation_angle 只能是：0, 90, -90, 180, -180, 270, -270
-- 0 表示图片已经是正的
-- 如果没有图片或无法判断，填 0
 
-注意：你只需要提取原始文本和判断旋转角度，**不需要识别客户名、联系人、下单日期**，也**不需要判断款号是否正确**，只管把看到的款号/货号/产品名称原样提取出来。
-
-严格只返回 JSON，不要返回 markdown：
+严格只返回 JSON：
 {{
-  "raw_texts": ["82761", "空气层弯刀裤82761", "95890", "砂洗云朵裤直筒裤95890"],
+  "product_nos": ["82761", "95890"],
+  "no_match": false,
   "rotation_angle": 0
 }}
 """
@@ -800,6 +802,9 @@ _CONTEXT_PARSER_PROMPT_TEMPLATE = """【⚠️ 固定配置 — 各款号可选�
 款号映射关系：{style_mapping}
 
 【核心执行规则（AI必须100%严格遵守，不得修改）】
+0. 背面透字过滤
+如果图片中有纸张背面透过来的文字（颜色较浅、方向相反、镜像或模糊的印刷/手写痕迹），请完全忽略这些背面透字，只识别纸张正面清晰可见的内容。背面透字不得作为任何款号、颜色、尺码或数量的识别依据。
+
 1. 图片解析核心要求
 你是专业的手写服装订单数据解析工具，识别内容中与服装款号、颜色、尺码、对应数量相关的信息。针对手写内容，优先做语义精准匹配。**所有识别到的有效数据都必须输出，不允许遗漏任何一条。**
 

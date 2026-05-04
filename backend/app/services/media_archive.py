@@ -222,6 +222,53 @@ async def download_and_archive(
         return None
 
 
+async def ensure_oss_and_read(
+    db: Session,
+    msg_log_id: int,
+    payload: dict[str, Any],
+    instance_id: str,
+    message_type: str,
+    file_name: str = "",
+) -> bytes | None:
+    """
+    确保媒体文件已归档到 OSS，然后从 OSS 读取并返回字节内容。
+
+    流程：
+    1. 检查 message_logs 是否已有 oss_key
+    2. 若无，调用 download_and_archive 从 CDN 下载并归档到 OSS
+    3. 从 OSS 读取文件内容返回
+
+    返回 None 表示下载或读取失败。
+    """
+    oss_key = None
+
+    # 检查是否已归档
+    try:
+        row = db.execute(text(
+            "SELECT oss_key FROM message_logs WHERE id = :id"
+        ), {"id": msg_log_id}).mappings().first()
+        oss_key = (row.get("oss_key") or "") if row else ""
+    except Exception:
+        pass
+
+    # 若未归档，先执行归档
+    if not oss_key:
+        oss_key = await download_and_archive(db, msg_log_id, payload, instance_id, message_type, file_name)
+
+    if not oss_key:
+        logger.warning("[OSS读取] 归档失败，无法获取文件 msg_log_id=%s", msg_log_id)
+        return None
+
+    # 从 OSS 读取
+    try:
+        file_bytes = oss_client.download_file(oss_key)
+        logger.info("[OSS读取] 成功 msg_log_id=%s oss_key=%s size=%d", msg_log_id, oss_key, len(file_bytes))
+        return file_bytes
+    except Exception as exc:
+        logger.warning("[OSS读取] 下载失败 msg_log_id=%s oss_key=%s: %s", msg_log_id, oss_key, exc)
+        return None
+
+
 async def download_and_archive_background(
     msg_log_id: int,
     payload: dict[str, Any],

@@ -158,10 +158,11 @@ export const saveWechatGlobalConfig = (data) => {
 }
 
 // 获取已同步到数据库的群聊列表（不调用外部 API，速度快）
-export const getSyncedRooms = () => {
+export const getSyncedRooms = (params) => {
   return request({
     url: '/api/wechat/rooms/synced',
-    method: 'get'
+    method: 'get',
+    params
   })
 }
 

@@ -52,8 +52,11 @@ _QR_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{3,}\|[A-Fa-f0-9]{8,64}$")
 _SHIPPING_TABLE_PARSE_PROMPT = """\
 你是一个拣货单/发货单表格识别专家。
 
+## 图片识别注意
+如果图片中有纸张背面透过来的文字（颜色较浅、方向相反、镜像或模糊的印刷/手写痕迹），请完全忽略这些背面透字，只识别纸张正面清晰可见的内容。
+
 ## 任务
-仅识别图片中**表格区域**的内容。表格外的任何内容（标题、二维码、客户信息、备注、页脚）一律忽略。
+仅识别图片中**表格区域**的内容。表格外的任何内容（标题、二维码、客户信息、备注、页脚、背面透字）一律忽略。
 
 ## 表格结构
 表格列从左到右依次为：款号、颜色，然后是多个尺码列（如 S、M、L、XL、2XL、3XL、4XL 等）。
@@ -525,84 +528,25 @@ def _extract_cdn_params(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def download_image(db: Session, payload: dict[str, Any], instance_id: str, msg_log_id: int) -> Optional[bytes]:
-    """从企微CDN下载图片，返回字节。
-
-    依次尝试多个下载方案（原图 → 大图 → 标准），取第一个成功的。
-    """
-    candidates = _extract_cdn_params(payload)
-    if not candidates:
-        logger.debug("[发货扫码] 无CDN参数 msg_log_id=%s", msg_log_id)
+    """从 OSS 获取图片（若未归档则先从 CDN 下载并归档到 OSS），返回字节。"""
+    try:
+        from app.services.media_archive import ensure_oss_and_read
+        file_bytes = await ensure_oss_and_read(
+            db,
+            msg_log_id=msg_log_id,
+            payload=payload,
+            instance_id=instance_id,
+            message_type="image",
+            file_name="",
+        )
+        if file_bytes:
+            logger.info("[发货扫码] OSS读取成功 msg_log_id=%s size=%d", msg_log_id, len(file_bytes))
+        else:
+            logger.warning("[发货扫码] OSS读取失败 msg_log_id=%s", msg_log_id)
+        return file_bytes
+    except Exception as exc:
+        logger.warning("[发货扫码] OSS下载异常 msg_log_id=%s: %s", msg_log_id, exc)
         return None
-
-    runtime = _resolve_wechat_runtime(db, instance_id)
-    if not runtime.get("api_base_url") or not runtime.get("wxid"):
-        logger.warning("[发货扫码] 缺少运行时配置")
-        return None
-
-    download_dir = Path(__file__).resolve().parents[2] / "temp" / "shipping_scan"
-    download_dir.mkdir(parents=True, exist_ok=True)
-
-    headers: dict[str, str] = {}
-    if runtime.get("api_key"):
-        headers["X-API-Key"] = runtime["api_key"]
-
-    best_bytes: Optional[bytes] = None
-
-    for idx, params in enumerate(candidates):
-        mode = params.pop("mode")
-        api_route = f"cdn/{mode}"
-        save_path = download_dir / f"scan_{msg_log_id}_{idx}.dat"
-        params["save_path"] = str(save_path)
-
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
-                    json=params,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                resp_data = resp.json()
-
-            # 检查 API 错误
-            if isinstance(resp_data, dict):
-                data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
-                err_code = data_body.get("error_code", 0)
-                if resp_data.get("code") not in (0, None) or err_code:
-                    logger.debug("[发货扫码] CDN方案%d(%s) 返回错误: code=%s err=%s",
-                                 idx, mode, resp_data.get("code"), err_code)
-                    continue
-
-            # 查找实际保存路径
-            actual_path = save_path
-            if not actual_path.is_file():
-                data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
-                for key in ("save_path", "path", "file_path"):
-                    possible = str(data_body.get(key) or "").strip()
-                    if possible and Path(possible).is_file():
-                        actual_path = Path(possible)
-                        break
-
-            if actual_path.is_file():
-                file_bytes = actual_path.read_bytes()
-                file_size = len(file_bytes)
-                logger.info("[发货扫码] CDN方案%d(%s) 下载成功: %d bytes path=%s",
-                            idx, mode, file_size, actual_path)
-                # 取最大的文件（更高质量）
-                if best_bytes is None or file_size > len(best_bytes):
-                    best_bytes = file_bytes
-                # c2c 原图如果成功直接返回
-                if mode == "c2c_download":
-                    return best_bytes
-        except Exception as exc:
-            logger.debug("[发货扫码] CDN方案%d(%s) 异常: %s", idx, mode, exc)
-            continue
-
-    if best_bytes:
-        logger.info("[发货扫码] 最终下载 %d bytes, msg_log_id=%s", len(best_bytes), msg_log_id)
-    else:
-        logger.warning("[发货扫码] 所有CDN方案均失败 msg_log_id=%s", msg_log_id)
-    return best_bytes
 
 
 # ---------------------------------------------------------------------------

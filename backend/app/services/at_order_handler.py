@@ -42,6 +42,7 @@ MEDIA_DEDUP_WINDOW = 15           # 同一条媒体消息防重复窗口（秒�
 
 # 正在采集中的 (room_id, sender_id) → 启动时间，防重复触发
 _active_sessions: dict[tuple[str, str], float] = {}
+_processed_text: dict[int, float] = {}
 
 
 def _mark_msg_recognized(msg_log_id: int) -> None:
@@ -236,13 +237,15 @@ def _msg_to_ai_input(msg: dict[str, Any]) -> dict[str, Any]:
         if isinstance(payload, dict):
             message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
             message_data = message.get("data") if isinstance(message.get("data"), dict) else {}
+            cdn_obj = message_data.get("cdn") if isinstance(message_data.get("cdn"), dict) else {}
+            c2c_obj = message_data.get("c2c_cdn") if isinstance(message_data.get("c2c_cdn"), dict) else {}
             file_name = (
-                message_data.get("file_name")
-                or payload.get("file_name")
-                or payload.get("filename")
-                or ""
+                message_data.get("file_name") or message_data.get("filename")
+                or cdn_obj.get("file_name") or c2c_obj.get("file_name")
+                or payload.get("file_name") or payload.get("filename")
+                or message_data.get("content") or ""
             )
-        return {"type": "file", "file_name": file_name, "content": content, "sender_name": sender_name, "_payload": payload, "_msg_id": msg.get("id")}
+        return {"type": "file", "file_name": file_name, "content": content or file_name, "sender_name": sender_name, "_payload": payload, "_msg_id": msg.get("id")}
 
     return {"type": "text", "content": content, "sender_name": sender_name}
 
@@ -308,7 +311,7 @@ def _extract_cdn_params(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _download_attachment_for_msg(db: Session, ai_input: dict[str, Any], room_id: str, instance_id: str) -> None:
-    """为图片/文件消息下载附件并填充 base64"""
+    """为图片/文件消息下载附件并填充 base64（统一走 OSS）"""
     payload = ai_input.get("_payload") or {}
     if not payload:
         return
@@ -317,68 +320,23 @@ async def _download_attachment_for_msg(db: Session, ai_input: dict[str, Any], ro
     if msg_type == "image" and ai_input.get("base64"):
         return
 
-    cdn_params = _extract_cdn_params(payload)
-    if not cdn_params:
-        logger.debug("附件下载: 无 CDN 参数 msg_id=%s", ai_input.get("_msg_id"))
-        return
-
-    runtime = _resolve_wechat_runtime_for_download(db, instance_id)
-    if not runtime.get("api_base_url") or not runtime.get("wxid"):
-        logger.warning("附件下载: 缺少运行时配置")
-        return
-
-    ext = ".png" if msg_type == "image" else ".dat"
+    msg_log_id = ai_input.get("_msg_id") or 0
     fname = ai_input.get("file_name") or ""
-    if fname:
-        ext = Path(fname).suffix or ext
-    download_dir = Path(__file__).resolve().parents[2] / "temp" / "at_order_attachments"
-    download_dir.mkdir(parents=True, exist_ok=True)
-    save_path = download_dir / f"msg_{ai_input.get('_msg_id', 0)}{ext}"
-
-    mode = cdn_params.pop("mode")
-    api_route = f"cdn/{mode}"
-    cdn_params["save_path"] = str(save_path)
-
-    headers: dict[str, str] = {}
-    if runtime.get("api_key"):
-        headers["X-API-Key"] = runtime["api_key"]
 
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
-                json=cdn_params,
-                headers=headers,
-            )
-            resp.raise_for_status()
-
-        # 解析响应，检查 bot API 返回的实际保存路径
-        response_payload: dict[str, Any] = {}
-        try:
-            response_payload = resp.json()
-            resp_data = response_payload.get("data") if isinstance(response_payload.get("data"), dict) else {}
-            if response_payload.get("code") not in (0, None):
-                logger.warning("附件下载: API 返回错误 code=%s msg=%s",
-                               response_payload.get("code"), response_payload.get("msg"))
-                return
-        except Exception:
-            pass
-
-        if not save_path.is_file():
-            # bot API 可能将文件保存到了不同的路径，从响应中查找真实路径
-            resp_data = response_payload.get("data") if isinstance(response_payload.get("data"), dict) else {}
-            for key in ("save_path", "path", "file_path"):
-                possible = str(resp_data.get(key) or "").strip()
-                if possible and Path(possible).is_file():
-                    save_path = Path(possible)
-                    logger.info("附件下载: 使用响应中的路径 %s", save_path)
-                    break
-        if not save_path.is_file():
-            logger.warning("附件下载: 文件未出现 requested=%s response=%s",
-                           cdn_params.get("save_path"), response_payload)
+        from app.services.media_archive import ensure_oss_and_read
+        file_bytes = await ensure_oss_and_read(
+            db,
+            msg_log_id=msg_log_id,
+            payload=payload,
+            instance_id=instance_id,
+            message_type=msg_type,
+            file_name=fname,
+        )
+        if not file_bytes:
+            logger.warning("附件下载: OSS读取失败 msg_id=%s", msg_log_id)
             return
 
-        file_bytes = save_path.read_bytes()
         b64 = base64.b64encode(file_bytes).decode("ascii")
         ai_input["base64"] = b64
         if msg_type == "image":
@@ -391,7 +349,7 @@ async def _download_attachment_for_msg(db: Session, ai_input: dict[str, Any], ro
             except Exception:
                 pass
     except Exception as exc:
-        logger.warning("附件下载失败 msg_id=%s: %s", ai_input.get("_msg_id"), exc)
+        logger.warning("附件下载失败 msg_id=%s: %s", msg_log_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -789,7 +747,7 @@ async def _process_order(
     db = SessionLocal()
     try:
         from app.services.erp_sync import ensure_tables
-        from app.services.downstream_orders import query_product_context_structured, query_current_year_catalog
+        from app.services.downstream_orders import build_context_from_catalog, query_current_year_catalog
         await run_in_threadpool(ensure_tables, db)
 
         # === 步骤 1：智能体 A — 从本年产品目录匹配款号 + 判断旋转角度 ===
@@ -799,8 +757,20 @@ async def _process_order(
         logger.info("%s: 本年产品目录: %d 个产品, 前10个: %s room=%s", source_label, len(catalog), catalog_pnos_sample, room_id)
         extract_result = await ai_order_parser.extract_product_nos(ai_inputs, db=db, catalog=catalog)
         product_nos = extract_result.get("product_nos") or []
+        no_match = extract_result.get("no_match", not product_nos)
         rotation_angle = extract_result.get("rotation_angle") or 0
-        logger.info("%s: 步骤1结果 提取到款号: %s rotation=%d° room=%s", source_label, product_nos, rotation_angle, room_id)
+        logger.info("%s: 步骤1结果 product_nos=%s no_match=%s rotation=%d° room=%s",
+                     source_label, product_nos, no_match, rotation_angle, room_id)
+
+        # === 步骤 1 校验：款号必须在本年产品目录中，否则拒绝并通知用户 ===
+        if catalog and not product_nos:
+            reply = ("⚠️ 客户提到的内容在本年产品目录中没有匹配项，请确认后重新发送"
+                     if no_match else "⚠️ 未识别到任何款号信息，请重新发送清晰的订单图片或文件")
+            logger.warning("%s: 步骤1未匹配到有效款号，中止解析 no_match=%s room=%s",
+                           source_label, no_match, room_id)
+            _mark_msg_recognized(trigger_msg_id)
+            await send_room_at(db, room_id, reply, at_list=[sender_id])
+            return
 
         # === 步骤 1.5：根据 AI 判断的角度旋转图片 ===
         if rotation_angle and rotation_angle != 0:
@@ -808,8 +778,8 @@ async def _process_order(
             ai_inputs = rotate_images_in_messages(ai_inputs, rotation_angle)
             logger.info("%s: 图片已旋转 %d° room=%s", source_label, rotation_angle, room_id)
 
-        # === 步骤 2：查询产品表可选颜色/尺码/映射 ===
-        context_data = await run_in_threadpool(query_product_context_structured, db, product_nos) if product_nos else {}
+        # === 步骤 2：从商品列表（catalog）获取可选颜色/尺码/映射 ===
+        context_data = build_context_from_catalog(catalog, product_nos) if product_nos else {}
         products_ctx = context_data.get("products") or {}
         logger.info("%s: 步骤2 产品上下文 products=%d个款号 mappings=%d room=%s",
                      source_label, len(products_ctx), len(context_data.get("mappings", {})), room_id)
@@ -831,14 +801,26 @@ async def _process_order(
         logger.info("%s: 步骤3 normalize后 items=%s room=%s", source_label,
                      [{"pno": it.get("product_no"), "color": it.get("color")} for it in (final_order.get("items") or [])], room_id)
 
-        # 软校验：标记不在本年产品目录中的款号（但不过滤，保留所有数据）
+        # 硬校验：过滤掉不在本年产品目录中的款号
         if catalog:
             valid_pnos = {item["product_no"] for item in catalog}
-            unknown_pnos = {it.get("product_no") for it in (final_order.get("items") or [])
-                           if it.get("product_no") and it["product_no"] not in valid_pnos}
-            if unknown_pnos:
-                logger.warning("%s: 以下款号不在本年产品目录中(保留不过滤): %s room=%s",
-                               source_label, unknown_pnos, room_id)
+            original_items = final_order.get("items") or []
+            filtered_items = [it for it in original_items
+                              if it.get("product_no") and it["product_no"] in valid_pnos]
+            removed_pnos = {it.get("product_no") for it in original_items
+                            if it.get("product_no") and it["product_no"] not in valid_pnos}
+            if removed_pnos:
+                logger.warning("%s: 以下款号不在本年产品目录中(已过滤): %s room=%s",
+                               source_label, removed_pnos, room_id)
+            final_order["items"] = filtered_items
+
+            if not filtered_items:
+                hint = "、".join(sorted(removed_pnos)[:5]) if removed_pnos else ""
+                reply = f"⚠️ 解析到的款号 [{hint}] 均不在本年产品目录中，非我司产品，请重新发送" if hint else "⚠️ 未解析到有效的产品款号"
+                logger.warning("%s: 步骤3后所有款号均不在目录中，中止 room=%s", source_label, room_id)
+                _mark_msg_recognized(trigger_msg_id)
+                await send_room_at(db, room_id, reply, at_list=[sender_id])
+                return
 
         logger.info("%s: 解析完成 room=%s items=%d", source_label, room_id, len(final_order.get("items") or []))
 
@@ -990,6 +972,76 @@ async def handle_at_order(
         _active_sessions.pop(session_key, None)
 
 
+async def handle_text_order(
+    room_id: str,
+    sender_id: str,
+    customer: dict[str, Any],
+    msg_log_id: int,
+    content: str,
+    instance_id: str = "",
+) -> None:
+    now = time.monotonic()
+    if msg_log_id in _processed_text:
+        if now - _processed_text[msg_log_id] < MEDIA_DEDUP_WINDOW:
+            return
+    _processed_text[msg_log_id] = now
+    cutoff = now - 300
+    for k in [k for k, v in _processed_text.items() if v < cutoff]:
+        _processed_text.pop(k, None)
+
+    try:
+        text_content = (content or "").strip()
+        if not text_content:
+            _mark_msg_recognized(msg_log_id)
+            return
+
+        logger.info("文本接单: 收到文本 room=%s sender=%s log_id=%d", room_id, sender_id, msg_log_id)
+
+        ai_input_for_judge = [{"type": "text", "content": text_content}]
+        db = SessionLocal()
+        try:
+            validation = await ai_order_parser.validate_order(ai_input_for_judge, db=db)
+        finally:
+            db.close()
+
+        if not validation.get("is_order"):
+            logger.info("文本接单: 智能体1判定非报单 room=%s log_id=%d reason=%s",
+                        room_id, msg_log_id, validation.get("reason"))
+            _mark_msg_recognized(msg_log_id)
+            return
+
+        logger.info("文本接单: 智能体1判定为报单 room=%s log_id=%d complete=%s missing=%s reason=%s",
+                    room_id, msg_log_id, validation.get("is_complete"),
+                    validation.get("missing_fields"), validation.get("reason"))
+
+        if not validation.get("is_complete"):
+            missing = validation.get("missing_fields") or []
+            missing_str = "、".join(missing) if missing else "部分信息"
+            db = SessionLocal()
+            try:
+                await send_room_at(db, room_id,
+                    f"📋 检测到报货信息，但缺少：{missing_str}，请补充完整后重新发送",
+                    at_list=[sender_id])
+            finally:
+                db.close()
+            _mark_msg_recognized(msg_log_id)
+            return
+
+        await _process_order(
+            [{"type": "text", "content": text_content}],
+            customer,
+            room_id,
+            sender_id,
+            instance_id,
+            msg_log_id,
+            source_label="文本接单",
+        )
+        _mark_msg_recognized(msg_log_id)
+
+    except Exception as exc:
+        logger.exception("文本接单: 未知错误 room=%s log_id=%d: %s", room_id, msg_log_id, exc)
+
+
 # ---------------------------------------------------------------------------
 # 主入口 2：图片/文件消息自动触发
 # ---------------------------------------------------------------------------
@@ -1034,8 +1086,14 @@ async def handle_media_order(
             msg_data = (payload.get("message") or {}).get("data") or payload.get("data") or {}
             if isinstance(msg_data, str):
                 msg_data = {}
+            # 从 cdn / c2c_cdn 子对象中补充查找
+            cdn_obj = msg_data.get("cdn") if isinstance(msg_data.get("cdn"), dict) else {}
+            c2c_obj = msg_data.get("c2c_cdn") if isinstance(msg_data.get("c2c_cdn"), dict) else {}
             fname = str(
-                msg_data.get("file_name") or payload.get("file_name") or payload.get("filename") or ""
+                msg_data.get("file_name") or msg_data.get("filename")
+                or cdn_obj.get("file_name") or c2c_obj.get("file_name")
+                or payload.get("file_name") or payload.get("filename")
+                or msg_data.get("content") or ""
             )
             if not fname.lower().endswith((".xlsx", ".xls")):
                 logger.info("媒体接单: 非 Excel 文件，跳过 room=%s file=%s", room_id, fname)
