@@ -101,32 +101,33 @@ def _find_finder_patterns(gray: np.ndarray) -> list[np.ndarray]:
 
 
 def _order_finder_points(centers: list[tuple[int, int]]) -> Optional[np.ndarray]:
-    """将三个 Finder Pattern 中心排列为 [TL, TR, BL] 顺序"""
+    """将三个 Finder Pattern 中心排列为 [TL, TR, BL] 顺序。
+
+    QR 码的三个 Finder Pattern 形成直角三角形：
+    - TL (Top-Left) 是直角顶点 → 到其他两个点的距离之和最小
+    - TR 和 BL 通过叉积区分方向
+    """
     if len(centers) < 3:
         return None
 
     pts = np.array(centers[:3], dtype="float32")
 
-    # 找距离和最大的点 → 对角的第四个虚拟点的对立面 → 实际是 Top-Left
-    dists = []
+    # 计算每个点到其他两个点的距离之和
+    dist_sums = []
     for i in range(3):
         d = sum(np.linalg.norm(pts[i] - pts[j]) for j in range(3) if i != j)
-        dists.append(d)
+        dist_sums.append(d)
 
-    # 距离和最大的是离其他两个最远的 → Bottom-Left
-    # 实际上应该反过来：距离和最小的是 Top-Left（因为 TL 离 TR 和 BL 各一条边长）
-    # 距离和最大的是对角点
-    max_idx = int(np.argmax(dists))
-
-    # max_idx 对应的是"离其他两个距离之和最大"的点
-    # 在三角形中，这个点对面的边最长 → 这个点是直角点 = Top-Left
-    tl_idx = max_idx
+    # 三角形中，直角顶点（TL）到其他两点的距离之和 = 两条直角边之和
+    # 而对边（TR-BL 连线）上的两个点到对方的距离包含了斜边，距离和更大
+    # 所以 TL = 距离和最大的那个点（斜边对面的顶点）
+    tl_idx = int(np.argmax(dist_sums))
     others = [i for i in range(3) if i != tl_idx]
 
-    # 区分 TR 和 BL：用叉积判断
     tl = pts[tl_idx]
     a, b = pts[others[0]], pts[others[1]]
 
+    # 叉积区分 TR 和 BL
     cross = (a[0] - tl[0]) * (b[1] - tl[1]) - (a[1] - tl[1]) * (b[0] - tl[0])
     if cross > 0:
         tr, bl = a, b

@@ -26,6 +26,7 @@ from app.services.erp_sync import (
     sync_sales_shipments,
     sync_unshipped_report,
 )
+from app.services.customer_sync import sync_customers
 
 router = APIRouter(tags=["ERP-同步"])
 
@@ -258,12 +259,15 @@ def api_module_sync_status() -> dict[str, Any]:
 async def api_sync_trigger(request: Request, days_back: int = 360) -> dict[str, Any]:
     try:
         erp_client = request.app.state.erp_client
+        # 先同步下游客户列表（后续模块依赖客户名称映射）
+        customers_result = await _sync_module("customers", sync_customers(erp_client), trigger="manual")
         orders_result = await _sync_module("orders", sync_sales_orders(erp_client, days_back=days_back), trigger="manual")
         shipments_result = await _sync_module("shipments", sync_sales_shipments(erp_client, days_back=days_back), trigger="manual")
         products_result = await _sync_module("products", sync_products(erp_client), trigger="manual")
         inventory_result = await _sync_module("inventory", sync_inventory(erp_client), trigger="manual")
         unshipped_result = await _sync_module("unshipped", sync_unshipped_report(erp_client, days_back=days_back), trigger="manual")
         return {"code": 200, "message": "同步完成", "data": {
+            "customers": customers_result,
             "orders": orders_result,
             "shipments": shipments_result,
             "products": products_result,
@@ -322,6 +326,39 @@ async def api_sync_unshipped_trigger(request: Request, days_back: int = 360) -> 
     erp_client = request.app.state.erp_client
     asyncio.create_task(_background_sync_module("unshipped", sync_unshipped_report(erp_client, days_back=days_back), "未发货报表"))
     return {"code": 200, "message": "同步已启动"}
+
+
+@router.post("/trigger-customers", summary="手动触发下游客户同步")
+async def api_sync_customers_trigger(request: Request) -> dict[str, Any]:
+    if is_module_syncing("customers"):
+        return {"code": 200, "message": "客户列表正在同步中，请稍候", "data": {"already_syncing": True}}
+    import asyncio
+    erp_client = request.app.state.erp_client
+
+    async def _sync_customers_then_unshipped():
+        """同步客户后自动重新同步待发货报表（依赖客户ID映射）"""
+        from app.services.erp_sync import _record_sync_cycle_message
+        cycle_result: dict = {}
+        try:
+            r = await _sync_module("customers", sync_customers(erp_client), trigger="manual")
+            cycle_result["customers"] = r or {"skipped": True}
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("[ERP Sync] 客户同步异常")
+            cycle_result["customers"] = {"error": str(exc)}
+        # 客户同步完成后自动触发未发货报表重新同步
+        try:
+            r2 = await _sync_module("unshipped", sync_unshipped_report(erp_client), trigger="manual")
+            cycle_result["unshipped"] = r2 or {"skipped": True}
+        except Exception as exc:
+            import logging
+            logging.getLogger(__name__).exception("[ERP Sync] 未发货报表同步异常")
+            cycle_result["unshipped"] = {"error": str(exc)}
+        _record_sync_cycle_message(cycle_result, trigger="手动")
+        _refresh_erp_status_background()
+
+    asyncio.create_task(_sync_customers_then_unshipped())
+    return {"code": 200, "message": "客户同步已启动，完成后将自动重新同步未发货报表"}
 
 
 async def _background_sync_module(module: str, coro, label: str) -> None:

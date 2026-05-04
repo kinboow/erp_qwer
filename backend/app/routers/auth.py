@@ -13,7 +13,7 @@ router = APIRouter(tags=["认证管理"])
 
 
 @router.post("/login", summary="用户登录")
-async def login(request: Request, login_data: LoginRequest, db: Session = Depends(get_db)):
+def login(request: Request, login_data: LoginRequest, db: Session = Depends(get_db)):
     """
     用户登录接口
 
@@ -96,7 +96,7 @@ async def login(request: Request, login_data: LoginRequest, db: Session = Depend
 
 
 @router.post("/logout", summary="用户登出")
-async def logout(token: str = Depends(lambda: None)):
+def logout(token: str = Depends(lambda: None)):
     """
     用户登出接口
 
@@ -110,7 +110,7 @@ async def logout(token: str = Depends(lambda: None)):
 
 
 @router.post("/verify-password", summary="验证当前用户密码")
-async def verify_current_password(
+def verify_current_password(
     payload: dict,
     current_user: User = Depends(get_current_user),
 ):
@@ -123,7 +123,7 @@ async def verify_current_password(
 
 
 @router.get("/userinfo", response_model=UserResponse, summary="获取当前用户信息")
-async def get_user_info(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def get_user_info(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     获取当前登录用户的详细信息
 

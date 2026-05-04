@@ -31,7 +31,7 @@ def json_response(code=200, message="success", data=None):
 
 
 @router.get("/system", summary="获取系统日志")
-async def get_system_logs(
+def get_system_logs(
     page: int = Query(1, ge=1),
     pageSize: int = Query(20, ge=1, le=100),
     level: Optional[str] = Query(None),
@@ -69,7 +69,7 @@ async def get_system_logs(
 
 
 @router.get("/operation", summary="获取操作日志")
-async def get_operation_logs(
+def get_operation_logs(
     page: int = Query(1, ge=1),
     pageSize: int = Query(20, ge=1, le=100),
     module: Optional[str] = Query(None),
@@ -123,6 +123,8 @@ async def get_operation_logs(
         "/api/erp/sync/trigger-shipments": "手动发货单同步",
         "/api/erp/sync/trigger-products": "手动产品同步",
         "/api/erp/sync/trigger-inventory": "手动库存同步",
+        "/api/erp/sync/trigger-unshipped": "手动未发货报表同步",
+        "/api/erp/sync/trigger-customers": "手动客户同步",
         "/api/erp/sync/upload-qr": "上传账套二维码",
         "/api/ai/config": "AI配置",
         "/api/ai/test": "测试AI连接",
@@ -163,7 +165,7 @@ async def get_operation_logs(
 
 
 @router.get("/messages", summary="获取消息日志")
-async def get_message_logs(
+def get_message_logs(
     page: int = Query(1, ge=1),
     pageSize: int = Query(20, ge=1, le=100),
     source: Optional[str] = Query(None),

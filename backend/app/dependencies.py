@@ -19,7 +19,7 @@ SUPER_ADMIN_ROLE_ALIASES = {
 }
 
 
-async def get_current_user(
+def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
 ) -> User:
@@ -48,7 +48,7 @@ async def get_current_user(
             detail="无效的认证凭证"
         )
 
-    # 查询用户
+    # 查询用户（主键查找，走索引）
     user = db.query(User).filter(User.id == user_id, User.deleted_at == None).first()
     if user is None:
         raise HTTPException(
@@ -69,6 +69,16 @@ def get_user_permission_codes(db: Session, user_id: int) -> list[str]:
     """获取用户权限编码（含缓存）"""
     from app.models import Permission, RolePermission, UserRole, Role
 
+    # 优先读 Redis 缓存，避免每次请求都查角色/权限表
+    cache_key = f"user:permissions:{user_id}"
+    permissions_json = redis_client.get(cache_key)
+    if permissions_json:
+        try:
+            return json.loads(permissions_json)
+        except Exception:
+            redis_client.delete(cache_key)
+
+    # 缓存未命中 → 查 DB
     role_rows = db.query(Role.code, Role.name).join(
         UserRole, Role.id == UserRole.role_id
     ).filter(
@@ -84,15 +94,8 @@ def get_user_permission_codes(db: Session, user_id: int) -> list[str]:
     super_admin_aliases = {item.lower() for item in SUPER_ADMIN_ROLE_ALIASES}
 
     if role_tokens.intersection(super_admin_aliases):
+        redis_client.set(cache_key, json.dumps(["*"]), ex=3600)
         return ["*"]
-
-    cache_key = f"user:permissions:{user_id}"
-    permissions_json = redis_client.get(cache_key)
-    if permissions_json:
-        try:
-            return json.loads(permissions_json)
-        except Exception:
-            redis_client.delete(cache_key)
 
     permission_rows = db.query(Permission.code).join(
         RolePermission, Permission.id == RolePermission.permission_id
@@ -113,7 +116,7 @@ def get_user_permission_codes(db: Session, user_id: int) -> list[str]:
 
 def check_permission(required_permission: str):
     """检查权限装饰器"""
-    async def permission_checker(
+    def permission_checker(
         current_user: User = Depends(get_current_user),
         db: Session = Depends(get_db)
     ):

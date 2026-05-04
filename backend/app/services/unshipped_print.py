@@ -53,7 +53,13 @@ CREATE TABLE IF NOT EXISTS unshipped_print_pages (
 """
 
 
+_unshipped_print_tables_ensured = False
+
+
 def ensure_print_tables(db: Session) -> None:
+    global _unshipped_print_tables_ensured
+    if _unshipped_print_tables_ensured:
+        return
     db.execute(text(_DDL_PRINT_JOBS))
     db.execute(text(_DDL_PRINT_PAGES))
     # 兼容已有表：追加 status 列
@@ -65,6 +71,7 @@ def ensure_print_tables(db: Session) -> None:
     except Exception:
         pass
     db.commit()
+    _unshipped_print_tables_ensured = True
 
 # ---------------------------------------------------------------------------
 # 二维码生成

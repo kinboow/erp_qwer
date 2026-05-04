@@ -66,6 +66,8 @@ async def lifespan(application: FastAPI):
     from app.services.erp_bridge import set_erp_client
     set_erp_client(erp_client)
 
+    ws_notify.set_main_loop(asyncio.get_running_loop())
+
     await wechat_ws_service.auto_connect_from_saved_config()
 
     from app.services.erp_sync import start_sync_scheduler

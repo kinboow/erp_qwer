@@ -284,7 +284,7 @@
 
         <el-tab-pane label="企微群聊" name="wechat-rooms">
           <div style="padding: 8px 0;">
-            <MonitoredRooms />
+            <MonitoredRooms ref="monitoredRoomsRef" />
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -379,7 +379,7 @@
             style="width: 100%"
             :loading="wechatRoomLoading"
             loading-text="正在加载群聊列表…"
-            no-data-text="暂无群聊数据"
+            :no-data-text="wechatRoomLoaded ? '暂无群聊数据' : '正在准备群聊列表…'"
             :disabled="!hasBoundWechatInstance"
           >
             <el-option
@@ -392,7 +392,7 @@
           <div class="wechat-room-hint">
             <template v-if="hasBoundWechatInstance">
               <span>当前实例：{{ wechatBoundInstance.name || wechatBoundInstance.wxid }}</span>
-              <span v-if="!wechatRoomLoading && wechatRoomOptions.length === 0">，暂未获取到群聊</span>
+              <span v-if="wechatRoomLoaded && !wechatRoomLoading && wechatRoomOptions.length === 0">，暂未获取到群聊</span>
             </template>
             <template v-else>
               请先在"企微配置"中绑定当前企业微信实例
@@ -518,7 +518,7 @@ import {
 import { useUserStore } from '@/stores/user'
 import { getUserList, createUser, updateUser, deleteUser, getUserRoleOptions } from '@/api/user'
 import { getCustomerList, createCustomer, updateCustomer, deleteCustomer, syncCustomersFromErp, getPreference, savePreference } from '@/api/customer'
-import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig, getCustomerRoomMembers, getEmployeeAccounts, saveEmployeeAccounts } from '@/api/wechat'
+import { getInstances, getListeners, getRoomList, syncRooms, getWechatGlobalConfig, getCustomerRoomMembers, getEmployeeAccounts, saveEmployeeAccounts, getSyncedRooms, getRoomsAllStatus } from '@/api/wechat'
 import MonitoredRooms from './MonitoredRooms.vue'
 
 const router = useRouter()
@@ -715,9 +715,11 @@ const customerDialogTitle = ref('新增客户')
 const customerSubmitLoading = ref(false)
 const customerIsEdit = ref(false)
 const customerFormRef = ref(null)
+const monitoredRoomsRef = ref(null)
 const wechatRoomLoading = ref(false)
 const wechatBoundInstance = ref(null)
 const wechatRoomOptions = ref([])
+const wechatRoomLoaded = ref(false)
 const hasBoundWechatInstance = computed(() => !!wechatBoundInstance.value?.wxid)
 const customerFormData = reactive({
   id: null,
@@ -830,29 +832,50 @@ const fetchSyncedWechatRooms = async (instanceId) => {
 }
 
 const fetchWechatRoomsForCustomer = async () => {
-  const bound = await loadBoundWechatInstance()
-
-  if (!bound?.id) {
-    wechatRoomOptions.value = []
-    return
-  }
-
+  wechatRoomLoaded.value = false
   wechatRoomLoading.value = true
   try {
-    const res = await getRoomList(bound.id)
-    let normalizedRooms = normalizeWechatRooms(extractWechatRooms(res.data))
+    // 优先从数据库读取已同步的群聊（快且可靠，不依赖外部 API）
+    const syncedRes = await getSyncedRooms()
+    let rooms = Array.isArray(syncedRes.data) ? syncedRes.data : []
+    rooms = rooms.map(r => ({
+      room_id: r.room_id || '',
+      room_name: r.room_name || '未命名群聊'
+    })).filter(r => r.room_id)
 
-    if (normalizedRooms.length === 0) {
-      await syncRooms(bound.id)
-      normalizedRooms = await fetchSyncedWechatRooms(bound.id)
+    if (rooms.length === 0) {
+      // 数据库无群聊数据时，尝试加载绑定实例并从 API 同步一次
+      const bound = await loadBoundWechatInstance()
+      if (bound?.id) {
+        try {
+          await syncRooms(bound.id)
+          const res2 = await getSyncedRooms()
+          rooms = (Array.isArray(res2.data) ? res2.data : [])
+            .map(r => ({ room_id: r.room_id || '', room_name: r.room_name || '未命名群聊' }))
+            .filter(r => r.room_id)
+        } catch { /* ignore sync failure */ }
+      }
     }
 
-    wechatRoomOptions.value = normalizedRooms
+    if (rooms.length === 0) {
+      try {
+        const allStatusRes = await getRoomsAllStatus()
+        rooms = (Array.isArray(allStatusRes.data) ? allStatusRes.data : [])
+          .map(r => ({
+            room_id: r.room_id || r.conversation_id || '',
+            room_name: r.room_name || '未命名群聊'
+          }))
+          .filter(r => r.room_id)
+      } catch { /* ignore all-status failure */ }
+    }
+
+    wechatRoomOptions.value = rooms
   } catch (error) {
     wechatRoomOptions.value = []
     ElMessage.error(error?.response?.data?.message || error?.message || '获取企微群列表失败')
   } finally {
     wechatRoomLoading.value = false
+    wechatRoomLoaded.value = true
   }
 }
 
@@ -1012,6 +1035,8 @@ const handleDelete = (row) => {
 const handleCustomerEdit = async (row) => {
   customerDialogTitle.value = '编辑客户'
   customerIsEdit.value = true
+  wechatRoomOptions.value = []
+  wechatRoomLoaded.value = false
   customerFormData.id = row.id
   customerFormData.customer_name = row.customer_name
   customerFormData.contact_person = row.contact_person
@@ -1028,6 +1053,8 @@ const handleCustomerEdit = async (row) => {
 }
 
 const handleCustomerBind = async (row) => {
+  wechatRoomOptions.value = []
+  wechatRoomLoaded.value = false
   bindTarget.id = row.id
   bindTarget.customer_name = row.customer_name
   bindTarget.erp_customer_id = row.erp_customer_id || ''
@@ -1204,6 +1231,7 @@ const handleTabChange = (tab) => {
     fetchCustomerData()
   } else if (tab === 'wechat-rooms') {
     router.push('/wechat-rooms')
+    monitoredRoomsRef.value?.reload?.()
   }
 }
 
@@ -1288,18 +1316,24 @@ async function handleSaveEmployees() {
 }
 
 onMounted(async () => {
-  await fetchRoleOptions()
-  loadBoundWechatInstance()
-  await loadVisibleCols()
+  // 立即显示加载中，避免表格先闪 "暂无数据"
+  if (activeTab.value === 'customers') {
+    customerLoading.value = true
+  } else {
+    loading.value = true
+  }
   if (route.query.keyword) {
     searchKeyword.value = String(route.query.keyword)
     activeTab.value = 'employees'
   }
-  if (activeTab.value === 'customers') {
-    fetchCustomerData()
-  } else {
-    fetchData()
-  }
+  // 所有初始化请求并行发出，加载时间 = max(各请求) 而非 sum(各请求)
+  const dataPromise = activeTab.value === 'customers' ? fetchCustomerData() : fetchData()
+  await Promise.all([
+    fetchRoleOptions(),
+    loadVisibleCols(),
+    loadBoundWechatInstance(),
+    dataPromise,
+  ])
 })
 </script>
 

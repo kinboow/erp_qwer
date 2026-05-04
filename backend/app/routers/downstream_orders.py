@@ -72,7 +72,7 @@ def json_response(code=200, message="success", data=None):
 
 
 @router.get("/reviews", summary="获取待审核订单列表")
-async def get_reviews(
+def get_reviews(
     page: int = Query(1, ge=1),
     pageSize: int = Query(20, ge=1, le=100),
     review_status: Optional[str] = Query(None),
@@ -106,7 +106,7 @@ async def review_stream(request: Request):
 
 
 @router.get("/media/{msg_log_id}", summary="获取消息媒体文件")
-async def get_media_file(
+def get_media_file(
     msg_log_id: int,
     token: Optional[str] = Query(None, description="JWT token（用于浏览器直接访问）"),
     db: Session = Depends(get_db),
@@ -141,7 +141,7 @@ async def get_media_file(
 
 
 @router.get("/reviews/{review_id}", summary="获取待审核订单详情")
-async def get_review(
+def get_review(
     review_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -179,7 +179,7 @@ async def reparse_review(
 
 
 @router.get("/reviews/{review_id}/context-messages", summary="获取审核记录上下文聊天消息")
-async def get_review_context_messages_api(
+def get_review_context_messages_api(
     review_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -194,7 +194,7 @@ async def get_review_context_messages_api(
 
 
 @router.get("/reviews/{review_id}/attachment-debug", summary="查看附件下载调试信息")
-async def get_review_attachment_debug_api(
+def get_review_attachment_debug_api(
     review_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -230,7 +230,7 @@ async def retry_review_attachment_download_api(
 
 
 @router.post("/reviews/{review_id}/check-duplicate", summary="下单前检查重复订单")
-async def check_duplicate_api(
+def check_duplicate_api(
     review_id: int,
     payload: CheckDuplicatePayload,
     db: Session = Depends(get_db),
@@ -294,7 +294,7 @@ async def manual_review_api(
 
 
 @router.post("/reviews/{review_id}/void", summary="废单")
-async def void_review_api(
+def void_review_api(
     review_id: int,
     payload: ReviewVoidPayload,
     db: Session = Depends(get_db),

@@ -292,8 +292,14 @@ _CONFIG_DEFAULTS = {
 }
 
 
+_erp_tables_ensured = False
+
+
 def ensure_tables(db: Session) -> None:
-    """确保同步表存在"""
+    """确保同步表存在（进程内只执行一次）"""
+    global _erp_tables_ensured
+    if _erp_tables_ensured:
+        return
     db.execute(text(_DDL_ORDERS))
     db.execute(text(_DDL_ITEMS))
     db.execute(text(_DDL_SHIPMENTS))
@@ -321,6 +327,7 @@ def ensure_tables(db: Session) -> None:
     except Exception:
         pass
     db.commit()
+    _erp_tables_ensured = True
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +925,49 @@ def _upsert_shipment(db: Session, detail: Any, synced_at: str, list_extra: dict 
 
 
 # ---------------------------------------------------------------------------
+# 单张发货单即时同步（发货扫码创建后调用）
+# ---------------------------------------------------------------------------
+
+async def sync_single_shipment(shipment_no: str) -> dict[str, Any]:
+    """
+    立即从 ERP 拉取一张发货单的详情并写入本地数据库。
+    如果 shipments 模块正在定时同步中，先等待它完成（最多 120 秒）。
+    """
+    if not shipment_no:
+        return {"ok": False, "error": "empty_shipment_no"}
+
+    # 等待定时同步的 shipments 模块完成（如果正在运行）
+    waited = 0
+    while is_module_syncing("shipments") and waited < 120:
+        logger.info("[ERP Sync] 等待定时发货单同步完成后再即时同步 %s（已等 %ds）", shipment_no, waited)
+        await asyncio.sleep(2)
+        waited += 2
+
+    from app.services.erp_bridge import ERPBridge
+
+    db: Session = SessionLocal()
+    try:
+        ensure_tables(db)
+        bridge = ERPBridge()
+        client = await bridge._ensure_login()
+
+        detail = await get_shipment_detail(client, shipment_no)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        await run_in_threadpool(_upsert_shipment, db, detail, now_str)
+
+        from app.services import ws_notify
+        await ws_notify.broadcast("sync_complete", {"module": "shipments", "success": True, "trigger": "shipping_scan"})
+
+        logger.info("[ERP Sync] 即时同步发货单完成: %s", shipment_no)
+        return {"ok": True, "shipment_no": shipment_no}
+    except Exception as exc:
+        logger.warning("[ERP Sync] 即时同步发货单 %s 失败: %s", shipment_no, exc)
+        return {"ok": False, "error": str(exc)}
+    finally:
+        db.close()
+
+
+# ---------------------------------------------------------------------------
 # 产品同步
 # ---------------------------------------------------------------------------
 
@@ -1176,12 +1226,11 @@ async def sync_unshipped_report(erp_client: ERPClient, days_back: int | None = N
     拉取 ERP 未发货报表，写入本地 erp_unshipped_report 表。
     使用滑动时间窗口向前回溯，直到某个窗口返回 0 条记录时停止。
     返回同步统计信息。
+    固定只同步近 10 个月数据，且始终采用全量同步（不因定时/手动而区别对待）。
     """
-    cfg = _get_db_config()
-    window_days = days_back or cfg.get("sync_days_back", 360)
-    # 短周期（<=180天，即定时同步）：找到数据就停，空窗口顺延
-    # 长周期（>180天，即手动同步）：完整滑动窗口回溯
-    stop_on_data = window_days <= 180
+    _UNSHIPPED_MAX_DAYS = 300  # ≈10个月
+    window_days = min(days_back or _UNSHIPPED_MAX_DAYS, _UNSHIPPED_MAX_DAYS)
+    stop_on_data = False  # 始终全量回溯
 
     db: Session = SessionLocal()
     try:
@@ -1345,6 +1394,7 @@ _is_syncing: bool = False
 # 模块级同步锁 — 跨用户互斥
 # ---------------------------------------------------------------------------
 _module_syncing: dict[str, bool] = {
+    "customers": False,
     "orders": False,
     "shipments": False,
     "products": False,
@@ -1353,6 +1403,7 @@ _module_syncing: dict[str, bool] = {
 }
 # 记录每个模块当前同步的触发方式："scheduled"(定时) / "manual"(手动) / ""
 _sync_trigger: dict[str, str] = {
+    "customers": "",
     "orders": "",
     "shipments": "",
     "products": "",
@@ -1393,6 +1444,7 @@ def _record_sync_cycle_message(cycle_result: dict[str, Any], trigger: str = "定
     """将一次同步周期的所有模块结果汇总为一条系统消息和一条系统动态"""
     now = datetime.now()
     _MODULE_LABELS = {
+        "customers": "下游客户",
         "orders": "销售订单",
         "shipments": "销售发货单",
         "products": "产品",
@@ -1490,7 +1542,13 @@ async def _sync_loop(erp_client: ERPClient) -> None:
             # 30天之前的历史数据保持不变，仅通过手动全量同步更新。
             _SCHEDULED_DAYS_BACK = 30
 
-            # 4 个模块并发执行，各自写不同的表，互不冲突
+            # 0) 先同步下游客户列表（后续模块可能依赖客户名称映射）
+            from app.services.customer_sync import sync_customers
+            r_customers = await _run_module_with_retry(
+                "customers", lambda: sync_customers(erp_client), "下游客户")
+            cycle_result["customers"] = r_customers or {"skipped": True}
+
+            # 其余模块并发执行，各自写不同的表，互不冲突
             r_orders, r_shipments, r_products, r_inventory, r_unshipped = await asyncio.gather(
                 _run_module_with_retry(
                     "orders", lambda: sync_sales_orders(erp_client, days_back=_SCHEDULED_DAYS_BACK), "销售订单"),

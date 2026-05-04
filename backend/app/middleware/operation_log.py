@@ -233,6 +233,11 @@ class OperationLogMiddleware(BaseHTTPMiddleware):
                         " :req_data, :status, :duration, NOW())"
                     ), log_params)
                     db.commit()
+                    try:
+                        from app.services.ws_notify import broadcast_sync
+                        broadcast_sync("new_operation_log")
+                    except Exception:
+                        pass
                 except Exception as e:
                     logger.warning("写入操作日志失败: %s", e)
                     try:

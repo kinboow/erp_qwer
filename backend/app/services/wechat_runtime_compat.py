@@ -154,6 +154,50 @@ async def ingest_runtime_message(
     except Exception:
         pass
 
+    # ===== 发货群图片扫码检测（优先检测，避免被后续慢速 AI 解析阻塞/取消） =====
+    # 不受 sender_is_employee 限制，员工也可能转发发货单图片
+    shipping_scan_triggered = False
+    try:
+        _log_msg_type_early = str((log_result or {}).get("message_type") or "").lower()
+        _log_room_id_early = str((log_result or {}).get("room_id") or "").strip()
+        if _log_msg_type_early in ("image", "img", "picture") and _log_room_id_early:
+            from app.database import SessionLocal as _SL
+            _scan_db = _SL()
+            try:
+                shipping_room = resolve_shipping_room(_scan_db, _log_room_id_early)
+            finally:
+                _scan_db.close()
+            logger.info("发货扫码检测: resolve_shipping_room(%s) → %s", _log_room_id_early, shipping_room)
+            if shipping_room:
+                _log_sender_id_early = str((log_result or {}).get("sender_id") or _sender_id or "").strip()
+                _log_id_early = (log_result or {}).get("id") or 0
+                asyncio.create_task(handle_shipping_scan(
+                    room_id=_log_room_id_early,
+                    sender_id=_log_sender_id_early,
+                    msg_log_id=_log_id_early,
+                    instance_id=resolved_instance_id,
+                    payload=normalized_payload,
+                ))
+                shipping_scan_triggered = True
+                logger.info("发货扫码: 已触发 room=%s sender=%s log_id=%d",
+                            _log_room_id_early, _log_sender_id_early, _log_id_early)
+    except Exception as exc:
+        logger.warning("发货扫码检测异常: %s", exc, exc_info=True)
+
+    # 发货群图片已触发扫码，无需走审核/接单流程，立即返回
+    if shipping_scan_triggered:
+        return {
+            "instanceId": resolved_instance_id,
+            "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
+            "received": True,
+            "log": log_result,
+            "review": None,
+            "at_order_triggered": False,
+            "media_order_triggered": False,
+            "shipping_scan_triggered": True,
+        }
+
+    # ===== 以下为客户群/其他群的处理流程 =====
     review_result = None
     if not sender_is_employee:
         try:
@@ -250,35 +294,6 @@ async def ingest_runtime_message(
                                     log_room_id, media_type)
         except Exception as exc:
             logger.warning("媒体接单检测异常: %s", exc)
-
-    # 发货群图片扫码检测（仅图片消息）
-    # 注意：发货群图片不受 sender_is_employee 限制，员工也可能转发发货单图片
-    shipping_scan_triggered = False
-    if not at_order_triggered and not media_order_triggered:
-        try:
-            log_msg_type = str((log_result or {}).get("message_type") or "").lower()
-            log_room_id = str((log_result or {}).get("room_id") or "").strip()
-            logger.debug("发货扫码检测: msg_type=%s room=%s sender_employee=%s log_result=%s",
-                         log_msg_type, log_room_id, sender_is_employee, bool(log_result))
-            if log_msg_type in ("image", "img", "picture"):
-                if log_room_id:
-                    shipping_room = resolve_shipping_room(db, log_room_id)
-                    logger.debug("发货扫码检测: resolve_shipping_room(%s) → %s", log_room_id, shipping_room)
-                    if shipping_room:
-                        log_sender_id = str((log_result or {}).get("sender_id") or _sender_id or "").strip()
-                        log_id = (log_result or {}).get("id") or 0
-                        asyncio.create_task(handle_shipping_scan(
-                            room_id=log_room_id,
-                            sender_id=log_sender_id,
-                            msg_log_id=log_id,
-                            instance_id=resolved_instance_id,
-                            payload=normalized_payload,
-                        ))
-                        shipping_scan_triggered = True
-                        logger.info("发货扫码: 已触发 room=%s sender=%s log_id=%d",
-                                    log_room_id, log_sender_id, log_id)
-        except Exception as exc:
-            logger.warning("发货扫码检测异常: %s", exc)
 
     return {
         "instanceId": resolved_instance_id,

@@ -88,7 +88,13 @@ CREATE TABLE IF NOT EXISTS print_queue (
 """
 
 
+_printer_tables_ensured = False
+
+
 def ensure_printer_tables(db: Session) -> None:
+    global _printer_tables_ensured
+    if _printer_tables_ensured:
+        return
     db.execute(text(_DDL_PRINTER_CONFIG))
     db.execute(text(_DDL_PRINT_QUEUE))
     try:
@@ -100,6 +106,7 @@ def ensure_printer_tables(db: Session) -> None:
     except Exception:
         logger.warning("print_queue 表结构兼容升级失败，跳过", exc_info=True)
     db.commit()
+    _printer_tables_ensured = True
 
 
 # ---------------------------------------------------------------------------
@@ -196,6 +203,8 @@ def ack_print_job(db: Session, job_id: int, success: bool, error: str = "") -> N
             text("UPDATE print_queue SET status = 'done', attempts = attempts + 1, updated_at = NOW() WHERE id = :id"),
             {"id": job_id},
         )
+        # 记录纸张已打印
+        _record_printed_pages_for_job(db, job_id)
     else:
         db.execute(
             text(
@@ -204,6 +213,75 @@ def ack_print_job(db: Session, job_id: int, success: bool, error: str = "") -> N
             ),
             {"id": job_id, "err": error[:500]},
         )
+    db.commit()
+
+
+def _record_printed_pages_for_job(db: Session, job_id: int) -> None:
+    """打印成功后，将该任务关联的所有活跃 page_id 写入 paper_print_records"""
+    from app.services.downstream_support import ensure_downstream_support_tables
+    ensure_downstream_support_tables(db)
+    job = db.execute(
+        text("SELECT order_no, doc_type FROM print_queue WHERE id = :id"),
+        {"id": job_id},
+    ).mappings().first()
+    if not job:
+        return
+    order_no = job["order_no"]
+    doc_type = job["doc_type"] or "picking"
+
+    # 根据 doc_type 查询对应的 pages 表
+    if doc_type == "picking":
+        pages_table = "picking_print_pages"
+    elif doc_type == "unshipped":
+        pages_table = "unshipped_print_pages"
+    else:
+        return
+
+    pages = db.execute(
+        text(f"SELECT page_id, barcode_content FROM {pages_table} WHERE order_no = :no AND status = 'active'"),
+        {"no": order_no},
+    ).mappings().all()
+
+    for p in pages:
+        try:
+            db.execute(
+                text(
+                    "INSERT INTO paper_print_records (paper_id, order_no, doc_type, barcode_content, print_job_id) "
+                    "VALUES (:pid, :ono, :dt, :bc, :jid) "
+                    "ON DUPLICATE KEY UPDATE print_job_id = VALUES(print_job_id), printed_at = NOW()"
+                ),
+                {
+                    "pid": p["page_id"],
+                    "ono": order_no,
+                    "dt": doc_type,
+                    "bc": p["barcode_content"] or "",
+                    "jid": job_id,
+                },
+            )
+        except Exception as exc:
+            logger.warning("记录纸张打印状态失败: page_id=%s err=%s", p["page_id"], exc)
+
+
+def is_paper_printed(db: Session, paper_id: str) -> bool:
+    """检查纸张ID是否已打印"""
+    row = db.execute(
+        text("SELECT id FROM paper_print_records WHERE paper_id = :pid LIMIT 1"),
+        {"pid": paper_id},
+    ).first()
+    return row is not None
+
+
+def record_paper_printed(db: Session, paper_id: str, order_no: str, doc_type: str,
+                         barcode_content: str = "", print_job_id: int | None = None) -> None:
+    """手动记录纸张已打印（用于不走 print_queue 的场景）"""
+    db.execute(
+        text(
+            "INSERT INTO paper_print_records (paper_id, order_no, doc_type, barcode_content, print_job_id) "
+            "VALUES (:pid, :ono, :dt, :bc, :jid) "
+            "ON DUPLICATE KEY UPDATE print_job_id = VALUES(print_job_id), printed_at = NOW()"
+        ),
+        {"pid": paper_id, "ono": order_no, "dt": doc_type, "bc": barcode_content, "jid": print_job_id},
+    )
     db.commit()
 
 

@@ -20,7 +20,13 @@ def _fmt_row(row) -> dict:
 MESSAGE_LOG_PREVIEW_LIMIT = 500
 
 
+_msg_logs_table_ensured = False
+
+
 def ensure_message_logs_table(db: Session):
+    global _msg_logs_table_ensured
+    if _msg_logs_table_ensured:
+        return
     db.execute(text(
         "CREATE TABLE IF NOT EXISTS message_logs ("
         "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
@@ -59,6 +65,7 @@ def ensure_message_logs_table(db: Session):
         except Exception:
             pass
     db.commit()
+    _msg_logs_table_ensured = True
 
 
 def _json_dumps(data: Any) -> str:

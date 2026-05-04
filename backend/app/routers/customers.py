@@ -16,7 +16,7 @@ router = APIRouter(tags=["客户管理"])
 
 
 class CustomerWechatRoomDto(BaseModel):
-    instance_id: int
+    instance_id: Optional[int] = None
     room_id: str
     room_name: Optional[str] = None
 
@@ -88,7 +88,7 @@ def replace_customer_rooms(db: Session, customer_id: int, rooms: Optional[List[C
     if not rooms:
         return
     for room in rooms:
-        if not room.instance_id or not room.room_id:
+        if not room.room_id:
             continue
         db.execute(
             text(
@@ -175,7 +175,7 @@ async def get_customer_list(
 
 
 @router.get("/{customer_id}", summary="获取客户详情")
-async def get_customer_by_id(
+def get_customer_by_id(
     customer_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -194,7 +194,7 @@ async def get_customer_by_id(
 
 
 @router.post("", summary="创建客户")
-async def create_customer(
+def create_customer(
     payload: CustomerCreateDto,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -224,7 +224,7 @@ async def create_customer(
 
 
 @router.put("/{customer_id}", summary="更新客户")
-async def update_customer(
+def update_customer(
     customer_id: int,
     payload: CustomerUpdateDto,
     db: Session = Depends(get_db),
@@ -261,7 +261,7 @@ async def update_customer(
 
 
 @router.delete("/{customer_id}", summary="删除客户")
-async def delete_customer(
+def delete_customer(
     customer_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -285,7 +285,7 @@ class PrefUpdateDto(BaseModel):
 
 
 @router.get("/preferences/{pref_key}", summary="获取用户偏好")
-async def get_preference(
+def get_preference(
     pref_key: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -299,7 +299,7 @@ async def get_preference(
 
 
 @router.put("/preferences/{pref_key}", summary="保存用户偏好")
-async def save_preference(
+def save_preference(
     pref_key: str,
     payload: PrefUpdateDto,
     db: Session = Depends(get_db),

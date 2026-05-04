@@ -76,10 +76,17 @@ _AI_CONFIG_DEFAULTS: dict[str, str] = {
 }
 
 
+_ai_tables_ensured = False
+
+
 def ensure_ai_config_table(db: Session) -> None:
+    global _ai_tables_ensured
+    if _ai_tables_ensured:
+        return
     db.execute(text(_DDL_AI_CONFIG))
     db.execute(text(_DDL_AI_CALL_LOGS))
     db.commit()
+    _ai_tables_ensured = True
 
 
 def log_ai_call(
@@ -115,6 +122,11 @@ def log_ai_call(
             "resp": response_summary[:16000] if response_summary else None,
         })
         db.commit()
+        try:
+            from app.services.ws_notify import broadcast_sync
+            broadcast_sync("new_ai_call_log")
+        except Exception:
+            pass
     except Exception as exc:
         logger.warning("写入 AI 调用日志失败: %s", exc)
 

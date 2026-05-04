@@ -249,7 +249,7 @@ def json_response(code=0, message="success", data=None):
 # -----------------
 
 @router.get("/instances", summary="获取实例列表")
-async def get_instances(
+def get_instances(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -270,7 +270,7 @@ async def get_instances(
 
 
 @router.post("/instances", summary="添加实例")
-async def create_instance(
+def create_instance(
     data: WechatInstanceCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -300,7 +300,7 @@ async def create_instance(
 
 
 @router.put("/instances/{instance_id}", summary="更新实例")
-async def update_instance(
+def update_instance(
     instance_id: int,
     data: WechatInstanceUpdate,
     db: Session = Depends(get_db),
@@ -324,7 +324,7 @@ async def update_instance(
 
 
 @router.delete("/instances/{instance_id}", summary="删除实例")
-async def delete_instance(
+def delete_instance(
     instance_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -531,7 +531,7 @@ async def sync_rooms(
 # -----------------
 
 @router.get("/listeners", summary="获取监听配置列表")
-async def get_listeners(
+def get_listeners(
     instanceId: Optional[int] = None,
     isEnabled: Optional[int] = None,
     keyword: Optional[str] = None,
@@ -587,7 +587,7 @@ async def get_listeners(
     })
 
 @router.put("/listeners/{listener_id}", summary="更新监听配置")
-async def update_listener(
+def update_listener(
     listener_id: int,
     data: WechatListenerUpdate,
     db: Session = Depends(get_db),
@@ -606,7 +606,7 @@ async def update_listener(
     return json_response(message="更新成功")
 
 @router.post("/listeners/batch", summary="批量更新监听状态")
-async def batch_update_listeners(
+def batch_update_listeners(
     data: WechatBatchUpdateListeners,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)

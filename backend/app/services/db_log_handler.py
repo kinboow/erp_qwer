@@ -132,6 +132,11 @@ class DatabaseLogHandler(logging.Handler):
                     "VALUES (:ts, :level, :service, :msg)"
                 ), entry)
             db.commit()
+            try:
+                from app.services.ws_notify import broadcast_sync
+                broadcast_sync("new_system_log")
+            except Exception:
+                pass
         except Exception:
             try:
                 db.rollback()

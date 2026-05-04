@@ -20,6 +20,30 @@
             <el-input v-model="form.erp_password" placeholder="ERP 登录密码" show-password />
           </el-form-item>
         </div>
+
+        <el-form-item label="账套二维码">
+          <div class="qr-upload-area">
+            <el-upload
+              :show-file-list="false"
+              :http-request="handleUploadQr"
+              :before-upload="handleBeforeUpload"
+              accept="image/*"
+            >
+              <div v-if="qrPreviewUrl" class="qr-preview">
+                <img :src="qrPreviewUrl" alt="账套二维码" class="qr-image" />
+                <div class="qr-overlay">
+                  <el-icon :size="20"><Upload /></el-icon>
+                  <span>重新上传</span>
+                </div>
+              </div>
+              <div v-else class="qr-placeholder" :class="{ 'is-uploading': uploading }">
+                <el-icon v-if="!uploading" :size="28"><Plus /></el-icon>
+                <el-icon v-else :size="28" class="is-loading"><Loading /></el-icon>
+                <span>{{ uploading ? '上传中…' : '点击上传账套二维码' }}</span>
+              </div>
+            </el-upload>
+          </div>
+        </el-form-item>
       </el-form>
       <div class="form-actions">
         <el-button type="primary" @click="handleTestConnection" :loading="testing" :disabled="!form.erp_base_url">
@@ -243,8 +267,7 @@ async function loadQrPreview() {
 }
 
 onMounted(async () => {
-  await loadConfig()
-  await loadStatus()
+  await Promise.all([loadConfig(), loadStatus()])
   if (form.erp_qr_image_path) await loadQrPreview()
 })
 

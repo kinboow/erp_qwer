@@ -50,29 +50,37 @@ _QR_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{3,}\|[A-Fa-f0-9]{8,64}$")
 # AI 提示词：解析发货表格图片
 # ---------------------------------------------------------------------------
 _SHIPPING_TABLE_PARSE_PROMPT = """\
-你是一个发货单表格识别专家。请仔细观察图片中的表格，提取以下信息：
+你是一个拣货单/发货单表格识别专家。
 
-对于表格中的每一行，提取：
-- product_no: 款号/货号
-- color: 颜色
-- sizes: 尺码与数量的对应关系，格式为 {"尺码": 数量}
+## 任务
+仅识别图片中**表格区域**的内容。表格外的任何内容（标题、二维码、客户信息、备注、页脚）一律忽略。
 
-请以 JSON 格式输出，格式如下：
+## 表格结构
+表格列从左到右依次为：款号、颜色，然后是多个尺码列（如 S、M、L、XL、2XL、3XL、4XL 等）。
+每个尺码列可能有两个子列（白色底和灰色底）。**只读取白色底（浅色底）子列中的数字作为数量，灰色底的列完全忽略。**
+如果尺码列没有分子列，直接读取该格数字。
+
+## 提取规则
+对于表格中每一行数据，提取：
+- product_no: 款号/货号（如有多行属于同一款号，每行分别输出）
+- color: 颜色名称
+- sizes: 仅白色底列的 {尺码: 数量} 键值对
+
+## 跳过规则
+- 跳过合计行、汇总行、小计行
+- 数量为 0 或空白的尺码不输出
+- 整行数量全为 0 的行跳过
+
+## 输出格式（严格 JSON）
 {
   "items": [
     {
       "product_no": "A1234",
       "color": "黑色",
-      "sizes": {"S": 10, "M": 20, "L": 15, "XL": 5}
+      "sizes": {"S": 10, "M": 20, "L": 15}
     }
   ]
 }
-
-注意：
-1. 只提取表格中有数据的行，跳过空行和合计行
-2. 数量为 0 或空的尺码不要输出
-3. 款号和颜色要准确识别，不要遗漏
-4. 如果有多个颜色的同款号，每个颜色一行
 """
 
 
@@ -96,6 +104,18 @@ def _dedupe_texts(values: list[str]) -> list[str]:
     for v in values:
         text_val = _normalize_qr_text(v)
         if text_val and text_val not in seen and _is_valid_qr_text(text_val):
+            seen.add(text_val)
+            result.append(text_val)
+    return result
+
+
+def _dedupe_texts_raw(values: list[str]) -> list[str]:
+    """去重但不做格式校验，保留所有非空二维码文本。"""
+    seen: set[str] = set()
+    result: list[str] = []
+    for v in values:
+        text_val = _normalize_qr_text(v)
+        if text_val and text_val not in seen:
             seen.add(text_val)
             result.append(text_val)
     return result
@@ -177,33 +197,34 @@ def _build_crop_variants(crop_bgr):
 
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    adaptive = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 8)
+    # 背景归一化：大 kernel 高斯模糊估计光照，消除褶皱阴影
+    bg = cv2.GaussianBlur(gray, (101, 101), 0)
+    import numpy as np
+    norm = np.clip(gray.astype(np.float32) / (bg.astype(np.float32) + 1) * 255, 0, 255).astype(np.uint8)
 
     variants = [
         ("color", crop_bgr),
-        ("gray", cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)),
         ("clahe", cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR)),
-        ("otsu", cv2.cvtColor(bw, cv2.COLOR_GRAY2BGR)),
-        ("adaptive", cv2.cvtColor(adaptive, cv2.COLOR_GRAY2BGR)),
+        ("norm", cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)),
     ]
 
     result = []
     for name, img in variants:
-        bordered = cv2.copyMakeBorder(img, 24, 24, 24, 24, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        bordered = cv2.copyMakeBorder(img, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=(255, 255, 255))
         result.append((name, bordered, cv2.cvtColor(bordered, cv2.COLOR_BGR2RGB)))
     return result
 
 
 def _iter_corner_crops(bgr_img):
+    """按优先级返回角落裁切：拣货单 QR 通常在右下 → 右上 → 左下 → 左上。"""
     h, w = bgr_img.shape[:2]
-    crop_w = max(int(w * 0.38), 160)
-    crop_h = max(int(h * 0.38), 160)
+    crop_w = max(int(w * 0.40), 200)
+    crop_h = max(int(h * 0.35), 200)
     boxes = [
-        ("top_left", 0, 0, min(w, crop_w), min(h, crop_h)),
+        ("bottom_right", max(0, w - crop_w), max(0, h - crop_h), w, h),
         ("top_right", max(0, w - crop_w), 0, w, min(h, crop_h)),
         ("bottom_left", 0, max(0, h - crop_h), min(w, crop_w), h),
-        ("bottom_right", max(0, w - crop_w), max(0, h - crop_h), w, h),
+        ("top_left", 0, 0, min(w, crop_w), min(h, crop_h)),
     ]
     for name, x1, y1, x2, y2 in boxes:
         crop = bgr_img[y1:y2, x1:x2]
@@ -211,13 +232,17 @@ def _iter_corner_crops(bgr_img):
             yield name, crop
 
 
+# 二维码识别总超时（秒）
+_QR_DECODE_TIMEOUT = 8.0
+
+
 def decode_qr_from_bytes(image_bytes: bytes) -> list[str]:
     """从图片字节解码二维码，返回解码文本列表。
 
     策略（逐层升级，任一层成功即返回）：
-    1. 全图 ZXing / pyzbar / OpenCV 快速扫描
-    2. 全图灰度/增强快速扫描
-    3. 四角区域快速扫描（适配拣货单二维码通常位于角落）
+    1. 全图 ZXing / pyzbar / OpenCV 快速扫描（新版打印在此秒出）
+    2. 全图 CLAHE 增强扫描
+    3. 四角区域裁切 + 放大 + 背景归一化 扫描
     """
     import cv2
     import numpy as np
@@ -232,37 +257,97 @@ def decode_qr_from_bytes(image_bytes: bytes) -> list[str]:
     h, w = cv_img.shape[:2]
     logger.info("二维码: 图片尺寸 %dx%d (%d bytes)", w, h, len(image_bytes))
 
-    # --- 1) 快速全图路径 ---
+    def _elapsed() -> float:
+        return time.perf_counter() - started_at
+
+    # --- 1) 快速全图路径（新版打印在此命中）---
     res = _decode_with_fast_engines(cv_img, rgb, "full")
     if res:
-        logger.info("二维码: 总耗时 %.3fs", time.perf_counter() - started_at)
+        logger.info("二维码: 总耗时 %.3fs", _elapsed())
         return res
 
+    # --- 2) 全图 CLAHE ---
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     clahe_bgr = cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR)
+    res = _decode_with_fast_engines(clahe_bgr, cv2.cvtColor(clahe_bgr, cv2.COLOR_BGR2RGB), "clahe")
+    if res:
+        logger.info("二维码: 总耗时 %.3fs", _elapsed())
+        return res
 
-    for label, bgr_variant in (("gray", gray_bgr), ("clahe", clahe_bgr)):
-        res = _decode_with_fast_engines(label=label, bgr_img=bgr_variant, rgb_img=cv2.cvtColor(bgr_variant, cv2.COLOR_BGR2RGB))
-        if res:
-            logger.info("二维码: 总耗时 %.3fs", time.perf_counter() - started_at)
-            return res
-
-    # --- 3) 四角区域快速扫描 ---
+    # --- 3) 四角区域裁切（优先右下角）---
     for corner_name, crop in _iter_corner_crops(cv_img):
-        for scale in (1, 2, 3, 4):
+        if _elapsed() > _QR_DECODE_TIMEOUT:
+            logger.warning("二维码: 超时 %.1fs，停止扫描", _elapsed())
+            break
+        for scale in (1, 2, 3):
+            if _elapsed() > _QR_DECODE_TIMEOUT:
+                break
             if scale == 1:
                 scaled = crop
             else:
                 scaled = cv2.resize(crop, (crop.shape[1] * scale, crop.shape[0] * scale), interpolation=cv2.INTER_LANCZOS4)
             for src_label, v_bgr, v_rgb in _build_crop_variants(scaled):
+                if _elapsed() > _QR_DECODE_TIMEOUT:
+                    break
                 res = _decode_with_fast_engines(v_bgr, v_rgb, f"corner:{corner_name}:{scale}x:{src_label}")
                 if res:
-                    logger.info("二维码: 总耗时 %.3fs", time.perf_counter() - started_at)
+                    logger.info("二维码: 总耗时 %.3fs", _elapsed())
                     return res
 
-    logger.warning("二维码: 所有引擎均未识别到，耗时 %.3fs", time.perf_counter() - started_at)
+    logger.warning("二维码: 所有引擎均未识别到，耗时 %.3fs", _elapsed())
+    return []
+
+
+def decode_qr_from_bytes_raw(image_bytes: bytes) -> list[str]:
+    """快速全图扫描，返回所有二维码原始文本（不做发货单格式校验）。"""
+    import cv2
+    import numpy as np
+
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if cv_img is None:
+        return []
+    rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+
+    raw_engine_calls = [
+        ("zxing", lambda: _zxing_decode(rgb)),
+        ("pyzbar", lambda: _pyzbar_decode(rgb)),
+        ("opencv", lambda: _opencv_qr_decode(cv_img)),
+    ]
+    all_texts: list[str] = []
+    for engine_name, fn in raw_engine_calls:
+        try:
+            res = fn()
+            all_texts.extend(res)
+        except Exception:
+            pass
+
+    # 各引擎返回的已经过 _dedupe_texts（格式校验），可能为空
+    # 再用原始方式重新跑一遍 pyzbar（最快），不做格式过滤
+    try:
+        from pyzbar.pyzbar import decode as pyzbar_decode
+        from PIL import Image as PILImage
+        pil = PILImage.fromarray(rgb)
+        results = pyzbar_decode(pil)
+        raw = _dedupe_texts_raw([r.data.decode("utf-8").strip() for r in results if r.data])
+        if raw:
+            return raw
+    except Exception:
+        pass
+
+    # 如果格式校验后的列表不为空，说明引擎能识别但格式不对不应走到这里
+    # 回退到 opencv 原始检测
+    try:
+        detector = _get_opencv_qr_detector()
+        ok, decoded_info, _, _ = detector.detectAndDecodeMulti(cv_img)
+        if ok and decoded_info:
+            raw = _dedupe_texts_raw([s.strip() for s in decoded_info if s.strip()])
+            if raw:
+                return raw
+    except Exception:
+        pass
+
     return []
 
 
@@ -294,10 +379,10 @@ def parse_qr_content(qr_text: str) -> dict[str, str]:
 # 纸张ID去重检查
 # ---------------------------------------------------------------------------
 def is_paper_used(db: Session, paper_id: str) -> bool:
-    """检查纸张ID是否已使用"""
+    """检查纸张ID是否已使用（AI识别完成且成功下了发货单才算已使用）"""
     ensure_downstream_support_tables(db)
     row = db.execute(
-        text("SELECT id FROM shipping_scan_records WHERE paper_id = :pid LIMIT 1"),
+        text("SELECT id FROM shipping_scan_records WHERE paper_id = :pid AND scan_status = 'success' LIMIT 1"),
         {"pid": paper_id},
     ).first()
     return row is not None
@@ -549,20 +634,13 @@ async def ai_parse_shipping_table(image_bytes: bytes, db: Session) -> dict[str, 
         ]},
     ]
 
-    result = await ai_order_parser._chat(vision_model, messages, db=db, caller="shipping_table_parse")
-    text_content = ""
-    choices = result.get("choices") or []
-    if choices:
-        msg = choices[0].get("message") or {}
-        text_content = msg.get("content") or ""
-        # 深度思考模型可能包含 reasoning_content
-        if not text_content:
-            text_content = msg.get("reasoning_content") or ""
+    # _chat() 内部已完成：API调用 → 提取 content → _extract_json() → 返回 dict
+    parsed = await ai_order_parser._chat(vision_model, messages, db=db, caller="shipping_table_parse")
 
-    if not text_content:
+    if not parsed or not isinstance(parsed, dict):
         raise AIOrderParserError("AI视觉模型未返回有效内容")
 
-    return ai_order_parser._extract_json(text_content)
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +803,7 @@ async def send_notification_to_groups(
     # 查找所有通知群
     try:
         rows = db.execute(
-            text("SELECT room_id FROM downstream_customer_wechat_rooms WHERE room_type = 'notification'")
+            text("SELECT room_id, room_name FROM downstream_customer_wechat_rooms WHERE room_type = 'notification'")
         ).mappings().all()
     except Exception:
         rows = []
@@ -774,21 +852,18 @@ def resolve_shipping_room(db: Session, room_id: str) -> Optional[dict[str, str]]
     if not room_id:
         return None
     rid_clean = room_id[2:] if room_id.startswith("R:") else room_id
-    candidates = [room_id, rid_clean] if room_id != rid_clean else [room_id]
     try:
-        placeholders = ", ".join(f":rid{i}" for i in range(len(candidates)))
-        params: dict[str, str] = {f"rid{i}": c for i, c in enumerate(candidates)}
         row = db.execute(
             text(
-                f"SELECT room_id, room_name FROM downstream_customer_wechat_rooms "
-                f"WHERE room_id IN ({placeholders}) AND room_type = 'shipping' LIMIT 1"
+                "SELECT room_id, room_name FROM downstream_customer_wechat_rooms "
+                "WHERE room_id IN (:rid1, :rid2) AND room_type = 'shipping' LIMIT 1"
             ),
-            params,
+            {"rid1": rid_clean, "rid2": f"R:{rid_clean}"},
         ).mappings().first()
         if row:
             return {"room_id": row["room_id"], "room_name": row["room_name"] or ""}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("resolve_shipping_room 查询异常: %s", exc)
     return None
 
 
@@ -815,15 +890,16 @@ def _mark_msg_recognized(msg_log_id: int) -> None:
 async def _notify_scan_failure(
     room_id: str, sender_id: str, msg_log_id: int,
     reason: str, instance_id: str = "",
+    source: str | int | None = None,
 ) -> None:
-    """扫码失败时：在发货群@发送人提示 + 通知群推送"""
+    """扫码失败时：在发货群@发送人提示（引用原图消息） + 通知群推送"""
     db = SessionLocal()
     try:
-        # 1) 在发货群@发送人
+        # 1) 在发货群@发送人（引用原消息）
         at_list = [sender_id] if sender_id else None
         tip = f"❌ 发货单识别失败\n原因：{reason}\n请重新拍照，确保图片清晰、二维码完整可见"
         try:
-            await send_room_at(db, room_id, tip, at_list=at_list)
+            await send_room_at(db, room_id, tip, at_list=at_list, source=source)
         except Exception as exc:
             logger.warning("[发货扫码] 发货群通知失败: %s", exc)
 
@@ -864,6 +940,12 @@ async def handle_shipping_scan(
         _processed_scans.pop(k, None)
 
     record_id = None
+    # 提取原始消息的 server_id，用于回复时引用该消息
+    _msg_data = (payload.get("message") or {}).get("data") or payload.get("data") or {}
+    if isinstance(_msg_data, str):
+        _msg_data = {}
+    source_msg_id = _msg_data.get("server_id") or _msg_data.get("svr_id") or ""
+
     try:
         logger.info("[发货扫码] 收到图片 room=%s sender=%s log_id=%d", room_id, sender_id, msg_log_id)
 
@@ -876,16 +958,27 @@ async def handle_shipping_scan(
 
         if not image_bytes:
             logger.info("[发货扫码] 图片下载失败 log_id=%d", msg_log_id)
-            await _notify_scan_failure(room_id, sender_id, msg_log_id, "图片下载失败", instance_id)
+            await _notify_scan_failure(room_id, sender_id, msg_log_id, "图片下载失败", instance_id, source=source_msg_id)
             # 不标记 ai_recognized，留给补扫重试
             return
 
         # 2. 二维码识别（非AI）
         qr_texts = decode_qr_from_bytes(image_bytes)
         if not qr_texts:
-            logger.info("[发货扫码] 未识别到二维码 log_id=%d", msg_log_id)
-            await _notify_scan_failure(room_id, sender_id, msg_log_id, "二维码识别失败，请拍清晰", instance_id)
-            # 不标记 ai_recognized，留给补扫重试
+            # 尝试获取原始二维码文本（未经格式校验）
+            raw_texts = decode_qr_from_bytes_raw(image_bytes)
+            if raw_texts:
+                logger.info("[发货扫码] 识别到非发货单二维码 log_id=%d raw=%s", msg_log_id, raw_texts[:3])
+                await _notify_scan_failure(
+                    room_id, sender_id, msg_log_id,
+                    "该二维码不是拣货单/配货单，请扫描正确的发货单",
+                    instance_id, source=source_msg_id,
+                )
+                _mark_msg_recognized(msg_log_id)
+            else:
+                logger.info("[发货扫码] 未识别到二维码 log_id=%d", msg_log_id)
+                await _notify_scan_failure(room_id, sender_id, msg_log_id, "二维码识别失败，请拍清晰", instance_id, source=source_msg_id)
+                # 不标记 ai_recognized，留给补扫重试
             return
 
         qr_text = qr_texts[0]  # 取第一个二维码
@@ -895,6 +988,11 @@ async def handle_shipping_scan(
 
         if not order_no or not paper_id:
             logger.warning("[发货扫码] 二维码内容格式异常: %s", qr_text)
+            await _notify_scan_failure(
+                room_id, sender_id, msg_log_id,
+                "该二维码不是拣货单/配货单，请扫描正确的发货单",
+                instance_id, source=source_msg_id,
+            )
             _mark_msg_recognized(msg_log_id)
             return
 
@@ -905,6 +1003,11 @@ async def handle_shipping_scan(
         try:
             if is_paper_used(db, paper_id):
                 logger.info("[发货扫码] 纸张ID已使用，跳过 paper=%s", paper_id)
+                await _notify_scan_failure(
+                    room_id, sender_id, msg_log_id,
+                    f"此张图片已被识别过，请勿重复识别！(订单:{order_no})",
+                    instance_id, source=source_msg_id,
+                )
                 _mark_msg_recognized(msg_log_id)
                 return
 
@@ -981,6 +1084,15 @@ async def handle_shipping_scan(
                 db.close()
             _mark_msg_recognized(msg_log_id)
             return
+
+        # 6.5 即时同步刚创建的发货单到本地数据库
+        if shipment_no:
+            try:
+                from app.services.erp_sync import sync_single_shipment
+                sync_result = await sync_single_shipment(shipment_no)
+                logger.info("[发货扫码] 即时同步发货单 %s 结果: %s", shipment_no, sync_result)
+            except Exception as exc:
+                logger.warning("[发货扫码] 即时同步发货单 %s 失败（不影响主流程）: %s", shipment_no, exc)
 
         # 7. 计算发货状态
         shipping_status = calc_shipping_status(order_detail, parsed_items)

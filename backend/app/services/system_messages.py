@@ -40,9 +40,16 @@ CREATE TABLE IF NOT EXISTS system_messages (
 """
 
 
+_sys_msg_table_ensured = False
+
+
 def ensure_table(db: Session) -> None:
+    global _sys_msg_table_ensured
+    if _sys_msg_table_ensured:
+        return
     db.execute(text(_DDL))
     db.commit()
+    _sys_msg_table_ensured = True
 
 
 # ---------------------------------------------------------------------------

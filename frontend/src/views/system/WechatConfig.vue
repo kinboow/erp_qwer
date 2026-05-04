@@ -222,7 +222,7 @@ const loggedInCount = computed(() => instances.value.filter(item => item.login_s
 const runningCount = computed(() => runningInstances.value.length)
 const boundInstanceInfo = computed(() => {
   if (!selectedWxid.value) return null
-  return instances.value.find(i => i.wxid === selectedWxid.value) || null
+  return instances.value.find(i => i.wxid === selectedWxid.value) || { wxid: selectedWxid.value, nickname: '' }
 })
 
 watch(
@@ -273,6 +273,29 @@ async function saveConfigToDb(extraFields = {}) {
   configLoaded.value = true
 }
 
+async function ensureInstanceRecord(inst) {
+  const wxid = (inst?.wxid || selectedWxid.value || '').trim()
+  if (!wxid) return
+  const existing = await getInstances()
+  const list = Array.isArray(existing.data) ? existing.data : []
+  const found = list.find(i => i.wxid === wxid)
+  const payload = {
+    wxid,
+    name: inst?.nickname || inst?.name || found?.name || wxid,
+    api_base_url: apiBaseUrl.value,
+    api_key: configForm.apiKey || null
+  }
+  if (found?.id) {
+    await updateInstance(found.id, {
+      name: payload.name,
+      api_base_url: payload.api_base_url,
+      api_key: payload.api_key
+    })
+  } else {
+    await createInstance(payload)
+  }
+}
+
 async function copyText(text) {
   if (!text) return
   try {
@@ -314,25 +337,8 @@ async function handleSave() {
   saving.value = true
   try {
     if (selectedWxid.value) {
-      const existing = await getInstances()
-      const list = existing.data || []
-      const found = list.find(i => i.wxid === selectedWxid.value)
-
-      if (found) {
-        await updateInstance(found.id, {
-          name: found.name,
-          api_base_url: apiBaseUrl.value,
-          api_key: configForm.apiKey || null
-        })
-      } else {
-        const inst = instances.value.find(i => i.wxid === selectedWxid.value)
-        await createInstance({
-          wxid: selectedWxid.value,
-          name: inst?.nickname || selectedWxid.value,
-          api_base_url: apiBaseUrl.value,
-          api_key: configForm.apiKey || null
-        })
-      }
+      const inst = instances.value.find(i => i.wxid === selectedWxid.value)
+      await ensureInstanceRecord(inst)
     }
 
     await saveConfigToDb()
@@ -360,24 +366,41 @@ async function handleFetchInstances() {
       data: { api_base_url: apiBaseUrl.value, api_key: configForm.apiKey || null }
     })
     instances.value = Array.isArray(res.data) ? res.data : []
-    if (instances.value.length > 0 && (!selectedWxid.value || !instances.value.some(item => item.wxid === selectedWxid.value))) {
+    // 仅在用户从未选择过实例时自动选中，不覆盖已保存的选择
+    if (instances.value.length > 0 && !selectedWxid.value) {
       const attached = instances.value.find(i => i.login_status && i.wxid) || instances.value.find(i => i.attached && i.wxid) || instances.value.find(i => i.wxid)
-      if (attached) selectedWxid.value = attached.wxid
+      if (attached) {
+        selectedWxid.value = attached.wxid
+        ensureInstanceRecord(attached).catch(() => {})
+        saveConfigToDb().catch(() => {})
+      }
+    }
+    if (selectedWxid.value) {
+      const current = instances.value.find(i => i.wxid === selectedWxid.value)
+      if (current) {
+        ensureInstanceRecord(current).catch(() => {})
+      }
     }
   } catch (error) {
-    ElMessage.error('获取实例列表失败: ' + (error?.response?.data?.message || error.message))
-    instances.value = []
+    ElMessage.warning('获取实例列表失败，使用上次保存的配置')
+    // 不清空 instances，保留已绑定的实例信息可见
   } finally {
     fetchingInstances.value = false
   }
 }
 
-function handleSelectInstance(inst) {
+async function handleSelectInstance(inst) {
   if (!inst.wxid) {
     ElMessage.warning('该实例尚未登录，暂时无法绑定')
     return
   }
   selectedWxid.value = inst.wxid
+  try {
+    await ensureInstanceRecord(inst)
+    await saveConfigToDb()
+  } catch {
+    saveConfigToDb().catch(() => {})
+  }
 }
 
 async function handleAddInstance() {

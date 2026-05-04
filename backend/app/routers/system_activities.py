@@ -91,7 +91,7 @@ def _build_timeline(db: Session, keyword: Optional[str] = None) -> list[dict]:
 
 
 @router.get("", summary="获取系统动态时间线（分页）")
-async def api_list(
+def api_list(
     keyword: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),

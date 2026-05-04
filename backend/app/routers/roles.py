@@ -38,7 +38,7 @@ def build_permission_tree(permissions, parent_id=0):
 
 
 @router.get("", summary="获取角色列表")
-async def get_role_list(
+def get_role_list(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, alias="page_size", ge=1, le=100),
     keyword: Optional[str] = Query(None),
@@ -77,7 +77,7 @@ async def get_role_list(
 
 
 @router.get("/all", summary="获取所有角色")
-async def get_all_roles(
+def get_all_roles(
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:role:list"))
 ):
@@ -96,7 +96,7 @@ async def get_all_roles(
 
 
 @router.get("/permissions", summary="获取权限树")
-async def get_permissions(
+def get_permissions(
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:role:list"))
 ):
@@ -105,7 +105,7 @@ async def get_permissions(
 
 
 @router.get("/{role_id}", summary="获取角色详情")
-async def get_role_by_id(
+def get_role_by_id(
     role_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:role:list"))
@@ -128,7 +128,7 @@ async def get_role_by_id(
 
 
 @router.post("", summary="创建角色")
-async def create_role(
+def create_role(
     payload: RoleCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:role:add"))
@@ -149,7 +149,7 @@ async def create_role(
 
 
 @router.put("/{role_id}", summary="更新角色")
-async def update_role(
+def update_role(
     role_id: int,
     payload: RoleUpdate,
     db: Session = Depends(get_db),
@@ -183,7 +183,7 @@ async def update_role(
 
 
 @router.delete("/{role_id}", summary="删除角色")
-async def delete_role(
+def delete_role(
     role_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:role:delete"))

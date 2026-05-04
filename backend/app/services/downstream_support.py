@@ -19,7 +19,13 @@ def _add_column_if_not_exists(db: Session, table: str, column: str, definition: 
         logger.debug("add column %s.%s skipped: %s", table, column, e)
 
 
+_tables_ensured = False
+
+
 def ensure_downstream_support_tables(db: Session):
+    global _tables_ensured
+    if _tables_ensured:
+        return
     db.execute(text(
         "CREATE TABLE IF NOT EXISTS downstream_customers ("
         "id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
@@ -170,7 +176,60 @@ def ensure_downstream_support_tables(db: Session):
         ))
     except Exception:
         pass
+    # 修复 UNIQUE KEY：确保是 uk_room_id(room_id) 而非错误的组合键
+    try:
+        has_wrong_uk = db.execute(text(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = 'downstream_customer_wechat_rooms' "
+            "AND index_name = 'uk_customer_room'"
+        )).scalar()
+        if has_wrong_uk:
+            # 先清理重复数据
+            db.execute(text(
+                "DELETE t1 FROM downstream_customer_wechat_rooms t1 "
+                "INNER JOIN downstream_customer_wechat_rooms t2 "
+                "ON t1.room_id = t2.room_id AND t1.id > t2.id"
+            ))
+            db.execute(text("ALTER TABLE downstream_customer_wechat_rooms DROP INDEX uk_customer_room"))
+            db.execute(text("ALTER TABLE downstream_customer_wechat_rooms ADD UNIQUE KEY uk_room_id (room_id)"))
+            logger.info("修复 downstream_customer_wechat_rooms UNIQUE KEY: uk_customer_room → uk_room_id")
+    except Exception as e:
+        logger.debug("UNIQUE KEY 修复跳过: %s", e)
     _add_column_if_not_exists(db, "downstream_order_reviews", "msg_log_id", "BIGINT UNSIGNED NULL")
     # 审核记录唯一标识（用于 ERP 备注追踪）
     _add_column_if_not_exists(db, "downstream_order_reviews", "review_uid", "VARCHAR(30) DEFAULT '' AFTER id")
+
+    # ---------- 纸张打印记录表 ----------
+    db.execute(text(
+        "CREATE TABLE IF NOT EXISTS paper_print_records ("
+        "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
+        "paper_id VARCHAR(200) NOT NULL COMMENT '纸张唯一ID (= page_id)', "
+        "order_no VARCHAR(100) NOT NULL DEFAULT '', "
+        "doc_type VARCHAR(50) NOT NULL DEFAULT 'picking' COMMENT 'picking=拣货单, unshipped=待发货单', "
+        "barcode_content VARCHAR(300) NOT NULL DEFAULT '' COMMENT '二维码内容 order_no|page_id', "
+        "print_job_id BIGINT UNSIGNED NULL COMMENT '关联 print_queue.id', "
+        "printed_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+        "UNIQUE KEY uk_paper_id (paper_id), "
+        "INDEX idx_order_no (order_no), "
+        "INDEX idx_doc_type (doc_type), "
+        "INDEX idx_printed_at (printed_at)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ))
+
+    # 将 shipping_scan_records 的 UNIQUE KEY(paper_id) 改为普通 INDEX
+    # 以便同一纸张扫码失败后可以重试（只有 success 才算已使用）
+    try:
+        has_uk = db.execute(text(
+            "SELECT COUNT(*) FROM information_schema.statistics "
+            "WHERE table_schema = DATABASE() AND table_name = 'shipping_scan_records' "
+            "AND index_name = 'uk_paper_id' AND non_unique = 0"
+        )).scalar()
+        if has_uk:
+            db.execute(text("ALTER TABLE shipping_scan_records DROP INDEX uk_paper_id"))
+            db.execute(text("ALTER TABLE shipping_scan_records ADD INDEX idx_paper_id (paper_id)"))
+            logger.info("shipping_scan_records: UNIQUE KEY uk_paper_id → INDEX idx_paper_id")
+    except Exception as e:
+        logger.debug("shipping_scan_records UNIQUE KEY 迁移跳过: %s", e)
+
     db.commit()
+    _tables_ensured = True

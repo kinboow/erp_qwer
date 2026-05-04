@@ -61,8 +61,11 @@ async def send_room_at(
     content: str,
     at_list: list[str] | None = None,
     instance_id: Optional[int] = None,
+    source: str | int | None = None,
 ) -> dict[str, Any]:
-    """发送群@消息。room_id 不含 R: 前缀时自动补全。"""
+    """发送群@消息。room_id 不含 R: 前缀时自动补全。
+    source: 引用消息的 server_id，传入后消息将引用该条原始消息。
+    """
     runtime = _resolve_runtime(db, instance_id)
     if not runtime.get("api_base_url") or not runtime.get("wxid"):
         logger.warning("缺少企微运行时配置，无法发送群回复")
@@ -75,10 +78,13 @@ async def send_room_at(
 
     if at_list:
         url = f"{api_base}/api/{wxid}/send/room_at"
-        body = {"conversation_id": conversation_id, "content": content, "at_list": at_list}
+        body: dict[str, Any] = {"conversation_id": conversation_id, "content": content, "at_list": at_list}
     else:
         url = f"{api_base}/api/{wxid}/send/text"
         body = {"conversation_id": conversation_id, "content": content}
+
+    if source:
+        body["source"] = str(source)
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:

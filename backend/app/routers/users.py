@@ -13,7 +13,7 @@ router = APIRouter(tags=["用户管理"])
 
 
 @router.get("", response_model=PageResponse, summary="获取用户列表")
-async def get_user_list(
+def get_user_list(
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(10, ge=1, le=100, description="每页数量"),
     keyword: Optional[str] = Query(None, description="搜索关键词"),
@@ -93,7 +93,7 @@ async def get_user_list(
 
 
 @router.get("/roles/options", response_model=dict, summary="用户管理角色选项")
-async def get_user_role_options(
+def get_user_role_options(
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:user:edit"))
 ):
@@ -113,7 +113,7 @@ async def get_user_role_options(
 
 
 @router.get("/{user_id}", response_model=UserResponse, summary="获取用户详情")
-async def get_user_by_id(
+def get_user_by_id(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:user:list"))
@@ -147,7 +147,7 @@ async def get_user_by_id(
 
 
 @router.post("", response_model=dict, summary="创建用户")
-async def create_user(
+def create_user(
     user_data: UserCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:user:add"))
@@ -194,7 +194,7 @@ async def create_user(
 
 
 @router.put("/{user_id}", response_model=dict, summary="更新用户")
-async def update_user(
+def update_user(
     user_id: int,
     user_data: UserUpdate,
     db: Session = Depends(get_db),
@@ -244,7 +244,7 @@ async def update_user(
 
 
 @router.delete("/{user_id}", response_model=dict, summary="删除用户")
-async def delete_user(
+def delete_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(check_permission("system:user:delete"))

@@ -110,7 +110,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { getAiCallLogs } from '@/api/aiConfig'
 
@@ -167,7 +167,43 @@ function viewDetail(row) {
   detailVisible.value = true
 }
 
-onMounted(fetchLogs)
+let notifyWs = null
+let reconnectTimer = null
+
+function connectNotifyWs() {
+  if (notifyWs && notifyWs.readyState <= 1) return
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  notifyWs = new WebSocket(`${proto}://${location.host}/ws/notify`)
+  notifyWs.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data)
+      if (msg.event === 'new_ai_call_log') fetchLogs()
+    } catch {}
+  }
+  notifyWs.onclose = () => {
+    reconnectTimer = setTimeout(connectNotifyWs, 3000)
+  }
+  notifyWs.onerror = () => { notifyWs?.close() }
+}
+
+function disconnectNotifyWs() {
+  if (reconnectTimer) clearTimeout(reconnectTimer)
+  reconnectTimer = null
+  if (notifyWs) {
+    notifyWs.onclose = null
+    notifyWs.close()
+    notifyWs = null
+  }
+}
+
+onMounted(() => {
+  fetchLogs()
+  connectNotifyWs()
+})
+
+onUnmounted(() => {
+  disconnectNotifyWs()
+})
 </script>
 
 <style scoped>

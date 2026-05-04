@@ -26,7 +26,7 @@ def _ok(data=None, message="success"):
 
 
 @router.get("", summary="获取系统消息列表")
-async def api_list(
+def api_list(
     level: Optional[str] = Query(None),
     source: Optional[str] = Query(None),
     is_read: Optional[int] = Query(None),
@@ -44,7 +44,7 @@ async def api_list(
 
 
 @router.get("/unread-count", summary="获取未读系统消息数量")
-async def api_unread_count(
+def api_unread_count(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -53,7 +53,7 @@ async def api_unread_count(
 
 
 @router.put("/{message_id}/read", summary="标记单条消息为已读")
-async def api_mark_read(
+def api_mark_read(
     message_id: int,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -63,7 +63,7 @@ async def api_mark_read(
 
 
 @router.put("/read-all", summary="全部标记为已读")
-async def api_mark_all_read(
+def api_mark_all_read(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

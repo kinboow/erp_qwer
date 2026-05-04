@@ -157,6 +157,21 @@ export const saveWechatGlobalConfig = (data) => {
   })
 }
 
+// 获取已同步到数据库的群聊列表（不调用外部 API，速度快）
+export const getSyncedRooms = () => {
+  return request({
+    url: '/api/wechat/rooms/synced',
+    method: 'get'
+  })
+}
+
+export const getRoomsAllStatus = () => {
+  return request({
+    url: '/api/wechat/rooms/all-status',
+    method: 'get'
+  })
+}
+
 // 获取所有客户群去重成员
 export const getCustomerRoomMembers = () => {
   return request({

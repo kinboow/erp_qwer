@@ -83,9 +83,16 @@ CREATE TABLE IF NOT EXISTS at_order_contexts (
 """
 
 
+_at_order_tables_ensured = False
+
+
 def ensure_at_order_tables(db: Session) -> None:
+    global _at_order_tables_ensured
+    if _at_order_tables_ensured:
+        return
     db.execute(text(_DDL_AT_ORDER_CONTEXTS))
     db.commit()
+    _at_order_tables_ensured = True
 
 
 # ---------------------------------------------------------------------------
@@ -1174,13 +1181,13 @@ async def rescan_unrecognized_messages() -> None:
                     db3.close()
 
                 if shipping_room and message_type in ("image", "img", "picture"):
-                    # 递增重试计数，超过2次不再重试
+                    # 递增重试计数，每次启动最多补扫1次，累计超过3次启动仍失败则放弃
                     db_cnt = SessionLocal()
                     try:
                         count = increment_rescan_count(db_cnt, msg_id)
                     finally:
                         db_cnt.close()
-                    if count > 2:
+                    if count > 3:
                         logger.info("[启动补扫] 发货扫码已重试%d次，放弃 id=%d", count, msg_id)
                         _mark_msg_recognized(msg_id)
                         # 通知群：已放弃

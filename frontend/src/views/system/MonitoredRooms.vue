@@ -194,6 +194,10 @@ async function loadRooms() {
   }
 }
 
+defineExpose({
+  reload: loadRooms
+})
+
 async function fetchMembers(roomId) {
   if (memberCache[roomId]) return
   memberLoading.value = true

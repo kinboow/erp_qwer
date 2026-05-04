@@ -431,9 +431,10 @@ function connectNotifyWs() {
   notifyWs.onmessage = (evt) => {
     try {
       const msg = JSON.parse(evt.data)
-      if (msg.event === 'new_message_log' && activeTab.value === 'message') {
-        fetchMessageLogs()
-      }
+      const tab = activeTab.value
+      if (msg.event === 'new_system_log' && tab === 'system') fetchSystemLogs()
+      else if (msg.event === 'new_operation_log' && tab === 'operation') fetchOpLogs()
+      else if (msg.event === 'new_message_log' && tab === 'message') fetchMessageLogs()
     } catch {}
   }
   notifyWs.onclose = () => {

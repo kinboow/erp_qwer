@@ -58,7 +58,13 @@ CREATE TABLE IF NOT EXISTS picking_print_pages (
 """
 
 
+_picking_print_tables_ensured = False
+
+
 def ensure_print_tables(db: Session) -> None:
+    global _picking_print_tables_ensured
+    if _picking_print_tables_ensured:
+        return
     db.execute(text(_DDL_PRINT_JOBS))
     db.execute(text(_DDL_PRINT_PAGES))
     # 兼容已有表：追加 status 列
@@ -70,6 +76,7 @@ def ensure_print_tables(db: Session) -> None:
     except Exception:
         pass
     db.commit()
+    _picking_print_tables_ensured = True
 
 
 # ---------------------------------------------------------------------------

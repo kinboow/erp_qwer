@@ -37,9 +37,16 @@ CREATE TABLE IF NOT EXISTS system_activities (
 """
 
 
+_activities_table_ensured = False
+
+
 def ensure_table(db: Session) -> None:
+    global _activities_table_ensured
+    if _activities_table_ensured:
+        return
     db.execute(text(_DDL))
     db.commit()
+    _activities_table_ensured = True
 
 
 # ---------------------------------------------------------------------------
