@@ -198,6 +198,9 @@ def ensure_downstream_support_tables(db: Session):
     _add_column_if_not_exists(db, "downstream_order_reviews", "msg_log_id", "BIGINT UNSIGNED NULL")
     # 审核记录唯一标识（用于 ERP 备注追踪）
     _add_column_if_not_exists(db, "downstream_order_reviews", "review_uid", "VARCHAR(30) DEFAULT '' AFTER id")
+    # 订单意图分类（new=新下单 / replace=替换旧单 / append=追加）
+    _add_column_if_not_exists(db, "downstream_order_reviews", "order_intent", "VARCHAR(20) DEFAULT '' COMMENT 'new/replace/append'")
+    _add_column_if_not_exists(db, "downstream_order_reviews", "order_intent_reason", "VARCHAR(500) DEFAULT '' COMMENT 'AI 分类理由'")
 
     # ---------- 纸张打印记录表 ----------
     db.execute(text(
@@ -230,6 +233,32 @@ def ensure_downstream_support_tables(db: Session):
             logger.info("shipping_scan_records: UNIQUE KEY uk_paper_id → INDEX idx_paper_id")
     except Exception as e:
         logger.debug("shipping_scan_records UNIQUE KEY 迁移跳过: %s", e)
+
+    # ---------- 挂起报货会话表（信息不完整时等待补全） ----------
+    db.execute(text(
+        "CREATE TABLE IF NOT EXISTS pending_order_sessions ("
+        "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
+        "session_key VARCHAR(250) NOT NULL COMMENT 'room_id:sender_id 唯一标识', "
+        "room_id VARCHAR(100) NOT NULL, "
+        "sender_id VARCHAR(100) NOT NULL, "
+        "instance_id VARCHAR(100) DEFAULT '', "
+        "customer_id INT UNSIGNED NULL, "
+        "customer_name VARCHAR(255) DEFAULT '', "
+        "missing_fields JSON NOT NULL COMMENT '[\"颜色\",\"尺码\"]', "
+        "original_context JSON NOT NULL COMMENT '原始 context_messages', "
+        "original_payload LONGTEXT NULL COMMENT '原始 callback_payload', "
+        "followup_messages JSON NULL COMMENT '后续补充消息列表', "
+        "status VARCHAR(30) NOT NULL DEFAULT 'waiting' COMMENT 'waiting/completed/expired/cancelled', "
+        "ai_reason VARCHAR(500) DEFAULT '' COMMENT 'validate_order 返回的 reason', "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+        "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+        "expires_at DATETIME NOT NULL COMMENT '超时时间', "
+        "UNIQUE KEY uk_session_key (session_key), "
+        "INDEX idx_room_id (room_id), "
+        "INDEX idx_status (status), "
+        "INDEX idx_expires_at (expires_at)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ))
 
     db.commit()
     _tables_ensured = True

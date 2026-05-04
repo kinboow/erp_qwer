@@ -95,6 +95,73 @@ _ORDER_PARSER_CATALOG_SUFFIX = """
 {catalog_text}
 """
 
+# ==========================================================================
+# 补全智能体 — Order Completion Agent（判断后续消息是否补全了缺失字段）
+# ==========================================================================
+ORDER_COMPLETION_SYSTEM_PROMPT = """你是一个服装行业报货信息补全判断助手。
+
+背景：客户之前发送了一条报货信息，但缺少以下必要字段：
+{missing_fields}
+
+客户的原始报货内容如下：
+{original_summary}
+
+你的任务：分析客户发来的新消息，结合原始报货内容，判断新消息是否补充了缺失的字段。
+
+判断规则：
+1. 如果新消息明确提供了部分或全部缺失字段的值，把它们标记为已补全
+2. 如果新消息与报货无关（闲聊、问候等），标记为无关消息
+3. 客户可能在多条消息中逐步补全，你需要综合所有后续消息判断
+
+四个必要字段说明：
+- 款号：产品编号/货号（如 82761、A1234）
+- 颜色：产品颜色（如 黑色、白色、红色）
+- 尺码：尺码信息（如 S、M、L、XL、均码）
+- 数量：订购数量（如 10件、5件）
+
+严格只返回 JSON，不要返回 markdown：
+{
+  "still_missing": ["尺码"],
+  "filled_fields": ["颜色"],
+  "is_complete": false,
+  "is_irrelevant": false,
+  "reason": "客户补充了颜色为黑色，但仍缺少尺码信息"
+}
+"""
+
+# ==========================================================================
+# 订单意图分类智能体 — Order Intent Classifier（新下单 vs 替换旧单）
+# ==========================================================================
+ORDER_CLASSIFIER_SYSTEM_PROMPT = """你是一个服装行业订单意图判断助手。
+
+客户在群里发送了一条报货信息（图片或表格），你需要结合报货前后的聊天上下文，判断这笔订单的意图。
+
+判断规则：
+
+【新下单 → intent="new"】
+- 没有任何提及替换、修改、取消之前订单的上下文
+- 正常的新订单报货
+
+【替换旧单 → intent="replace"】
+- 报货前后的消息中提到了替换、修改、换单、重新下、取消之前的、作废之前的等意思
+- 例如："之前那个不要了"、"换成这个"、"重新报一下"、"把昨天的单改一下"、"这个替换之前的"
+
+【补充/追加 → intent="append"】
+- 报货前后的消息表明这是对之前订单的补充或追加
+- 例如："再加一点"、"补几件"、"追加"
+
+分析消息时注意：
+- 重点关注报货消息前后 2-3 条消息的上下文
+- 如果没有明确的替换/追加意图，默认为新下单
+
+严格只返回 JSON，不要返回 markdown：
+{
+  "intent": "new",
+  "confidence": "high",
+  "reason": "没有提及替换或修改旧单的上下文，判断为新订单"
+}
+"""
+
 
 class AIOrderParser:
     def __init__(self) -> None:
@@ -338,9 +405,12 @@ class AIOrderParser:
     # ------------------------------------------------------------------
     def _build_multimodal_parts(
         self, context_messages: list[dict[str, Any]],
+        prefix: str = "",
     ) -> list[dict[str, Any]]:
         """将统一消息列表转为 OpenAI 多模态 content parts"""
         parts: list[dict[str, Any]] = []
+        if prefix:
+            parts.append({"type": "text", "text": prefix})
         for idx, msg in enumerate(context_messages, 1):
             msg_type = msg.get("type", "text")
             if msg_type == "text":
@@ -411,6 +481,119 @@ class AIOrderParser:
         db: Optional[Session] = None,
     ) -> dict[str, Any]:
         return await self.validate_order(context_messages, db=db)
+
+    # ------------------------------------------------------------------
+    # 补全智能体：判断后续消息是否补全了原始报货缺失的字段
+    # ------------------------------------------------------------------
+    async def check_completion(
+        self,
+        missing_fields: list[str],
+        original_summary: str,
+        followup_messages: list[dict[str, Any]],
+        db: Optional[Session] = None,
+    ) -> dict[str, Any]:
+        """判断后续消息是否补全了原始报货中缺失的字段。
+
+        参数:
+            missing_fields: 缺失字段列表 (如 ["颜色", "尺码"])
+            original_summary: 原始报货内容摘要
+            followup_messages: 后续消息列表 (context_messages 格式)
+
+        返回:
+            {
+                "still_missing": ["尺码"],
+                "filled_fields": ["颜色"],
+                "is_complete": false,
+                "is_irrelevant": false,
+                "reason": "..."
+            }
+        """
+        cfg = self._load_config(db)
+        self._ensure_enabled(cfg)
+
+        system_prompt = ORDER_COMPLETION_SYSTEM_PROMPT.format(
+            missing_fields="、".join(missing_fields),
+            original_summary=original_summary,
+        )
+
+        has_image = any(m.get("type") == "image" for m in followup_messages)
+        model = cfg["vision_model"] if has_image else cfg["model"]
+
+        user_parts = self._build_multimodal_parts(followup_messages, prefix="以下是客户发来的新消息：")
+
+        try:
+            result = await self._chat(
+                model,
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_parts},
+                ],
+                db=db,
+                caller="check_completion",
+            )
+            return {
+                "still_missing": list(result.get("still_missing") or []),
+                "filled_fields": list(result.get("filled_fields") or []),
+                "is_complete": bool(result.get("is_complete", False)),
+                "is_irrelevant": bool(result.get("is_irrelevant", False)),
+                "reason": str(result.get("reason", "")),
+            }
+        except Exception as exc:
+            logger.warning("补全智能体失败: %s", exc)
+            return {
+                "still_missing": missing_fields,
+                "filled_fields": [],
+                "is_complete": False,
+                "is_irrelevant": False,
+                "reason": f"补全判断异常: {exc}",
+            }
+
+    # ------------------------------------------------------------------
+    # 订单意图分类：根据前后上下文判断新下单 / 替换旧单 / 追加
+    # ------------------------------------------------------------------
+    async def classify_order(
+        self,
+        context_messages: list[dict[str, Any]],
+        db: Optional[Session] = None,
+    ) -> dict[str, Any]:
+        """根据报货消息前后的聊天上下文，判断订单意图（new/replace/append）。
+
+        参数:
+            context_messages: 前后聊天上下文消息列表（包含发送人、内容、时间等）
+
+        返回:
+            {"intent": "new"|"replace"|"append", "confidence": "high"|"medium"|"low", "reason": "..."}
+        """
+        cfg = self._load_config(db)
+        self._ensure_enabled(cfg)
+        model = cfg["model"]  # 纯文本判断，不需要视觉模型
+
+        user_parts = self._build_multimodal_parts(
+            context_messages,
+            prefix="以下是客户在群聊中发送报货信息前后的消息记录，请判断这笔报货的意图：",
+        )
+
+        try:
+            result = await self._chat(
+                model,
+                [
+                    {"role": "system", "content": ORDER_CLASSIFIER_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_parts},
+                ],
+                db=db,
+                caller="classify_order",
+            )
+            intent = str(result.get("intent", "new")).lower()
+            if intent not in ("new", "replace", "append"):
+                intent = "new"
+            return {
+                "intent": intent,
+                "confidence": str(result.get("confidence", "medium")),
+                "reason": str(result.get("reason", "")),
+            }
+        except Exception as exc:
+            logger.warning("订单意图分类失败: %s", exc)
+            return {"intent": "new", "confidence": "low", "reason": f"分类异常: {exc}"}
 
     # ------------------------------------------------------------------
     # 智能体 2：订单解析 — 将内容解析为结构化 JSON

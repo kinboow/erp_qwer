@@ -582,6 +582,7 @@ def _extract_callback_message(payload: dict[str, Any], instance_id: Optional[str
 
 
 def _extract_excel_summary(attachment_base64: str) -> str:
+    """将 Excel 附件转为 Markdown 表格格式，方便 AI 理解结构化数据。"""
     if not attachment_base64:
         return ""
     if load_workbook is None:
@@ -592,14 +593,33 @@ def _extract_excel_summary(attachment_base64: str) -> str:
     except Exception as exc:
         return f"Excel 解析失败: {exc}"
 
-    lines: list[str] = []
+    parts: list[str] = []
     for sheet in workbook.worksheets[:3]:
-        lines.append(f"[Sheet] {sheet.title}")
-        for row in sheet.iter_rows(min_row=1, max_row=30, values_only=True):
+        parts.append(f"## Sheet: {sheet.title}\n")
+        rows_data: list[list[str]] = []
+        for row in sheet.iter_rows(min_row=1, max_row=50, values_only=True):
             row_values = ["" if cell is None else str(cell).strip() for cell in row[:20]]
             if any(row_values):
-                lines.append("\t".join(row_values))
-    return "\n".join(lines[:240])
+                rows_data.append(row_values)
+        if not rows_data:
+            parts.append("（空表）\n")
+            continue
+
+        # 统一列数（以最长行为准）
+        max_cols = max(len(r) for r in rows_data)
+        for r in rows_data:
+            while len(r) < max_cols:
+                r.append("")
+
+        # 第一行作为表头
+        header = rows_data[0]
+        parts.append("| " + " | ".join(h or " " for h in header) + " |")
+        parts.append("| " + " | ".join("---" for _ in header) + " |")
+        for data_row in rows_data[1:]:
+            parts.append("| " + " | ".join(data_row) + " |")
+        parts.append("")  # 空行分隔
+
+    return "\n".join(parts).strip()
 
 
 def _resolve_product_no_for_context(db: Session, name: str) -> str:

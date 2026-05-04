@@ -13,6 +13,11 @@ from app.services.media_archive import download_and_archive_background
 from app.services.message_logs import mark_recalled, record_message_log
 from app.services.ai_order_parser import AIOrderParser
 from app.services.at_order_handler import is_at_bot
+from app.services.pending_order_session import (
+    find_active_session, append_followup_message, get_original_summary,
+    create_pending_session, update_session_missing_fields,
+    mark_session_completed, get_merged_context, cleanup_expired_sessions,
+)
 from app.services.shipping_scan_handler import handle_shipping_scan, resolve_shipping_room
 from app.services.wechat_reply import send_room_at
 
@@ -22,6 +27,8 @@ logger = logging.getLogger(__name__)
 # 客户群消息：回复"收到"后走通用审核链 create_review_from_callback
 # ---------------------------------------------------------------------------
 STARTUP_GRACE_SECONDS = 30   # 启动后多少秒内的消息不回复"收到"（避免积压消息被批量回复）
+CLASSIFY_WINDOW_SECONDS = 150  # 订单意图分类：报货后等待 2.5 分钟收集上下文
+CLASSIFY_PRE_MSG_COUNT = 10    # 分类时向前取多少条聊天记录
 
 # 模块加载时间（服务启动时）
 _startup_time = time.monotonic()
@@ -44,6 +51,200 @@ async def _reply_received(room_id: str, sender_id: str, instance_id: str) -> Non
                            at_list=[sender_id], instance_id=inst_id)
     except Exception as exc:
         logger.warning("回复收到失败: room=%s err=%s", room_id, exc)
+    finally:
+        db.close()
+
+
+async def _reply_missing_fields(
+    room_id: str, sender_id: str, instance_id: str, missing_fields: list[str],
+) -> None:
+    """在客户群中@发送人告知缺少哪些字段（使用独立 DB session）"""
+    db = SessionLocal()
+    try:
+        inst_id = int(instance_id) if instance_id.isdigit() else None
+        fields_text = "、".join(missing_fields)
+        msg = f"您的报货信息缺少以下内容：{fields_text}，请补充后我会继续处理"
+        await send_room_at(db, room_id, msg,
+                           at_list=[sender_id], instance_id=inst_id)
+    except Exception as exc:
+        logger.warning("回复缺失字段失败: room=%s err=%s", room_id, exc)
+    finally:
+        db.close()
+
+
+async def _handle_pending_session_followup(
+    db: Session,
+    session: dict[str, Any],
+    ctx_msgs: list[dict[str, Any]],
+    room_id: str,
+    sender_id: str,
+    instance_id: str,
+    normalized_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """处理挂起会话的后续消息：调用补全智能体判断是否已补全。
+
+    返回:
+        {"handled": True/False, "review": ...}
+    """
+    session_id = session["id"]
+    missing_fields = json.loads(session["missing_fields"]) if isinstance(session["missing_fields"], str) else session["missing_fields"]
+
+    # 追加后续消息到会话
+    followup_msg = ctx_msgs[0] if ctx_msgs else {"type": "text", "content": ""}
+    all_followups = append_followup_message(db, session_id, followup_msg)
+    logger.info("[PendingSession] 追加后续消息 session=%d followup_count=%d", session_id, len(all_followups))
+
+    # 调用补全智能体
+    original_summary = get_original_summary(session)
+    parser = AIOrderParser()
+    try:
+        completion_result = await parser.check_completion(
+            missing_fields=missing_fields,
+            original_summary=original_summary,
+            followup_messages=all_followups,
+            db=db,
+        )
+    except Exception as exc:
+        logger.warning("[PendingSession] 补全智能体异常: session=%d err=%s", session_id, exc)
+        return {"handled": True, "review": None}
+
+    logger.info(
+        "[PendingSession] 补全判断 session=%d is_complete=%s still_missing=%s reason=%s",
+        session_id, completion_result.get("is_complete"), completion_result.get("still_missing"),
+        completion_result.get("reason"),
+    )
+
+    if completion_result.get("is_complete"):
+        # 已补全 → 标记完成 → 合并上下文走审核链
+        mark_session_completed(db, session_id)
+        merged_context = get_merged_context(session)
+        # 追加当前新消息
+        merged_context.extend(ctx_msgs)
+
+        # 回复收到
+        if _is_after_startup():
+            asyncio.create_task(_reply_received(room_id, sender_id, instance_id))
+
+        # 走审核链
+        review_result = await create_review_from_callback(
+            db, normalized_payload, instance_id or None,
+        )
+        logger.info("[PendingSession] 补全后进入审核链 session=%d review=%s",
+                    session_id,
+                    review_result.get("id") if isinstance(review_result, dict) and not review_result.get("skipped") else "skipped")
+        return {"handled": True, "review": review_result}
+
+    # 未补全 → 更新剩余缺失字段
+    still_missing = completion_result.get("still_missing") or missing_fields
+    if still_missing != missing_fields:
+        update_session_missing_fields(db, session_id, still_missing)
+
+    # 如果不是无关消息，不需要再回复
+    if not completion_result.get("is_irrelevant"):
+        logger.info("[PendingSession] 部分补全但仍缺: %s session=%d", still_missing, session_id)
+    return {"handled": True, "review": None}
+
+
+async def _collect_and_classify_order(
+    review_id: int,
+    room_id: str,
+    trigger_log_id: int,
+    trigger_created_at: str,
+) -> None:
+    """后台任务：等待 2.5 分钟后收集上下文，调用 AI 判断订单意图（new/replace/append）。
+
+    步骤:
+    1. 等待 CLASSIFY_WINDOW_SECONDS 秒
+    2. 从 message_logs 查询触发消息前的 N 条消息（排除 @bot）
+    3. 从 message_logs 查询触发消息后 2.5 分钟内的所有消息
+    4. 合并上下文 → 调用 classify_order AI
+    5. 将结果写入 downstream_order_reviews.order_intent
+    """
+    await asyncio.sleep(CLASSIFY_WINDOW_SECONDS)
+
+    db = SessionLocal()
+    try:
+        # ---- 查询触发消息之前的 N 条（排除 @bot 消息） ----
+        pre_rows = db.execute(
+            text(
+                "SELECT sender_name, message_type, content_preview, created_at "
+                "FROM message_logs "
+                "WHERE room_id = :room_id AND id < :trigger_id AND is_at_bot = 0 "
+                "ORDER BY id DESC LIMIT :limit"
+            ),
+            {"room_id": room_id, "trigger_id": trigger_log_id, "limit": CLASSIFY_PRE_MSG_COUNT},
+        ).mappings().all()
+        pre_msgs = list(reversed(pre_rows))  # 恢复时间正序
+
+        # ---- 查询触发消息之后 2.5 分钟内的所有消息 ----
+        post_rows = db.execute(
+            text(
+                "SELECT sender_name, message_type, content_preview, created_at "
+                "FROM message_logs "
+                "WHERE room_id = :room_id AND id > :trigger_id "
+                "AND created_at <= DATE_ADD(:trigger_at, INTERVAL :window SECOND) "
+                "ORDER BY id ASC"
+            ),
+            {
+                "room_id": room_id,
+                "trigger_id": trigger_log_id,
+                "trigger_at": trigger_created_at,
+                "window": CLASSIFY_WINDOW_SECONDS,
+            },
+        ).mappings().all()
+
+        # ---- 构建 context_messages ----
+        context: list[dict[str, Any]] = []
+        for r in pre_msgs:
+            context.append({
+                "type": "text",
+                "content": f"[{r['sender_name'] or ''}] {r['content_preview'] or ''}",
+            })
+        context.append({"type": "text", "content": "===== 以下是客户发送的报货消息 ====="})
+        for r in post_rows:
+            context.append({
+                "type": "text",
+                "content": f"[{r['sender_name'] or ''}] {r['content_preview'] or ''}",
+            })
+
+        if not pre_msgs and not post_rows:
+            # 没有上下文可判断，默认新下单
+            db.execute(
+                text(
+                    "UPDATE downstream_order_reviews "
+                    "SET order_intent = 'new', order_intent_reason = '无上下文消息，默认新下单' "
+                    "WHERE id = :id"
+                ),
+                {"id": review_id},
+            )
+            db.commit()
+            logger.info("[OrderClassify] review=%d 无上下文，默认 intent=new", review_id)
+            return
+
+        # ---- 调用分类 AI ----
+        parser = AIOrderParser()
+        result = await parser.classify_order(context, db=db)
+        intent = result.get("intent", "new")
+        reason = result.get("reason", "")
+        logger.info("[OrderClassify] review=%d intent=%s confidence=%s reason=%s",
+                    review_id, intent, result.get("confidence"), reason)
+
+        # ---- 写入审核记录 ----
+        db.execute(
+            text(
+                "UPDATE downstream_order_reviews "
+                "SET order_intent = :intent, order_intent_reason = :reason "
+                "WHERE id = :id"
+            ),
+            {"id": review_id, "intent": intent, "reason": (reason or "")[:500]},
+        )
+        db.commit()
+    except Exception as exc:
+        logger.warning("[OrderClassify] review=%d 分类异常: %s", review_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
     finally:
         db.close()
 
@@ -385,27 +586,68 @@ async def ingest_runtime_message(
                 ).lower()
                 is_excel = _file_name.endswith((".xlsx", ".xls"))
 
-            # ---- 报货验证：先判断是否为报货信息再回复 ----
+            # ---- 构建验证上下文 ----
             extracted = _extract_callback_message(normalized_payload, resolved_instance_id or None)
             ctx_msgs = _build_validate_context(extracted, log_result)
+
+            # ---- 优先检查：是否有该发送人的挂起会话 ----
+            pending_session = None
+            try:
+                pending_session = find_active_session(db, room_id, log_sender_id)
+            except Exception as ps_exc:
+                logger.debug("查找挂起会话异常: %s", ps_exc)
+
+            if pending_session:
+                logger.info("发现挂起会话 id=%d room=%s sender=%s, 进入补全流程",
+                            pending_session["id"], room_id, log_sender_id)
+                followup_result = await _handle_pending_session_followup(
+                    db, pending_session, ctx_msgs,
+                    room_id, log_sender_id, resolved_instance_id,
+                    normalized_payload,
+                )
+                review_result = followup_result.get("review")
+                # 无论补全是否成功，此消息已被挂起会话处理
+                return {
+                    "instanceId": resolved_instance_id,
+                    "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
+                    "received": True,
+                    "log": log_result,
+                    "review": review_result,
+                    "shipping_scan_triggered": False,
+                    "pending_session_handled": True,
+                }
+
+            # ---- 定期清理过期会话 ----
+            try:
+                cleanup_expired_sessions(db)
+            except Exception:
+                pass
+
+            # ---- 报货验证：判断是否为报货信息 + 信息完整性 ----
             is_order = False
+            is_complete = True
+            missing_fields: list[str] = []
+            validation_reason = ""
             if ctx_msgs:
                 try:
                     parser = AIOrderParser()
                     validation = await parser.validate_order(ctx_msgs, db=db)
                     is_order = validation.get("is_order", False)
-                    logger.info("报货验证: room=%s is_order=%s reason=%s",
-                                room_id, is_order, validation.get("reason", ""))
+                    is_complete = validation.get("is_complete", True)
+                    missing_fields = validation.get("missing_fields") or []
+                    validation_reason = validation.get("reason", "")
+                    logger.info("报货验证: room=%s is_order=%s is_complete=%s missing=%s reason=%s",
+                                room_id, is_order, is_complete, missing_fields, validation_reason)
                 except Exception as val_exc:
-                    # AI 验证失败时保守处理：当作报货
                     is_order = True
-                    logger.warning("报货验证异常，保守处理为报货: room=%s err=%s", room_id, val_exc)
+                    is_complete = True  # 验证异常时保守放行
+                    logger.warning("报货验证异常，保守处理为完整报货: room=%s err=%s", room_id, val_exc)
             else:
-                # 无可验证内容（如图片暂无 base64），保守当作报货处理
                 is_order = is_image or is_excel
                 logger.debug("报货验证: 无可验证内容，保守判定 is_order=%s room=%s type=%s",
                              is_order, room_id, log_msg_type)
 
+            # ---- 非报货消息：跳过 ----
             if not is_order:
                 logger.info("客户群非报货消息，跳过: room=%s type=%s", room_id, log_msg_type)
                 return {
@@ -418,11 +660,45 @@ async def ingest_runtime_message(
                     "order_validated": False,
                 }
 
-            # ---- 是报货消息：回复"收到" ----
+            # ---- 是报货但信息不完整：挂起会话 ----
+            if not is_complete and missing_fields:
+                logger.info("报货信息不完整，创建挂起会话: room=%s sender=%s missing=%s",
+                            room_id, log_sender_id, missing_fields)
+                try:
+                    create_pending_session(
+                        db=db,
+                        room_id=room_id,
+                        sender_id=log_sender_id,
+                        instance_id=resolved_instance_id,
+                        customer_id=customer.get("id") if customer else None,
+                        customer_name=customer.get("customer_name", "") if customer else "",
+                        missing_fields=missing_fields,
+                        context_messages=ctx_msgs,
+                        original_payload=normalized_payload,
+                        ai_reason=validation_reason,
+                    )
+                    # 通知客户缺少什么
+                    if _is_after_startup():
+                        asyncio.create_task(_reply_missing_fields(
+                            room_id, log_sender_id, resolved_instance_id, missing_fields,
+                        ))
+                except Exception as ps_exc:
+                    logger.warning("创建挂起会话失败: %s", ps_exc)
+                return {
+                    "instanceId": resolved_instance_id,
+                    "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
+                    "received": True,
+                    "log": log_result,
+                    "review": None,
+                    "shipping_scan_triggered": False,
+                    "order_incomplete": True,
+                    "missing_fields": missing_fields,
+                }
+
+            # ---- 是完整报货消息：回复"收到" + 走审核链 ----
             if (_is_at or is_image or is_excel) and _is_after_startup():
                 asyncio.create_task(_reply_received(room_id, log_sender_id, resolved_instance_id))
 
-            # 通用审核链：创建审核记录 + AI 自动解析
             review_result = await create_review_from_callback(db, normalized_payload, resolved_instance_id or None)
             logger.info("客户群审核: room=%s review=%s", room_id,
                         review_result.get("id") if isinstance(review_result, dict) and not review_result.get("skipped") else "skipped")
