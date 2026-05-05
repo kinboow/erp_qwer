@@ -12,7 +12,7 @@ from app.ncloud.schemas.sales_orders import (
     CreateSalesOrderRequest,
     SizeQty,
 )
-from app.ncloud.services.sales_orders import audit_order, create_order
+from app.ncloud.services.sales_orders import audit_order, create_order, get_order_detail
 from app.ncloud.services.unshipped_report import cancel_or_restore, query_unshipped_report
 
 logger = logging.getLogger(__name__)
@@ -165,6 +165,26 @@ class ERPBridge:
                 "unshipped_qty": row.unshipped_qty or 0,
             })
         return [item for item in result if item["id"]]
+
+    async def void_sales_order(self, dh: str) -> dict:
+        """作废 ERP 销售订单（先反审核，再删除/作废）"""
+        client = await self._ensure_login()
+        t0 = time.time()
+        try:
+            # 先查询订单状态
+            detail = await get_order_detail(client, dh)
+            state = detail.main.state
+            # state=1 表示已审核，需先反审核
+            if state == 1:
+                await audit_order(client, dh, AuditAction.unaudit)
+            elif state == 2:
+                return {"dh": dh, "message": "订单已是作废状态", "already_voided": True}
+            # 作废
+            result = await audit_order(client, dh, AuditAction.void)
+        except Exception as exc:
+            raise ERPBridgeError(f"ERP 作废销售订单失败: {exc}") from exc
+        logger.info("[PERF] ERP void_sales_order(%s) 耗时 %.2fs", dh, time.time() - t0)
+        return {"dh": result.dh, "message": result.message or "作废成功", "already_voided": False}
 
     async def cancel_unshipped(self, ids: list[str]) -> dict:
         if not ids:

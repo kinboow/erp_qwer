@@ -203,6 +203,8 @@ def ensure_downstream_support_tables(db: Session):
     _add_column_if_not_exists(db, "downstream_order_reviews", "order_intent_reason", "VARCHAR(500) DEFAULT '' COMMENT 'AI 分类理由'")
     # 操作人：记录当前状态由谁引起（AI→机器人，人工→用户名）
     _add_column_if_not_exists(db, "downstream_order_reviews", "operator_name", "VARCHAR(100) DEFAULT '' COMMENT '操作人（机器人/用户名）'")
+    # 审核单类型（normal=正常下单 / modify=待修改旧单）
+    _add_column_if_not_exists(db, "downstream_order_reviews", "review_type", "VARCHAR(20) DEFAULT 'normal' COMMENT 'normal/modify'")
 
     # ---------- 纸张打印记录表 ----------
     db.execute(text(

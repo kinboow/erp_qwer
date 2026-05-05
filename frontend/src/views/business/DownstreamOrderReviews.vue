@@ -14,6 +14,9 @@
               <span class="detail-room">{{ selectedReview.room_name || '未命名群聊' }}</span>
               <span v-if="selectedReview.sender_name" class="detail-sender">/ {{ selectedReview.sender_name }}</span>
               <el-tag size="small" :type="statusTagType(selectedReview.review_status)" style="margin-left:8px">{{ statusText(selectedReview.review_status) }}</el-tag>
+              <el-tag v-if="selectedReview.review_type === 'modify'" size="small" type="warning" style="margin-left:4px">待修改</el-tag>
+              <el-tag v-if="selectedReview.order_intent === 'replace'" size="small" type="danger" style="margin-left:4px">替换旧单</el-tag>
+              <el-tag v-else-if="selectedReview.order_intent === 'append'" size="small" type="primary" style="margin-left:4px">追加补充</el-tag>
               <span v-if="selectedReview.review_uid" class="detail-uid">{{ selectedReview.review_uid }}</span>
             </div>
             <div class="detail-header-right">
@@ -139,8 +142,27 @@
               />
 
               <div class="compare-right">
-                <div class="panel-label">解析结果（下单内容）</div>
-                <div class="edit-form-area">
+                <div class="panel-label">{{ selectedReview.review_type === 'modify' ? '修改说明' : '解析结果（下单内容）' }}</div>
+                <!-- 待修改类型：显示修改说明 -->
+                <div v-if="selectedReview.review_type === 'modify'" class="modify-desc-area">
+                  <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px">
+                    <template #title>客户要求修改之前报过的订单</template>
+                  </el-alert>
+                  <div class="modify-desc-content">
+                    <div class="modify-label">修改内容：</div>
+                    <div class="modify-text">{{ currentOrder?.modify_description || '（无描述）' }}</div>
+                  </div>
+                  <div v-if="currentOrder?.original_items?.length" class="modify-desc-content" style="margin-top:8px">
+                    <div class="modify-label">涉及款号：</div>
+                    <div class="modify-text">
+                      <el-tag v-for="(oi, idx) in currentOrder.original_items" :key="idx" size="small" style="margin-right:4px">
+                        {{ oi.product_no }}{{ oi.color ? ` ${oi.color}` : '' }}
+                      </el-tag>
+                    </div>
+                  </div>
+                </div>
+                <!-- 正常类型：下单内容编辑表格 -->
+                <div v-else class="edit-form-area">
                   <el-table :data="editForm.items" border size="small" class="order-table" @keydown="onTableKeydown">
                     <el-table-column type="index" label="序" width="40" align="center" />
                     <el-table-column label="款号" min-width="90" align="center" header-align="center" class-name="select-col">
@@ -189,6 +211,10 @@
                     <el-button type="primary" size="small" @click="saveEditForm">保存修改</el-button>
                     <el-button type="danger" size="small" @click="populateEditForm">还原解析</el-button>
                   </div>
+                  <div v-if="aiRemark" class="ai-remark-bar">
+                    <el-checkbox v-model="includeAiRemark">添加AI识别备注到订单</el-checkbox>
+                    <span class="ai-remark-text">{{ aiRemark }}</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -203,7 +229,11 @@
               <el-input v-model="reviewNote" placeholder="审核备注（选填）" style="flex:1" />
             </div>
             <div class="footer-actions">
-              <template v-if="selectedReview.review_status === 'pending'">
+              <template v-if="selectedReview.review_status === 'pending' && selectedReview.review_type === 'modify'">
+                <el-button type="success" :loading="actionLoading" @click="handleModifyDone">已手动修改完成</el-button>
+                <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">废单</el-button>
+              </template>
+              <template v-else-if="selectedReview.review_status === 'pending'">
                 <el-button type="primary" :loading="actionLoading" @click="handleApprove">审核下单</el-button>
                 <el-button type="warning" :loading="actionLoading" @click="handleReplace">替换旧单</el-button>
                 <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">废单</el-button>
@@ -304,6 +334,7 @@ import {
   getContextMessages,
   getReviewDetail,
   getReviewList,
+  markModifyDone,
   replaceReview,
   reparseReview,
   revertPending,
@@ -456,6 +487,20 @@ const STANDARD_SIZES = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
 const currentOrder = computed(() => {
   if (!selectedReview.value) return null
   return selectedReview.value.manual_order || selectedReview.value.parsed_order || null
+})
+
+const includeAiRemark = ref(true)
+const aiRemark = computed(() => {
+  const order = currentOrder.value
+  if (!order) return ''
+  const parts = []
+  const orderRemark = (order.remark || '').trim()
+  if (orderRemark) parts.push(orderRemark)
+  ;(order.items || []).forEach(item => {
+    const r = (item.remark || '').trim()
+    if (r) parts.push(`${item.product_no || ''}${item.color ? ' ' + item.color : ''}: ${r}`)
+  })
+  return parts.join('；')
 })
 
 const hasUncertainties = computed(() => {
@@ -683,6 +728,7 @@ const selectReview = async (item) => {
   selectedReview.value = res.data
   selectedCustomerId.value = res.data.customer_id ? Number(res.data.customer_id) : null
   reviewNote.value = res.data.review_note || ''
+  includeAiRemark.value = true
   populateEditForm()
   await fetchContextMessages(item.id)
 }
@@ -798,7 +844,8 @@ const handleApprove = async () => {
     }
     const res = await approveReview(selectedReview.value.id, {
       customer_id: selectedCustomerId.value,
-      review_note: reviewNote.value
+      review_note: reviewNote.value,
+      include_ai_remark: includeAiRemark.value
     })
     const d = res.data || {}
     _printDebugLogs(d)
@@ -836,7 +883,8 @@ const handleReplace = async () => {
     }
     const res = await replaceReview(selectedReview.value.id, {
       customer_id: selectedCustomerId.value,
-      review_note: reviewNote.value
+      review_note: reviewNote.value,
+      include_ai_remark: includeAiRemark.value
     })
     const d = res.data || {}
     _printDebugLogs(d)
@@ -868,6 +916,23 @@ const handleVoid = async () => {
   try {
     await voidReview(selectedReview.value.id, { review_note: reviewNote.value })
     ElMessage.success('已标记为废单')
+    await fetchReviews()
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+const handleModifyDone = async () => {
+  if (!selectedReview.value) return
+  await ElMessageBox.confirm('确认已在 ERP 中手动完成修改？', '标记完成', {
+    confirmButtonText: '确认',
+    cancelButtonText: '取消',
+    type: 'success'
+  })
+  actionLoading.value = true
+  try {
+    await markModifyDone(selectedReview.value.id, { review_note: reviewNote.value })
+    ElMessage.success('已标记为修改完成')
     await fetchReviews()
   } finally {
     actionLoading.value = false
@@ -1523,6 +1588,29 @@ onBeforeUnmount(() => {
 }
 
 
+.modify-desc-area {
+  padding: 12px;
+  flex: 1;
+  overflow-y: auto;
+}
+.modify-desc-content {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 0;
+}
+.modify-label {
+  font-weight: 600;
+  color: #606266;
+  white-space: nowrap;
+  min-width: 72px;
+}
+.modify-text {
+  color: #303133;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
 .edit-form-area {
   display: flex;
   flex-direction: column;
@@ -1538,6 +1626,27 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
   border-top: 1px solid var(--lark-border-light, #ebeef5);
   margin-top: 6px;
+}
+
+.ai-remark-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.ai-remark-text {
+  color: #e6a23c;
+  font-weight: 500;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 底部操作栏 */

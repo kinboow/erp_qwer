@@ -17,8 +17,26 @@ from app.services.ai_chat_service import process_customer_group_message
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 客户群消息：实时送入 AI 对话
+# 客户群消息：实时送入 AI 对话（并发控制）
 # ---------------------------------------------------------------------------
+_AI_MAX_CONCURRENCY = 6                           # 最多同时处理 6 个群的 AI 对话
+_ai_semaphore: asyncio.Semaphore | None = None     # 延迟初始化（必须在事件循环中创建）
+_room_locks: dict[str, asyncio.Lock] = {}          # 每个群独立锁，保证同群消息按序
+
+
+def _get_ai_semaphore() -> asyncio.Semaphore:
+    """获取全局信号量（首次调用时在当前事件循环中创建）。"""
+    global _ai_semaphore
+    if _ai_semaphore is None:
+        _ai_semaphore = asyncio.Semaphore(_AI_MAX_CONCURRENCY)
+    return _ai_semaphore
+
+
+def _get_room_lock(room_id: str) -> asyncio.Lock:
+    """获取指定群的异步锁（同群消息串行处理）。"""
+    if room_id not in _room_locks:
+        _room_locks[room_id] = asyncio.Lock()
+    return _room_locks[room_id]
 
 
 
@@ -321,13 +339,11 @@ async def ingest_runtime_message(
             "shipping_scan_triggered": shipping_scan_triggered,
         }
 
-    # ===== 客户群专线：实时送 AI =====
+    # ===== 客户群专线：实时送 AI（员工消息也送，AI 自行区分身份） =====
     if not customer:
         logger.info("客户群专线跳过: customer 未找到 room=%s instance=%s", room_id, resolved_instance_id)
-    elif sender_is_employee:
-        logger.info("客户群专线跳过: 发送者是员工 sender=%s room=%s", log_sender_id, room_id)
 
-    if customer and not sender_is_employee:
+    if customer:
         bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
 
         # ---- 过滤：机器人自身发送的消息不送 AI ----
@@ -429,35 +445,38 @@ async def _send_msg_to_ai(
     payload: dict[str, Any] | None,
     log_id: int | None,
 ) -> None:
-    """立即将一条消息送入 AI 对话。"""
-    db = SessionLocal()
-    try:
-        ai_result = await process_customer_group_message(
-            db,
-            room_id=room_id,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            message_type=message_type,
-            content_text=content_text,
-            attachment_base64=attachment_base64,
-            file_name=file_name,
-            customer=customer,
-            instance_id=instance_id,
-            bot_wxid=bot_wxid,
-            payload=payload,
-        )
-        logger.info("客户群 AI 对话: room=%s result=%s", room_id, ai_result)
-
-        if log_id:
+    """立即将一条消息送入 AI 对话（受并发控制）。"""
+    room_lock = _get_room_lock(room_id)
+    async with room_lock:                       # 同群串行
+        async with _get_ai_semaphore():          # 全局最多 6 并发
+            db = SessionLocal()
             try:
-                from app.services.message_logs import mark_ai_recognized
-                mark_ai_recognized(db, log_id)
-            except Exception:
-                pass
-    except Exception as exc:
-        logger.warning("客户群 AI 对话异常: room=%s err=%s", room_id, exc)
-    finally:
-        db.close()
+                ai_result = await process_customer_group_message(
+                    db,
+                    room_id=room_id,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    message_type=message_type,
+                    content_text=content_text,
+                    attachment_base64=attachment_base64,
+                    file_name=file_name,
+                    customer=customer,
+                    instance_id=instance_id,
+                    bot_wxid=bot_wxid,
+                    payload=payload,
+                )
+                logger.info("客户群 AI 对话: room=%s result=%s", room_id, ai_result)
+
+                if log_id:
+                    try:
+                        from app.services.message_logs import mark_ai_recognized
+                        mark_ai_recognized(db, log_id)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning("客户群 AI 对话异常: room=%s err=%s", room_id, exc)
+            finally:
+                db.close()
 
 
 async def _send_recall_to_ai(
@@ -479,21 +498,24 @@ async def _send_recall_to_ai(
         f"被撤回的原始内容：{content_preview or '（无法获取）'}"
     )
 
-    db = SessionLocal()
-    try:
-        ai_result = await process_customer_group_message(
-            db,
-            room_id=room_id,
-            sender_id=sender_id,
-            sender_name="系统",
-            message_type="text",
-            content_text=recall_text,
-            customer=customer,
-            instance_id=instance_id,
-            bot_wxid=bot_wxid,
-        )
-        logger.info("撤回通知 AI: room=%s result=%s", room_id, ai_result)
-    except Exception as exc:
-        logger.warning("撤回通知 AI 异常: room=%s err=%s", room_id, exc)
-    finally:
-        db.close()
+    room_lock = _get_room_lock(room_id)
+    async with room_lock:                       # 同群串行
+        async with _get_ai_semaphore():          # 全局最多 6 并发
+            db = SessionLocal()
+            try:
+                ai_result = await process_customer_group_message(
+                    db,
+                    room_id=room_id,
+                    sender_id=sender_id,
+                    sender_name="系统",
+                    message_type="text",
+                    content_text=recall_text,
+                    customer=customer,
+                    instance_id=instance_id,
+                    bot_wxid=bot_wxid,
+                )
+                logger.info("撤回通知 AI: room=%s result=%s", room_id, ai_result)
+            except Exception as exc:
+                logger.warning("撤回通知 AI 异常: room=%s err=%s", room_id, exc)
+            finally:
+                db.close()

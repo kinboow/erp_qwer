@@ -44,7 +44,13 @@ def _find_first(sources: dict[str, Any] | Any, keys: list[str]) -> str:
 
 
 def _extract_cdn_params_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """从消息 payload 中提取 CDN 下载参数"""
+    """从消息 payload 中提取 CDN 下载参数（返回首选方式）"""
+    candidates = _extract_all_cdn_candidates(payload)
+    return candidates[0] if candidates else {}
+
+
+def _extract_all_cdn_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """从消息 payload 中提取所有可用的 CDN 下载候选参数（按优先级排列）。"""
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     data = message.get("data") if isinstance(message.get("data"), dict) else {}
     cdn = data.get("cdn") if isinstance(data.get("cdn"), dict) else {}
@@ -59,14 +65,16 @@ def _extract_cdn_params_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     except (ValueError, TypeError):
         size = 0
 
+    candidates: list[dict[str, Any]] = []
+
     if url and auth_key and aes_key and size:
-        return {"mode": "wx_download", "url": url, "auth_key": auth_key, "aes_key": aes_key, "size": size}
+        candidates.append({"mode": "wx_download", "url": url, "auth_key": auth_key, "aes_key": aes_key, "size": size})
 
     file_id = c2c.get("file_id") or data.get("file_id") or ""
     if file_id and aes_key:
-        return {"mode": "c2c_download", "file_id": file_id, "aes_key": aes_key, "file_size": size, "file_type": 5}
+        candidates.append({"mode": "c2c_download", "file_id": file_id, "aes_key": aes_key, "file_size": size, "file_type": 5})
 
-    return {}
+    return candidates
 
 
 def _resolve_runtime(db: Session, instance_id: str) -> dict[str, Any]:

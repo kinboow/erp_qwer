@@ -42,6 +42,7 @@ class CallbackIngestPayload(BaseModel):
 class ReviewApprovePayload(BaseModel):
     customer_id: int
     review_note: Optional[str] = ""
+    include_ai_remark: Optional[bool] = True
 
 
 class ReviewManualPayload(BaseModel):
@@ -52,6 +53,13 @@ class ReviewManualPayload(BaseModel):
 
 class ReviewVoidPayload(BaseModel):
     review_note: Optional[str] = ""
+
+
+class ProcessModifyPayload(BaseModel):
+    customer_id: int
+    original_review_id: int
+    review_note: Optional[str] = ""
+    include_ai_remark: Optional[bool] = True
 
 
 class CheckDuplicatePayload(BaseModel):
@@ -253,7 +261,7 @@ async def approve_review_api(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        data = await approve_review(db, review_id, payload.customer_id, current_user, payload.review_note or "")
+        data = await approve_review(db, review_id, payload.customer_id, current_user, payload.review_note or "", include_ai_remark=payload.include_ai_remark)
         return json_response(message="审核下单成功", data=data)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -269,7 +277,7 @@ async def replace_review_api(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        data = await replace_old_order(db, review_id, payload.customer_id, current_user, payload.review_note or "")
+        data = await replace_old_order(db, review_id, payload.customer_id, current_user, payload.review_note or "", include_ai_remark=payload.include_ai_remark)
         return json_response(message="替换旧单成功", data=data)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -306,6 +314,23 @@ def void_review_api(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reviews/{review_id}/modify-done", summary="标记待修改审核单为已完成")
+def modify_done_api(
+    review_id: int,
+    payload: ReviewVoidPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        from app.services.downstream_orders import mark_modify_done
+        data = mark_modify_done(db, review_id, current_user, payload.review_note or "")
+        return json_response(message="已标记为修改完成", data=data)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

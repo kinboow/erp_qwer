@@ -1587,7 +1587,7 @@ def check_duplicate_order(db: Session, review_id: int, customer_id: int, order_d
     return duplicates
 
 
-async def approve_review(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
+async def approve_review(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "", *, include_ai_remark: bool = True) -> dict[str, Any]:
     import time as _t; _t0 = _t.time(); _logs = []
     def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
     _log("审核下单 开始")
@@ -1607,6 +1607,10 @@ async def approve_review(db: Session, review_id: int, customer_id: int, current_
         db.commit()
         raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     order_data = _review_order_data(row)
+    if not include_ai_remark:
+        order_data["remark"] = ""
+        for item in order_data.get("items", []):
+            item.pop("remark", None)
     _inject_review_uid_to_remark(order_data, review_uid)
     if review_note:
         existing = str(order_data.get("remark") or "").strip()
@@ -1662,7 +1666,7 @@ async def approve_review(db: Session, review_id: int, customer_id: int, current_
     return resp
 
 
-async def replace_old_order(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
+async def replace_old_order(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "", *, include_ai_remark: bool = True) -> dict[str, Any]:
     import time as _t; _t0 = _t.time(); _logs = []
     def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
     _log("替换旧单 开始")
@@ -1684,6 +1688,10 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
         db.commit()
         raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     order_data = _review_order_data(row)
+    if not include_ai_remark:
+        order_data["remark"] = ""
+        for item in order_data.get("items", []):
+            item.pop("remark", None)
     _inject_review_uid_to_remark(order_data, review_uid)
     if review_note:
         existing = str(order_data.get("remark") or "").strip()
@@ -1840,6 +1848,223 @@ def void_review(db: Session, review_id: int, current_user: User, customer_id: in
     )
     db.commit()
     return {"review_status": "voided"}
+
+
+def mark_modify_done(db: Session, review_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
+    """将待修改类型的审核单标记为已完成（人工已在 ERP 中修改）"""
+    row = db.execute(
+        text("SELECT id, review_status, review_type FROM downstream_order_reviews WHERE id = :id"),
+        {"id": review_id},
+    ).mappings().first()
+    if not row:
+        raise ValueError("记录不存在")
+    if row["review_status"] != "pending":
+        raise ValueError("只有待审核状态的单才能标记完成")
+    note = review_note or "人工已在 ERP 中完成修改"
+    db.execute(
+        text(
+            "UPDATE downstream_order_reviews SET review_status = 'approved', "
+            "review_note = :note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, "
+            "operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() "
+            "WHERE id = :id"
+        ),
+        {
+            "id": review_id,
+            "note": note,
+            "reviewer_id": current_user.id,
+            "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
+        },
+    )
+    db.commit()
+    return {"review_status": "approved", "review_note": note}
+
+
+async def process_modify_review(
+    db: Session,
+    modify_review_id: int,
+    original_review_id: int,
+    customer_id: int,
+    current_user: User,
+    review_note: str = "",
+    *,
+    include_ai_remark: bool = True,
+) -> dict[str, Any]:
+    """
+    处理待修改审核单：
+    - 查找原始审核单
+    - 如果原始单是 pending → 作废它，再用当前修改单的新内容下 ERP 新单
+    - 如果原始单是 approved → 在 ERP 中作废旧销售订单，再下新单，群通知
+    """
+    import time as _t; _t0 = _t.time(); _logs = []
+    def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
+    _log("处理待修改审核单 开始")
+
+    # 1. 加载当前修改审核单（带新的下单内容）
+    modify_row = db.execute(
+        text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": modify_review_id}
+    ).mappings().first()
+    if not modify_row:
+        raise ValueError("修改审核单不存在")
+    if modify_row["review_status"] != "pending":
+        raise ValueError("修改审核单已被处理")
+
+    # 2. 加载原始审核单
+    original_row = db.execute(
+        text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": original_review_id}
+    ).mappings().first()
+    if not original_row:
+        raise ValueError("原始审核单不存在")
+    original_status = original_row["review_status"]
+    original_erp_no = original_row.get("erp_order_no") or ""
+    _log(f"原始单 id={original_review_id} status={original_status} erp_no={original_erp_no}")
+
+    customer = _load_customer(db, customer_id)
+    erp_customer_id = customer.get("erp_customer_id") or ""
+
+    # 3. 准备新订单数据（从修改审核单的 parsed_order_json 中取）
+    order_data = _review_order_data(modify_row)
+    review_uid = modify_row.get("review_uid") or ""
+    if not include_ai_remark:
+        order_data["remark"] = ""
+        for item in order_data.get("items", []):
+            item.pop("remark", None)
+    _inject_review_uid_to_remark(order_data, review_uid)
+    if review_note:
+        existing = str(order_data.get("remark") or "").strip()
+        order_data["remark"] = f"{existing} {review_note}".strip() if existing else review_note
+
+    voided_erp_order = ""
+    new_order_no = ""
+    room_id = modify_row.get("room_id") or original_row.get("room_id") or ""
+    instance_id = modify_row.get("instance_id") or original_row.get("instance_id") or ""
+
+    if original_status == "pending":
+        # --- 原始单还在待审核 → 直接作废审核单，用新内容下新 ERP 单 ---
+        _log("原始单是 pending，作废审核单...")
+        db.execute(
+            text(
+                "UPDATE downstream_order_reviews SET review_status = 'voided', "
+                "review_note = :note, operator_name = :op, updated_at = NOW() WHERE id = :id"
+            ),
+            {
+                "id": original_review_id,
+                "note": f"被修改审核单 #{modify_review_id} 替代",
+                "op": current_user.real_name or current_user.username,
+            },
+        )
+        db.commit()
+        _log("原始审核单已作废，创建新 ERP 订单...")
+
+        result = await erp_bridge.create_sales_order(order_data, customer)
+        new_order_no = result.get("order_no") or ""
+        _log(f"新 ERP 单号={new_order_no}")
+
+    elif original_status in ("approved", "replaced"):
+        # --- 原始单已审核下单 → 先在 ERP 作废旧销售订单，再下新单 ---
+        if not original_erp_no:
+            raise ValueError(f"原始审核单(#{original_review_id})已审核但缺少 ERP 单号，无法自动作废")
+        _log(f"原始单已审核，作废 ERP 订单 {original_erp_no}...")
+        void_result = await erp_bridge.void_sales_order(original_erp_no)
+        voided_erp_order = original_erp_no
+        _log(f"ERP 作废结果: {void_result.get('message')}")
+
+        # 更新原始审核单状态
+        db.execute(
+            text(
+                "UPDATE downstream_order_reviews SET review_status = 'voided', "
+                "review_note = :note, operator_name = :op, updated_at = NOW() WHERE id = :id"
+            ),
+            {
+                "id": original_review_id,
+                "note": f"ERP 订单 {original_erp_no} 已作废，被修改审核单 #{modify_review_id} 替代",
+                "op": current_user.real_name or current_user.username,
+            },
+        )
+        db.commit()
+
+        _log("创建新 ERP 订单...")
+        result = await erp_bridge.create_sales_order(order_data, customer)
+        new_order_no = result.get("order_no") or ""
+        _log(f"新 ERP 单号={new_order_no}")
+
+        # 群通知：旧单已作废，以新单为准
+        if room_id:
+            try:
+                from app.services.wechat_reply import send_room_at
+                notify_msg = (
+                    f"📋 订单变更通知\n"
+                    f"原订单 {voided_erp_order} 已作废\n"
+                    f"新订单号：{new_order_no}\n"
+                    f"请以新订单为准~"
+                )
+                await send_room_at(db, room_id, notify_msg, at_list=None)
+                _log("群通知已发送")
+            except Exception as notify_exc:
+                _log(f"群通知发送失败: {notify_exc}")
+    else:
+        raise ValueError(f"原始审核单状态为 {original_status}，暂不支持处理")
+
+    # 4. 更新修改审核单状态
+    pnos = [item.get("product_no") for item in order_data.get("items", []) if item.get("product_no")]
+    db.execute(
+        text(
+            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, "
+            "review_status = 'approved', erp_order_no = :erp_order_no, "
+            "replaced_order_no = :replaced_order_no, "
+            "review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, "
+            "operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() "
+            "WHERE id = :id"
+        ),
+        {
+            "id": modify_review_id,
+            "customer_id": customer_id,
+            "customer_name": customer.get("customer_name") or "",
+            "erp_order_no": new_order_no,
+            "replaced_order_no": voided_erp_order,
+            "review_note": review_note,
+            "reviewer_id": current_user.id,
+            "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
+        },
+    )
+    db.commit()
+    _log("修改审核单 DB 更新完成")
+
+    # 5. 同步 + 打印
+    if new_order_no:
+        try:
+            from app.services.erp_sync import sync_single_order
+            from app.services.erp_bridge import _erp_client
+            if _erp_client:
+                sync_result = await sync_single_order(_erp_client, new_order_no)
+                _log(f"订单同步完成: {sync_result}")
+        except Exception as sync_exc:
+            _log(f"订单同步异常: {sync_exc}")
+    _trigger_incremental_sync(order_no="", product_nos=pnos)
+    _log("库存同步已触发")
+
+    auto_print_result = None
+    if new_order_no:
+        try:
+            from app.services.printer_service import auto_print_picking_list
+            auto_print_result = auto_print_picking_list(db, new_order_no)
+            if auto_print_result:
+                _log(f"自动打印: {'成功' if auto_print_result.get('printed') else '失败'}")
+        except Exception as print_exc:
+            _log(f"自动打印异常: {print_exc}")
+
+    _log("全流程完成 ✅")
+    resp = {
+        "review_status": "approved",
+        "new_order_no": new_order_no,
+        "voided_erp_order": voided_erp_order,
+        "original_review_status": original_status,
+        "_debug_logs": _logs,
+    }
+    if auto_print_result:
+        resp["auto_print"] = auto_print_result
+    return resp
 
 
 def revert_to_pending(db: Session, review_id: int, current_user: User) -> dict[str, Any]:

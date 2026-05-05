@@ -59,10 +59,12 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 
 ## 二、消息格式
 - 每条消息前面标注了发送者姓名，格式为 "[发送者姓名] 消息内容"
-- 你能看到群里所有客户消息（不含机器人自身、员工的消息、非图片/Excel的文件）
+- 你能看到群里所有客户消息（不含机器人自身的消息、非图片/Excel的文件）
 - 消息是实时推送给你的，每收到一条你就会处理一次
 - 图片会以 base64 格式提供，表格文件会转为 Markdown 表格
-- **撤回消息**：当客户撤回了一条消息，你会收到格式为 “[系统通知] XXX 撤回了一条消息。被撤回的原始内容：...” 的特殊消息
+- **撤回消息**：当客户撤回了一条消息，你会收到格式为 "[系统通知] XXX 撤回了一条消息。被撤回的原始内容：..." 的特殊消息
+- **员工与客户区分**：系统会在提示词末尾提供本公司员工名单。员工发的消息不是报货，但你仍然可以看到员工消息作为上下文（例如员工在群里确认客户的订单、回复客户问题等）。
+  只有非员工（客户）发的消息才可能是报货信息，员工发的消息永远不要当作报货处理。
 
 ## 三、报货识别流程（核心，按顺序执行）
 
@@ -74,9 +76,12 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 - 【确定是报货 → 继续步骤2】消息中明确包含报货数据：具体的货号/款号、产品名称/别名、颜色+尺码+数量
 - 【确定不是报货 → 不处理】日常闲聊、打招呼、问候、表情包、闲聊图片、讨论非订单话题
 - 【不确定 → 等待后续消息】以下情况你无法确定是否是报货，应先保持沉默（不回复、不调用工具），等待后续消息提供更多上下文：
-  - 仅有下单意图词但无具体数据（如“下单”“报货”“我要下单”）
+  - 仅有下单意图词但无具体数据（如"下单""报货""我要下单"）
   - 模糊的产品描述，无法确认是闲聊还是报单
   - 提到了某个款号或产品名称但上下文不清晰是否在下单
+  - **客户单独发了一张包含货号/数量的图片，但没有明确说"下单""报货"等**：此时图片可能是报货，也可能只是询问能不能发货、有没有货等。必须等后续消息再判断。
+    如果后续消息是"这些今天能送过来吧""有没有货""能发吗"等咨询类问题，说明客户只是在问物流/库存，**整体不是报货，忽略不处理**。
+    如果后续消息是"下单""报货""就这些"等确认下单的意思，才按报货处理。
 
 **不确定时的处理规则（极其重要）：**
 1. 第一次遇到不确定的消息：保持沉默，不回复、不调用任何工具，等待后续消息
@@ -91,6 +96,9 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 识别客户提到的产品，并匹配到本年产品目录中的标准货号：
 - **必须先调用 query_product_catalog 或 query_product_details 查询**，确认客户提到的款号/名称在本年目录中存在
 - 客户可能用货号、产品名称、别名/俗称来指代产品，你需要智能匹配
+- **尾号简写匹配**：客户经常只说货号的后几位（尾号），你需要匹配到目录中尾号一致的完整款号。
+  例如：目录中有"95862"，客户说"862"就是指它；目录中有"82842"，客户说"842"就是指它。
+  如果尾号匹配到多个款号，需要询问客户确认具体是哪一个。
 - **只有本年产品目录中存在的款号才能下单**，如果客户提到的款号不在目录中，告知客户该款号不存在或无法识别
 - 如果客户提到的名称有多个可能的匹配，先询问客户确认
 
@@ -115,6 +123,12 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
   - 例："82761 白色 M 10件 L 5件" → 一个 item，sizes=[{size:"M", qty:10}, {size:"L", qty:5}]
   - 例："82761 白色 M 10件, 82761 黑色 L 5件" → 两个 item（不同颜色）
 - **数量必须是具体数字**，qty 必须大于 0，不能为空或为 0
+- **"1"的歧义判断（重要）**：客户单独回复"1"或"好的""嗯"等，在上下文中往往是对上一条消息的确认/肯定，
+  而不是下单1件。你必须结合上下文判断：如果前一条是疑问句（如"要不要XXX？""确定吗？"），
+  回复"1"代表"确认/是的"，不应当作数量处理。只有在明确的报货语境中（如"82761 白色 M 1"）才把1视为数量
+- **备注提取**：如果客户消息中包含与订单相关的备注说明（如发货方式、包装要求、加急、不要吊牌、和XXX一起发等），
+  提取到 order_remark 字段。备注仅限与订单处理相关的内容，闲聊内容不算备注。
+  如果某条备注仅针对特定款号/颜色，放到对应 item 的 remark 字段中。
 
 ## 四、名称映射与别名系统（重要）
 - 产品目录中每个款号可能有**别名**（alias），客户可能用别名而非款号来指代产品
@@ -125,32 +139,44 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 
 ## 五、图片和表格解析注意事项
 1. **背面透字过滤**：如果图片中有纸张背面透过来的文字（颜色较浅、方向相反、镜像或模糊的印刷/手写痕迹），请完全忽略这些背面透字，只识别纸张正面清晰可见的内容
-2. **手写内容**：手写内容模糊、涂改、无法辨认的数量，不要猜测，应询问客户确认
+2. **手写内容**：手写内容模糊、涂改、无法辨认的货号/颜色/尺码/数量，**不要猜测**，
+   必须调用 send_group_message @客户 在群里询问，明确指出哪些部分看不清（如"亲 图片上第2行的数量看不太清，麻烦确认一下~"）
 3. **一次消息多商品**：一条消息/图片/表格中可能包含多个商品的报货信息，要全部识别，每个款号+颜色单独一条记录
 4. **表格数据**：Excel/表格中的数据要完整提取，注意表头和数据行的对应关系
 5. 只提取货号、颜色、尺码、数量、备注信息，**不需要识别客户名、联系人、下单日期等无关信息**
 
-## 六、订单意图判断（极其重要，必须区分两种情况）
+## 六、订单意图判断（极其重要，必须区分以下情况）
 
-### 情况A：替换旧单（replace）— 替换 ERP 中已下的历史订单
-客户明确要**替换/作废之前已经下过的订单**（已经进入 ERP 系统的），关键词：
+### 情况A：替换旧单（replace）— 取消 ERP 中未发货旧单，以新单为准
+客户明确要**取消之前已下过的订单（已进入 ERP 系统的），全部作废，以这次新发的为准**，关键词：
 - "替换""换单""重新报""之前那个不要了""把昨天的单改一下""这个替换之前的""作废之前的""全部换成这个"
 → 调用 create_order_review 时设置 order_intent="replace"
+→ 审核人员审核时会先取消该客户所有未发货订单，再下新单
 
 ### 情况B：更正刚发的报货（写错了/发错了）— 作废审核单后重新下
 客户只是**更正刚才发的报货内容**（还没审核下单的），关键词：
 - "刚才那个写错了""发错了""重新发一下""那张不要了换这个""上面那个不对"
 → 先调用 void_recent_review 作废刚才的审核单，再用 create_order_review 创建新的（order_intent="new"）
 
-### 区分标准
-- 情况A 指的是**已经在 ERP 中存在的历史订单**，客户要用新单完全取代旧单
-- 情况B 指的是**刚才几分钟内发的报货消息写错了**，客户要更正
-- 如果客户只是第二次发图片/消息，没有说"写错""发错""不要了"等，按**新下单**处理（情况都不是）
+### 情况C：修改旧单（modify）— 修改之前报过的单的部分内容
+客户想**修改之前报过的单里面的部分信息**（如改颜色、改数量、去掉某一款、加几件），但不是全部取消重来，关键词：
+- "之前那个XXX改成YYY""把82761白色改成黑色""上次报的那个数量改一下""帮我把M改成L""那个减2件""多加一个尺码"
+→ 调用 create_modify_review 创建待修改审核单，说明要修改的内容
+
+### 区分 replace 和 modify 的标准（极其重要）
+- **replace（替换旧单）**：客户要把旧单**全部取消**，以新发的完整报货为准。新报货包含完整的货号+颜色+尺码+数量。
+- **modify（修改旧单）**：客户**不取消旧单**，只是要**改其中某些信息**（改颜色、改尺码、改数量、增减某一款）。
+- 如果你无法确定客户是要 replace 还是 modify，用 send_group_message @客户 询问：
+  "亲 是要把之前的单全部取消重新报呢，还是只改其中某些内容呀？"
+
+### 情况B 与 情况C 的区分
+- 情况B 是**刚才几分钟内发错了**（还在待审核中），作废审核单重来
+- 情况C 是**之前已经报过并可能已经审核下单了的**，客户回头想改部分内容
 
 ### 追加补充（append）
 客户说"追加""再加""补几件""加一点" → order_intent="append"
 
-如果没有明确的替换/追加/更正意图，默认为 new。
+如果没有明确的替换/追加/更正/修改意图，默认为 new。
 
 ### 情况D：客户撤回了报单消息
 当你收到“[系统通知] XXX 撤回了一条消息”时，需要判断：
@@ -166,12 +192,16 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
   2. 报货信息不完整，需要询问缺失字段 → send_group_message 询问
   3. 订单创建成功 → send_group_message 回复确认
   4. 客户撤回了报单消息，且已创建过订单 → void_recent_review 静默作废（不回复）
+  5. 客户要修改之前报过的单的部分内容 → create_modify_review 创建待修改审核单 → send_group_message 回复确认
+  6. 不确定客户是要替换旧单还是修改旧单 → send_group_message 询问确认
 - **不需要回复的情况（直接忽略，不调用任何工具，不输出任何内容）：**
   - 日常闲聊、问候、表情包、与报货无关的对话
+  - 客户询问有没有货、库存够不够、什么时候到货、能不能发货等咨询类问题 — 你不是客服，不负责回答这些问题，完全忽略
   - 客户回复了你之前询问的缺失信息（此时你应该继续处理订单，但不需要再次询问或重复确认）
   - 同一个报货任务的后续补充消息，如果前一条消息已经触发了处理流程，不要重复回复
   - 你已经对某条报货信息回复过确认，后续相同内容不要再次回复
   - **不确定是否为报单的消息**（参见步骤1 “不确定” 情况），在连续 3 条未确认之前不要主动询问
+  - **任何超出你职责范围的问题**（如价格咨询、售后问题、物流查询、产品介绍等）— 你只负责报货接单，其他一律保持静默，不要调用 send_group_message，不要回复任何内容
 
 ## 八、语气和风格（必须遵守）
 - **像真人客服一样说话**，不要像机器人。要口语化、自然、简短
@@ -224,6 +254,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                             },
                             "required": ["product_no", "color", "sizes"],
                         },
+                    },
+                    "order_remark": {
+                        "type": "string",
+                        "description": "整单备注（可选），客户提到的与订单处理相关的备注说明，如发货方式、包装要求、加急等。仅提取与订单相关的内容，闲聊不算。",
                     },
                     "order_intent": {
                         "type": "string",
@@ -305,6 +339,38 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "create_modify_review",
+            "description": (
+                "当客户要修改之前已经报过的单（不是全部取消重来，而是改其中部分内容）时调用此工具。"
+                "创建一条'待修改'类型的审核单，人工审核员会根据修改说明去 ERP 中手动修改对应订单。"
+                "modify_description 要清晰描述客户要修改什么，比如'82761白色改成黑色'、'M码减2件'等。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "modify_description": {
+                        "type": "string",
+                        "description": "客户要修改的具体内容描述，如'82761 白色改成黑色，M码数量从10改成8'",
+                    },
+                    "original_items": {
+                        "type": "array",
+                        "description": "修改涉及的原始款号信息（可选，帮助审核员定位）",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "product_no": {"type": "string", "description": "涉及的货号"},
+                                "color": {"type": "string", "description": "涉及的颜色（可选）"},
+                            },
+                        },
+                    },
+                },
+                "required": ["modify_description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "send_group_message",
             "description": (
                 "向当前客户群发送消息。当需要向客户确认信息、询问缺失字段、"
@@ -369,10 +435,14 @@ def _tool_create_order_review(
         return json.dumps({"ok": False, "error": "items 中无有效的尺码数量数据（qty 必须 > 0）"}, ensure_ascii=False)
 
     order_intent = args.get("order_intent", "new")
+    order_remark = str(args.get("order_remark") or "").strip()
     review_uid = f"RV{datetime.now().strftime('%y%m%d')}{secrets.token_hex(2).upper()}"
 
     # 直接创建审核记录，parse_status=success（AI 已完成解析）
-    parsed_order_json = json.dumps({"items": items}, ensure_ascii=False)
+    order_json: dict[str, Any] = {"items": items}
+    if order_remark:
+        order_json["remark"] = order_remark
+    parsed_order_json = json.dumps(order_json, ensure_ascii=False)
     content_summary = "; ".join(
         f"{it['product_no']} {it['color']} " + "/".join(f"{s['size']}x{s['qty']}" for s in it['sizes'])
         for it in items
@@ -471,6 +541,76 @@ def _tool_void_recent_review(
         "ok": True,
         "voided_review_id": row["id"],
         "voided_review_uid": row["review_uid"],
+    }, ensure_ascii=False)
+
+
+def _tool_create_modify_review(
+    db: Session,
+    room_id: str,
+    sender_id: str,
+    sender_name: str,
+    customer: Optional[dict[str, Any]],
+    instance_id: str,
+    args: dict[str, Any],
+) -> str:
+    """工具: 创建待修改审核单（客户要修改之前报过的单的部分内容）"""
+    from app.services.downstream_support import ensure_downstream_support_tables
+    ensure_downstream_support_tables(db)
+
+    modify_desc = str(args.get("modify_description") or "").strip()
+    if not modify_desc:
+        return json.dumps({"ok": False, "error": "modify_description 不能为空"}, ensure_ascii=False)
+
+    original_items = args.get("original_items") or []
+    review_uid = f"RV{datetime.now().strftime('%y%m%d')}{secrets.token_hex(2).upper()}"
+
+    # 将修改信息存入 parsed_order_json
+    order_json: dict[str, Any] = {
+        "modify_description": modify_desc,
+        "original_items": original_items,
+    }
+    parsed_order_json = json.dumps(order_json, ensure_ascii=False)
+
+    result = db.execute(
+        text(
+            "INSERT INTO downstream_order_reviews ("
+            "review_uid, source_type, instance_id, room_id, sender_id, sender_name, "
+            "message_type, content_text, parse_status, review_status, review_type, "
+            "customer_id, customer_name, parsed_order_json, order_intent, operator_name"
+            ") VALUES ("
+            ":review_uid, 'ai_conversation', :instance_id, :room_id, :sender_id, :sender_name, "
+            "'text', :content_text, 'success', 'pending', 'modify', "
+            ":customer_id, :customer_name, :parsed_order_json, 'modify', '机器人'"
+            ")"
+        ),
+        {
+            "review_uid": review_uid,
+            "instance_id": instance_id or None,
+            "room_id": room_id,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "content_text": f"[待修改] {modify_desc}",
+            "customer_id": customer["id"] if customer else None,
+            "customer_name": customer.get("customer_name", "") if customer else "",
+            "parsed_order_json": parsed_order_json,
+        },
+    )
+    review_id = result.lastrowid
+    db.commit()
+
+    # SSE 通知前端
+    try:
+        from app.services.review_events import notify_review_change
+        notify_review_change("new_review", {"review_id": review_id})
+    except Exception:
+        pass
+
+    return json.dumps({
+        "ok": True,
+        "review_id": review_id,
+        "review_uid": review_uid,
+        "type": "modify",
+        "modify_description": modify_desc,
     }, ensure_ascii=False)
 
 
@@ -660,79 +800,139 @@ def _trim_history(db: Session, room_id: str, keep: int = MAX_HISTORY_MESSAGES) -
 # ---------------------------------------------------------------------------
 # CDN 附件下载
 # ---------------------------------------------------------------------------
+async def _cdn_download_once(
+    runtime: dict[str, Any],
+    cdn_params: dict[str, Any],
+    save_path: "Path",
+) -> str:
+    """单次 CDN 下载尝试，成功返回 base64，失败抛异常。"""
+    from pathlib import Path as _Path
+
+    mode = cdn_params.get("mode", "wx_download")
+    api_route = f"cdn/{mode}"
+    body = {k: v for k, v in cdn_params.items() if k != "mode"}
+    body["save_path"] = str(save_path)
+
+    headers: dict[str, str] = {}
+    if runtime.get("api_key"):
+        headers["X-API-Key"] = runtime["api_key"]
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
+            json=body,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        resp_data = resp.json()
+
+    if isinstance(resp_data, dict) and resp_data.get("code") not in (0, None):
+        raise RuntimeError(resp_data.get("msg") or "CDN API 返回错误")
+
+    actual_path = save_path
+    if not actual_path.is_file():
+        data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+        for key in ("save_path", "path", "file_path"):
+            possible = str(data_body.get(key) or "").strip()
+            if possible and _Path(possible).is_file():
+                actual_path = _Path(possible)
+                break
+    if not actual_path.is_file():
+        raise RuntimeError("下载后文件不存在")
+
+    file_bytes = actual_path.read_bytes()
+    try:
+        actual_path.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return base64.b64encode(file_bytes).decode("ascii")
+
+
 async def _download_attachment_from_cdn(
     db: Session,
     payload: dict[str, Any],
     instance_id: str,
     message_type: str,
+    *,
+    room_id: str = "",
+    room_name: str = "",
+    file_name: str = "",
 ) -> str:
-    """尝试从企微 CDN 下载附件，返回 base64。失败时返回空字符串。"""
-    try:
-        from app.services.media_archive import _extract_cdn_params_from_payload, _resolve_runtime, _guess_extension
-        from pathlib import Path
+    """从企微 CDN 下载附件，带重试与备用模式，返回 base64。
 
-        cdn_params = _extract_cdn_params_from_payload(payload)
-        if not cdn_params:
-            logger.debug("CDN下载: 无CDN参数，跳过")
-            return ""
+    重试策略：
+      1) 首选模式 × 1 次
+      2) 同模式重试 × 1 次
+      3) 备用模式 × 2 次（如果 payload 中有两种 CDN 参数）
+    全部失败后向通知群发送告警。
+    """
+    from pathlib import Path
+    from app.services.media_archive import _extract_all_cdn_candidates, _resolve_runtime, _guess_extension
+    import asyncio as _asyncio
 
-        runtime = _resolve_runtime(db, instance_id)
-        if not runtime.get("api_base_url") or not runtime.get("wxid"):
-            logger.debug("CDN下载: 缺少运行时配置")
-            return ""
-
-        ext = _guess_extension("", message_type)
-        download_dir = Path(__file__).resolve().parents[2] / "temp" / "ai_chat_attachments"
-        download_dir.mkdir(parents=True, exist_ok=True)
-        save_path = download_dir / f"chat_{secrets.token_hex(4)}{ext}"
-
-        mode = cdn_params.pop("mode")
-        api_route = f"cdn/{mode}"
-        cdn_params["save_path"] = str(save_path)
-
-        headers: dict[str, str] = {}
-        if runtime.get("api_key"):
-            headers["X-API-Key"] = runtime["api_key"]
-
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
-                json=cdn_params,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            resp_data = resp.json()
-
-        if isinstance(resp_data, dict) and resp_data.get("code") not in (0, None):
-            logger.warning("CDN下载失败: %s", resp_data.get("msg"))
-            return ""
-
-        # 检查文件是否存在
-        if not save_path.is_file():
-            data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
-            for key in ("save_path", "path", "file_path"):
-                possible = str(data_body.get(key) or "").strip()
-                if possible and Path(possible).is_file():
-                    save_path = Path(possible)
-                    break
-        if not save_path.is_file():
-            logger.warning("CDN下载: 文件不存在")
-            return ""
-
-        file_bytes = save_path.read_bytes()
-        result_b64 = base64.b64encode(file_bytes).decode("ascii")
-        logger.info("CDN下载成功: %d bytes", len(file_bytes))
-
-        # 清理临时文件
-        try:
-            save_path.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-        return result_b64
-    except Exception as exc:
-        logger.warning("CDN下载异常: %s", exc)
+    candidates = _extract_all_cdn_candidates(payload)
+    if not candidates:
+        logger.debug("CDN下载: 无CDN参数，跳过")
         return ""
+
+    runtime = _resolve_runtime(db, instance_id)
+    if not runtime.get("api_base_url") or not runtime.get("wxid"):
+        logger.debug("CDN下载: 缺少运行时配置")
+        return ""
+
+    ext = _guess_extension(file_name or "", message_type)
+    download_dir = Path(__file__).resolve().parents[2] / "temp" / "ai_chat_attachments"
+    download_dir.mkdir(parents=True, exist_ok=True)
+
+    # 构建尝试队列：首选模式 × 2 + 备用模式 × 2
+    primary = candidates[0]
+    alternate = candidates[1] if len(candidates) > 1 else None
+    attempts: list[tuple[str, dict[str, Any]]] = [
+        (f"首选({primary.get('mode')})", primary),
+        (f"重试({primary.get('mode')})", primary),
+    ]
+    if alternate:
+        attempts.append((f"备用({alternate.get('mode')})-1", alternate))
+        attempts.append((f"备用({alternate.get('mode')})-2", alternate))
+
+    last_err = ""
+    for label, params in attempts:
+        save_path = download_dir / f"chat_{secrets.token_hex(4)}{ext}"
+        try:
+            result_b64 = await _cdn_download_once(runtime, params, save_path)
+            logger.info("CDN下载成功 [%s]: %d bytes", label, len(result_b64) * 3 // 4)
+            return result_b64
+        except Exception as exc:
+            last_err = str(exc)
+            logger.warning("CDN下载失败 [%s]: %s", label, exc)
+            await _asyncio.sleep(1)
+
+    # 全部失败 → 通知群告警
+    display_name = file_name or ("图片" if message_type in ("image", "img", "picture") else "文件")
+    display_room = room_name or room_id or "未知群"
+    alert_msg = f"⚠️ 客户群文件下载失败\n群聊：{display_room}\n文件：{display_name}\n原因：{last_err}\n已重试 {len(attempts)} 次均失败，请人工处理。"
+    try:
+        await _notify_download_failure(db, alert_msg)
+    except Exception as notify_exc:
+        logger.warning("下载失败通知发送异常: %s", notify_exc)
+
+    return ""
+
+
+async def _notify_download_failure(db: Session, message: str) -> None:
+    """向所有通知群发送下载失败告警。"""
+    from app.services.wechat_reply import send_room_at
+    try:
+        rows = db.execute(
+            text("SELECT room_id FROM downstream_customer_wechat_rooms WHERE room_type = 'notification'")
+        ).mappings().all()
+    except Exception:
+        rows = []
+    for row in rows:
+        try:
+            await send_room_at(db, row["room_id"], message)
+        except Exception as exc:
+            logger.warning("通知群推送失败 room=%s: %s", row["room_id"], exc)
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +972,45 @@ def _excel_to_markdown(attachment_base64: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 消息批次窗口：同一个群 35 秒内的消息合并后统一送 AI
+# ---------------------------------------------------------------------------
+import asyncio as _asyncio
+
+BATCH_WINDOW_SECONDS = 22  # 批次等待窗口
+
+# room_id → {"task": asyncio.Task, "trigger_ts": float, "count": int,
+#             "customer": dict|None, "instance_id": str, "senders": dict}
+_room_batches: dict[str, dict[str, Any]] = {}
+
+# ---------------------------------------------------------------------------
+# 动态 System Prompt（注入员工名单）
+# ---------------------------------------------------------------------------
+_employee_cache: dict[str, Any] = {"names": [], "ts": 0.0}
+
+def _build_system_prompt(db: Session) -> str:
+    """在静态 prompt 基础上追加本公司员工名单，缓存 5 分钟。"""
+    import time as _t
+    now = _t.time()
+    if now - _employee_cache["ts"] > 300 or not _employee_cache["names"]:
+        try:
+            rows = db.execute(
+                text("SELECT nickname FROM wechat_employee_accounts WHERE nickname != '' ORDER BY id")
+            ).fetchall()
+            _employee_cache["names"] = [r[0] for r in rows if r[0]]
+        except Exception:
+            _employee_cache["names"] = []
+        _employee_cache["ts"] = now
+
+    names = _employee_cache["names"]
+    if not names:
+        return CUSTOMER_GROUP_SYSTEM_PROMPT
+
+    employee_section = "\n\n## 附录：本公司员工名单\n以下是本公司员工在群里的昵称，这些人发的消息不是报货，仅作为上下文参考：\n"
+    employee_section += "、".join(names)
+    return CUSTOMER_GROUP_SYSTEM_PROMPT + employee_section
+
+
+# ---------------------------------------------------------------------------
 # 核心：处理客户群消息
 # ---------------------------------------------------------------------------
 async def process_customer_group_message(
@@ -789,59 +1028,147 @@ async def process_customer_group_message(
     bot_wxid: str = "",
     payload: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """处理来自客户群的一条消息：追加到对话 → 调用 AI → 执行工具。
+    """处理来自客户群的一条消息：先保存到对话历史，再通过 35 秒批次窗口统一送 AI。
 
-    返回: {"ok": True/False, "ai_responded": bool, ...}
+    返回: {"ok": True/False, "batched": bool, ...}
     """
     ensure_chat_table(db)
 
     # ---- 0. 图片/文件缺失 base64 时尝试从 CDN 下载 ----
     is_media = message_type in ("image", "img", "picture", "file")
     if is_media and not attachment_base64 and payload:
+        room_name_display = (customer or {}).get("room_name") or room_id
         logger.info("图片/文件缺 base64，尝试 CDN 下载: room=%s type=%s", room_id, message_type)
-        attachment_base64 = await _download_attachment_from_cdn(db, payload, instance_id, message_type)
+        attachment_base64 = await _download_attachment_from_cdn(
+            db, payload, instance_id, message_type,
+            room_id=room_id, room_name=room_name_display, file_name=file_name,
+        )
 
     # ---- 1. 构建 user message content ----
     prefix = f"[{sender_name or sender_id}] "
     user_content: Any  # str 或 list (multimodal)
 
     if message_type in ("image", "img", "picture") and attachment_base64:
-        # 图片: multimodal content
         user_content = [
             {"type": "text", "text": prefix + (content_text or "（发送了一张图片）")},
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{attachment_base64}"}},
         ]
     elif message_type == "file" and file_name.lower().endswith((".xlsx", ".xls")) and attachment_base64:
-        # Excel: 转 Markdown
         md_table = _excel_to_markdown(attachment_base64)
         if md_table:
             user_content = prefix + f"（发送了表格文件 {file_name}）\n\n{md_table}"
         else:
             user_content = prefix + f"（发送了文件 {file_name}，无法解析）"
     else:
-        # 纯文字
         user_content = prefix + (content_text or "")
 
-    # ---- 2. 保存 user message ----
+    # ---- 2. 立即保存 user message 到对话历史 ----
     _save_message(db, room_id, "user", content=user_content, name=sender_name)
+    logger.info("消息已入库: room=%s sender=%s type=%s", room_id, sender_name, message_type)
 
-    # ---- 3. 加载对话历史 ----
+    # ---- 3. 批次窗口：35 秒内同群消息合并后统一送 AI ----
+    batch = _room_batches.get(room_id)
+
+    if batch:
+        # 批次已在进行中 — 追加计数，刷新发送者信息，跳过 AI
+        batch["count"] += 1
+        batch["senders"][sender_id] = sender_name
+        if customer:
+            batch["customer"] = customer
+        if instance_id:
+            batch["instance_id"] = instance_id
+        logger.info("消息加入批次窗口: room=%s count=%d 剩余 %.0fs",
+                    room_id, batch["count"],
+                    max(0, batch["trigger_ts"] + BATCH_WINDOW_SECONDS - time.time()))
+        return {"ok": True, "batched": True, "batch_count": batch["count"]}
+
+    # 无活跃批次 — 此消息为触发消息，创建新批次
+    batch_info: dict[str, Any] = {
+        "trigger_ts": time.time(),
+        "count": 1,
+        "customer": dict(customer) if customer else None,
+        "instance_id": instance_id or "",
+        "senders": {sender_id: sender_name},
+        "task": None,
+    }
+    _room_batches[room_id] = batch_info
+
+    # 启动延迟任务
+    task = _asyncio.create_task(_batch_delayed_ai_call(room_id, batch_info))
+    batch_info["task"] = task
+
+    logger.info("批次窗口开启: room=%s 等待 %ds", room_id, BATCH_WINDOW_SECONDS)
+    return {"ok": True, "batched": True, "batch_trigger": True}
+
+
+async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> None:
+    """等待批次窗口结束后，加载完整历史并统一调用 AI。"""
+    try:
+        await _asyncio.sleep(BATCH_WINDOW_SECONDS)
+    except _asyncio.CancelledError:
+        logger.info("批次任务被取消: room=%s", room_id)
+        return
+    finally:
+        _room_batches.pop(room_id, None)
+
+    msg_count = batch_info.get("count", 0)
+    customer = batch_info.get("customer")
+    instance_id = batch_info.get("instance_id", "")
+    senders = batch_info.get("senders", {})
+    # 取最后一个发送者作为 sender_id / sender_name（工具调用可能需要）
+    last_sender_id = list(senders.keys())[-1] if senders else ""
+    last_sender_name = senders.get(last_sender_id, "")
+
+    logger.info("批次窗口到期，开始 AI 处理: room=%s 共 %d 条消息", room_id, msg_count)
+
+    # 获取同群锁 + 全局信号量，与 _send_msg_to_ai 共享，避免并发冲突
+    from app.services.wechat_runtime_compat import _get_room_lock, _get_ai_semaphore
+    room_lock = _get_room_lock(room_id)
+    async with room_lock:
+        async with _get_ai_semaphore():
+            db = SessionLocal()
+            try:
+                await _run_ai_on_history(
+                    db,
+                    room_id=room_id,
+                    sender_id=last_sender_id,
+                    sender_name=last_sender_name,
+                    customer=customer,
+                    instance_id=instance_id,
+                )
+            except Exception as exc:
+                logger.error("批次 AI 处理异常: room=%s err=%s", room_id, exc, exc_info=True)
+            finally:
+                db.close()
+
+
+async def _run_ai_on_history(
+    db: Session,
+    *,
+    room_id: str,
+    sender_id: str,
+    sender_name: str,
+    customer: Optional[dict[str, Any]],
+    instance_id: str,
+) -> dict[str, Any]:
+    """加载对话历史并调用 AI（多轮 tool-call），用于批次窗口到期后的统一处理。"""
+
+    # ---- 1. 加载对话历史 ----
     history = _load_history(db, room_id)
 
-    # ---- 4. 组装 API messages (system + history) ----
+    # ---- 2. 组装 API messages (system + history) ----
+    system_prompt = _build_system_prompt(db)
     api_messages: list[dict[str, Any]] = [
-        {"role": "system", "content": CUSTOMER_GROUP_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
     ]
-    # 历史消息中如果有图片 base64，对于较早的消息去掉图片以节省 token
     for i, msg in enumerate(history):
         if isinstance(msg.get("content"), list) and i < len(history) - 5:
-            # 5 条以前的图片消息，用文字替代
             text_parts = [p.get("text", "") for p in msg["content"] if p.get("type") == "text"]
             api_messages.append({"role": msg["role"], "content": " ".join(text_parts) + " [图片已省略]"})
         else:
             api_messages.append(msg)
 
-    # ---- 5. 调用 AI (可能多轮 tool call) ----
+    # ---- 3. 调用 AI (可能多轮 tool call) ----
     cfg = _load_ai_config(db)
     if not cfg.get("enabled"):
         logger.info("AI 已关闭，跳过对话: room=%s", room_id)
@@ -864,15 +1191,10 @@ async def process_customer_group_message(
         tool_calls = message.get("tool_calls")
 
         # 保存 assistant 消息
-        _save_message(
-            db, room_id, "assistant",
-            content=ai_content,
-            tool_calls=tool_calls,
-        )
+        _save_message(db, room_id, "assistant", content=ai_content, tool_calls=tool_calls)
         api_messages.append(message)
 
         if not tool_calls:
-            # AI 没有调用工具 — 可能是普通回复或什么都不做
             if ai_content and ai_content.strip():
                 ai_responded = True
                 logger.info("AI 文本回复 (无工具调用): room=%s content=%s",
@@ -892,7 +1214,6 @@ async def process_customer_group_message(
 
             logger.info("AI 工具调用: room=%s tool=%s args=%s", room_id, func_name, func_args_str[:500])
 
-            # 执行
             tool_result = await _execute_tool(
                 func_name, func_args,
                 db=db, room_id=room_id, sender_id=sender_id,
@@ -900,7 +1221,6 @@ async def process_customer_group_message(
                 instance_id=instance_id,
             )
 
-            # 保存 tool response
             _save_message(db, room_id, "tool", content=tool_result, name=func_name, tool_call_id=call_id)
             api_messages.append({
                 "role": "tool",
@@ -909,7 +1229,7 @@ async def process_customer_group_message(
             })
             ai_responded = True
 
-    # ---- 6. 定期清理旧消息 ----
+    # ---- 清理旧消息 ----
     _trim_history(db, room_id)
 
     return {"ok": True, "ai_responded": ai_responded}
@@ -965,14 +1285,21 @@ async def _call_chat_api(cfg: dict[str, Any], messages: list[dict[str, Any]]) ->
         "tool_choice": "auto",
         "max_tokens": 16384,
     }
+    # 按供应商开启深度思考
+    if provider == "qwen":
+        request_body["enable_thinking"] = True
+    elif provider == "bytedance":
+        request_body["thinking"] = {"type": "enabled"}
 
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
+    # 深度思考需要更长超时
+    timeout = CHAT_API_TIMEOUT if provider != "bytedance" else max(CHAT_API_TIMEOUT, 300)
     t0 = time.time()
-    async with httpx.AsyncClient(timeout=CHAT_API_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             f"{base_url}/chat/completions",
             headers=headers,
@@ -1032,6 +1359,10 @@ async def _execute_tool(
     try:
         if name == "create_order_review":
             return _tool_create_order_review(
+                db, room_id, sender_id, sender_name, customer, instance_id, args,
+            )
+        elif name == "create_modify_review":
+            return _tool_create_modify_review(
                 db, room_id, sender_id, sender_name, customer, instance_id, args,
             )
         elif name == "void_recent_review":

@@ -75,6 +75,14 @@ export const revertPending = (id) => {
   })
 }
 
+export const markModifyDone = (id, data) => {
+  return request({
+    url: `/api/downstream-orders/reviews/${id}/modify-done`,
+    method: 'post',
+    data
+  })
+}
+
 export const getContextMessages = (id, options = {}) => {
   return request({
     url: `/api/downstream-orders/reviews/${id}/context-messages`,
