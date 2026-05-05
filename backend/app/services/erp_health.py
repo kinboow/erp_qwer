@@ -111,6 +111,12 @@ async def refresh_erp_health_status() -> dict[str, Any]:
                 await ws_notify.broadcast("erp_offline", {"error": error_msg})
             except Exception:
                 pass
+            # 通知群推送
+            try:
+                from app.services.notify_group import send_to_notification_groups
+                await send_to_notification_groups(None, f"🔴 ERP 连接离线\n原因：{error_msg}\n请尽快检查 ERP 服务状态！")
+            except Exception:
+                pass
 
         # 状态由离线变为在线时，写入系统消息 + 通知前端
         if _prev_online is not None and not _prev_online and current_online:

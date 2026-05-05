@@ -83,6 +83,23 @@ export const markModifyDone = (id, data) => {
   })
 }
 
+export const processModifyReview = (id, data) => {
+  return request({
+    url: `/api/downstream-orders/reviews/${id}/process-modify`,
+    method: 'post',
+    data,
+    timeout: 0
+  })
+}
+
+export const getCustomerReviewHistory = (customerId) => {
+  return request({
+    url: '/api/downstream-orders/reviews/customer-history',
+    method: 'get',
+    params: { customer_id: customerId }
+  })
+}
+
 export const getContextMessages = (id, options = {}) => {
   return request({
     url: `/api/downstream-orders/reviews/${id}/context-messages`,

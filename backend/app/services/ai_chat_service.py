@@ -1066,6 +1066,18 @@ async def process_customer_group_message(
     _save_message(db, room_id, "user", content=user_content, name=sender_name)
     logger.info("消息已入库: room=%s sender=%s type=%s", room_id, sender_name, message_type)
 
+    # ---- 2.5 熔断期间缓冲消息信息（消息仍入库，只是不送AI） ----
+    from app.services.ai_circuit_breaker import is_tripped as _cb_is_tripped, buffer_message as _cb_buffer
+    if _cb_is_tripped():
+        _cb_buffer({
+            "room_id": room_id,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "customer_name": (customer or {}).get("customer_name", ""),
+            "content_preview": (content_text or "")[:200],
+            "message_type": message_type,
+        })
+
     # ---- 3. 批次窗口：35 秒内同群消息合并后统一送 AI ----
     batch = _room_batches.get(room_id)
 
@@ -1121,6 +1133,20 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
 
     logger.info("批次窗口到期，开始 AI 处理: room=%s 共 %d 条消息", room_id, msg_count)
 
+    # 熔断检查：如果 AI 已暂停，缓冲消息而不调用
+    from app.services.ai_circuit_breaker import is_tripped, buffer_message
+    if is_tripped():
+        logger.warning("[AI熔断] 批次窗口到期但 AI 已暂停，缓冲消息: room=%s count=%d", room_id, msg_count)
+        buffer_message({
+            "room_id": room_id,
+            "sender_id": last_sender_id,
+            "sender_name": last_sender_name,
+            "customer_name": (customer or {}).get("customer_name", ""),
+            "content_preview": f"[批次 {msg_count} 条消息]",
+            "message_type": "batch",
+        })
+        return
+
     # 获取同群锁 + 全局信号量，与 _send_msg_to_ai 共享，避免并发冲突
     from app.services.wechat_runtime_compat import _get_room_lock, _get_ai_semaphore
     room_lock = _get_room_lock(room_id)
@@ -1169,6 +1195,11 @@ async def _run_ai_on_history(
             api_messages.append(msg)
 
     # ---- 3. 调用 AI (可能多轮 tool call) ----
+    from app.services.ai_circuit_breaker import is_tripped, record_success, record_error
+    if is_tripped():
+        logger.warning("AI 已熔断，跳过对话: room=%s", room_id)
+        return {"ok": False, "reason": "ai_tripped"}
+
     cfg = _load_ai_config(db)
     if not cfg.get("enabled"):
         logger.info("AI 已关闭，跳过对话: room=%s", room_id)
@@ -1181,8 +1212,10 @@ async def _run_ai_on_history(
         tool_round += 1
         try:
             ai_response = await _call_chat_api(cfg, api_messages)
+            record_success()
         except Exception as exc:
             logger.error("AI API 调用失败: room=%s err=%s", room_id, exc)
+            await record_error(str(exc))
             break
 
         choice = (ai_response.get("choices") or [{}])[0]

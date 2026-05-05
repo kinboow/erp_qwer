@@ -201,3 +201,108 @@ def api_get_ai_call_logs(
         })
 
     return _json_response(data={"list": logs, "total": total, "page": page, "page_size": page_size})
+
+
+# ---------------------------------------------------------------------------
+# AI 熔断器 API
+# ---------------------------------------------------------------------------
+
+@router.get("/circuit-breaker/status", summary="获取 AI 熔断器状态")
+def api_ai_circuit_breaker_status(
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.ai_circuit_breaker import get_status
+    return _json_response(data=get_status())
+
+
+@router.get("/circuit-breaker/buffered-messages", summary="获取熔断期间缓冲的消息")
+def api_ai_buffered_messages(
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.ai_circuit_breaker import get_buffered_messages
+    return _json_response(data=get_buffered_messages())
+
+
+@router.post("/circuit-breaker/recover", summary="尝试恢复 AI 服务")
+async def api_ai_recover(
+    current_user: User = Depends(get_current_user),
+):
+    from app.services.ai_circuit_breaker import try_recover
+    result = await try_recover()
+    if result.get("ok"):
+        return _json_response(message="AI 已恢复", data=result)
+    return _json_response(code=503, message=result.get("error", "恢复失败"), data=result)
+
+
+class ReprocessPayload(BaseModel):
+    room_ids: list[str] = []
+    shipping_record_ids: list[int] = []
+
+
+@router.post("/circuit-breaker/reprocess", summary="重处理选中的缓冲消息")
+async def api_ai_reprocess(
+    payload: ReprocessPayload,
+    current_user: User = Depends(get_current_user),
+):
+    """对选中的客户群(room_id)重新触发AI对话，对选中的发货扫码记录重新AI解析+下单"""
+    from app.services.ai_circuit_breaker import is_tripped, clear_buffered_messages
+    if is_tripped():
+        return _json_response(code=503, message="AI 仍处于暂停状态，请先恢复")
+
+    from app.database import SessionLocal
+    from app.services.ai_chat_service import _run_ai_on_history
+
+    processed_rooms = []
+    processed_scans = []
+    errors = []
+
+    # 1. 重处理客户群对话
+    for room_id in set(payload.room_ids):
+        db = SessionLocal()
+        try:
+            last_msg = db.execute(text(
+                "SELECT name FROM ai_chat_messages "
+                "WHERE room_id = :room_id AND role = 'user' ORDER BY id DESC LIMIT 1"
+            ), {"room_id": room_id}).mappings().first()
+            sender_name = (last_msg or {}).get("name") or ""
+
+            cust = db.execute(text(
+                "SELECT c.id, c.customer_name, c.erp_customer_id "
+                "FROM downstream_customer_wechat_rooms r "
+                "JOIN downstream_customers c ON r.customer_id = c.id "
+                "WHERE r.room_id = :room_id LIMIT 1"
+            ), {"room_id": room_id}).mappings().first()
+            customer = dict(cust) if cust else None
+
+            await _run_ai_on_history(
+                db,
+                room_id=room_id,
+                sender_id="",
+                sender_name=sender_name,
+                customer=customer,
+                instance_id="",
+            )
+            processed_rooms.append(room_id)
+        except Exception as exc:
+            errors.append({"type": "room", "id": room_id, "error": str(exc)})
+        finally:
+            db.close()
+
+    # 2. 重处理发货扫码记录
+    for rec_id in set(payload.shipping_record_ids):
+        try:
+            from app.services.shipping_scan_handler import retry_shipping_scan_record
+            result = await retry_shipping_scan_record(rec_id)
+            if result.get("ok"):
+                processed_scans.append(result)
+            else:
+                errors.append({"type": "shipping_scan", "id": rec_id, "error": result.get("error", "未知")})
+        except Exception as exc:
+            errors.append({"type": "shipping_scan", "id": rec_id, "error": str(exc)})
+
+    clear_buffered_messages()
+    return _json_response(data={
+        "processed_rooms": processed_rooms,
+        "processed_scans": processed_scans,
+        "errors": errors,
+    })

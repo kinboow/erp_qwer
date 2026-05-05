@@ -973,16 +973,40 @@ async def handle_shipping_scan(
 
         logger.info("[发货扫码] 创建扫码记录 id=%d order=%s paper=%s", record_id, order_no, paper_id)
 
-        # 4. AI 视觉解析发货表格
+        # 4. AI 视觉解析发货表格（含熔断检查）
+        from app.services.ai_circuit_breaker import is_tripped as _ai_tripped, buffer_message as _ai_buffer, record_success as _ai_ok, record_error as _ai_err
+        if _ai_tripped():
+            logger.warning("[发货扫码] AI 已熔断，缓冲发货扫码 record=%d order=%s", record_id, order_no)
+            db = SessionLocal()
+            try:
+                update_scan_record(db, record_id, scan_status="failed", error_message="AI 已暂停（熔断）")
+            finally:
+                db.close()
+            _ai_buffer({
+                "room_id": room_id,
+                "sender_id": sender_id,
+                "sender_name": "",
+                "customer_name": "",
+                "content_preview": f"[发货扫码] 订单:{order_no} 纸张:{paper_id}",
+                "message_type": "shipping_scan",
+                "msg_log_id": msg_log_id,
+                "record_id": record_id,
+                "order_no": order_no,
+                "paper_id": paper_id,
+            })
+            return
+
         db = SessionLocal()
         try:
             update_scan_record(db, record_id, scan_status="parsing")
             parsed = await ai_parse_shipping_table(image_bytes, db)
             parsed_items = parsed.get("items") or []
             update_scan_record(db, record_id, ai_parsed_json=json.dumps(parsed, ensure_ascii=False))
+            _ai_ok()
         except Exception as exc:
             update_scan_record(db, record_id, scan_status="failed", error_message=f"AI解析失败: {exc}")
             logger.error("[发货扫码] AI解析失败 record=%d: %s", record_id, exc)
+            await _ai_err(f"shipping_scan: {exc}")
             # 通知群推送失败
             await send_notification_to_groups(db, order_no, "", False, {}, f"AI解析失败: {exc}")
             _mark_msg_recognized(msg_log_id)
@@ -1010,6 +1034,22 @@ async def handle_shipping_scan(
             try:
                 update_scan_record(db, record_id, scan_status="failed", error_message=f"查询订单失败: {exc}")
                 await send_notification_to_groups(db, order_no, "", False, {}, f"查询订单 {order_no} 失败: {exc}")
+            finally:
+                db.close()
+            _mark_msg_recognized(msg_log_id)
+            return
+
+        # 5.5 检查订单是否已作废（state=2）
+        order_state = order_detail.get("main", {}).get("state")
+        if order_state == 2:
+            logger.warning("[发货扫码] 订单 %s 已作废(state=2)，@发送人警告", order_no)
+            db = SessionLocal()
+            try:
+                update_scan_record(db, record_id, scan_status="failed", error_message=f"订单 {order_no} 已作废")
+                at_list = [sender_id] if sender_id else None
+                warn_msg = f"⚠️ 注意！订单 {order_no} 已作废，此单不要发货！！！请核实最新订单号！"
+                await send_room_at(db, room_id, warn_msg, at_list=at_list, source=source_msg_id)
+                await send_notification_to_groups(db, order_no, "", False, {}, f"⚠️ 已作废订单 {order_no} 的拣货单被扫码识别，已在发货群@发送人警告")
             finally:
                 db.close()
             _mark_msg_recognized(msg_log_id)
@@ -1070,3 +1110,144 @@ async def handle_shipping_scan(
             finally:
                 db.close()
         _mark_msg_recognized(msg_log_id)
+
+
+# ---------------------------------------------------------------------------
+# 重试发货扫码（AI 恢复后重新处理之前失败的记录）
+# ---------------------------------------------------------------------------
+async def retry_shipping_scan_record(record_id: int) -> dict[str, Any]:
+    """根据已有的 scan record 重新从 AI 解析开始执行。
+    会检查 paper_id 是否已成功识别过，避免重复下单。
+    """
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            text("SELECT * FROM shipping_scan_records WHERE id = :id"),
+            {"id": record_id},
+        ).mappings().first()
+    finally:
+        db.close()
+
+    if not row:
+        return {"ok": False, "error": f"扫码记录 {record_id} 不存在"}
+
+    order_no = row["order_no"] or ""
+    paper_id = row["paper_id"] or ""
+    room_id = row["room_id"] or ""
+    sender_id = row["sender_id"] or ""
+    msg_log_id = row["msg_log_id"] or 0
+    instance_id = row["instance_id"] or ""
+
+    # 检查 paper_id 是否已成功
+    db = SessionLocal()
+    try:
+        if is_paper_used(db, paper_id):
+            logger.info("[发货重试] paper=%s 已成功识别过，跳过", paper_id)
+            return {"ok": False, "error": f"纸张 {paper_id} 已成功识别过，无需重试"}
+    finally:
+        db.close()
+
+    # 重新下载图片（从 OSS 读取已归档的图片）
+    db = SessionLocal()
+    try:
+        log_row = db.execute(
+            text("SELECT oss_key FROM message_logs WHERE id = :id"),
+            {"id": msg_log_id},
+        ).mappings().first()
+    finally:
+        db.close()
+
+    image_bytes = None
+    oss_key = (log_row or {}).get("oss_key") or ""
+    if oss_key:
+        try:
+            from app.utils.oss_client import oss_client
+            image_bytes = oss_client.download_file(oss_key)
+        except Exception as exc:
+            logger.warning("[发货重试] OSS 下载失败 key=%s: %s", oss_key, exc)
+
+    if not image_bytes:
+        return {"ok": False, "error": "无法重新获取图片（OSS 无归档）"}
+
+    # AI 解析
+    db = SessionLocal()
+    try:
+        update_scan_record(db, record_id, scan_status="parsing", error_message="")
+        parsed = await ai_parse_shipping_table(image_bytes, db)
+        parsed_items = parsed.get("items") or []
+        update_scan_record(db, record_id, ai_parsed_json=json.dumps(parsed, ensure_ascii=False))
+    except Exception as exc:
+        update_scan_record(db, record_id, scan_status="failed", error_message=f"重试AI解析失败: {exc}")
+        return {"ok": False, "error": f"AI解析失败: {exc}"}
+    finally:
+        db.close()
+
+    if not parsed_items:
+        db = SessionLocal()
+        try:
+            update_scan_record(db, record_id, scan_status="failed", error_message="重试: AI未识别到有效发货内容")
+        finally:
+            db.close()
+        return {"ok": False, "error": "AI未识别到有效发货内容"}
+
+    # 获取 ERP 订单详情
+    try:
+        order_detail = await get_erp_order_detail(order_no)
+    except Exception as exc:
+        db = SessionLocal()
+        try:
+            update_scan_record(db, record_id, scan_status="failed", error_message=f"重试: 查询订单失败: {exc}")
+        finally:
+            db.close()
+        return {"ok": False, "error": f"查询订单失败: {exc}"}
+
+    # 检查订单是否已作废
+    order_state = order_detail.get("main", {}).get("state")
+    if order_state == 2:
+        db = SessionLocal()
+        try:
+            update_scan_record(db, record_id, scan_status="failed", error_message=f"订单 {order_no} 已作废")
+        finally:
+            db.close()
+        return {"ok": False, "error": f"订单 {order_no} 已作废"}
+
+    # 创建发货单
+    try:
+        shipment_result = await create_erp_shipment(order_detail, parsed_items)
+        shipment_no = shipment_result.get("shipment_no", "")
+    except Exception as exc:
+        db = SessionLocal()
+        try:
+            update_scan_record(db, record_id, scan_status="failed", error_message=f"重试: 创建发货单失败: {exc}")
+        finally:
+            db.close()
+        return {"ok": False, "error": f"创建发货单失败: {exc}"}
+
+    # 即时同步
+    if shipment_no:
+        try:
+            from app.services.erp_sync import sync_single_shipment
+            await sync_single_shipment(shipment_no)
+        except Exception:
+            pass
+
+    # 计算发货状态
+    shipping_status = calc_shipping_status(order_detail, parsed_items)
+
+    # 更新记录 + 通知
+    db = SessionLocal()
+    try:
+        update_scan_record(
+            db, record_id,
+            scan_status="success",
+            shipment_no=shipment_no,
+            shipment_result=json.dumps(shipping_status, ensure_ascii=False),
+        )
+        await send_notification_to_groups(db, order_no, shipment_no, True, shipping_status)
+        update_scan_record(db, record_id, notification_sent=1)
+    finally:
+        db.close()
+
+    _mark_msg_recognized(msg_log_id)
+    logger.info("[发货重试] 完成 record=%d shipment=%s", record_id, shipment_no)
+    return {"ok": True, "record_id": record_id, "shipment_no": shipment_no, "order_no": order_no}

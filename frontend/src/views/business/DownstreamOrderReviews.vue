@@ -142,17 +142,17 @@
               />
 
               <div class="compare-right">
-                <div class="panel-label">{{ selectedReview.review_type === 'modify' ? '修改说明' : '解析结果（下单内容）' }}</div>
+                <div class="panel-label">{{ selectedReview.review_type === 'modify' ? (selectedOriginalReviewId ? '修改说明 + 新订单内容' : '修改说明') : '解析结果（下单内容）' }}</div>
                 <!-- 待修改类型：显示修改说明 -->
                 <div v-if="selectedReview.review_type === 'modify'" class="modify-desc-area">
-                  <el-alert type="warning" :closable="false" show-icon style="margin-bottom:12px">
+                  <el-alert type="warning" :closable="false" show-icon style="margin-bottom:8px">
                     <template #title>客户要求修改之前报过的订单</template>
                   </el-alert>
                   <div class="modify-desc-content">
                     <div class="modify-label">修改内容：</div>
                     <div class="modify-text">{{ currentOrder?.modify_description || '（无描述）' }}</div>
                   </div>
-                  <div v-if="currentOrder?.original_items?.length" class="modify-desc-content" style="margin-top:8px">
+                  <div v-if="currentOrder?.original_items?.length" class="modify-desc-content" style="margin-top:4px">
                     <div class="modify-label">涉及款号：</div>
                     <div class="modify-text">
                       <el-tag v-for="(oi, idx) in currentOrder.original_items" :key="idx" size="small" style="margin-right:4px">
@@ -160,9 +160,49 @@
                       </el-tag>
                     </div>
                   </div>
+                  <el-divider style="margin:8px 0" />
+                  <div class="modify-desc-content">
+                    <div class="modify-label">选择原单：</div>
+                    <div class="modify-text" style="flex:1">
+                      <el-select
+                        v-model="selectedOriginalReviewId"
+                        filterable
+                        placeholder="请先选择客户，再选择要修改的原始订单"
+                        style="width:100%"
+                        :loading="originalReviewsLoading"
+                        @visible-change="onOriginalSelectOpen"
+                        @change="onOriginalReviewSelected"
+                      >
+                        <el-option
+                          v-for="item in originalReviewOptions"
+                          :key="item.id"
+                          :value="item.id"
+                          :label="`#${item.review_uid || item.id} [${originalStatusText(item.review_status)}] ${item.erp_order_no ? 'ERP:' + item.erp_order_no + ' ' : ''}${item.items_summary || ''}`"
+                        >
+                          <div style="display:flex;align-items:center;gap:6px">
+                            <el-tag size="small" :type="statusTagType(item.review_status)">{{ originalStatusText(item.review_status) }}</el-tag>
+                            <span v-if="item.erp_order_no" style="color:#e6a23c;font-weight:600">{{ item.erp_order_no }}</span>
+                            <span style="color:#606266;font-size:12px">{{ item.items_summary }}</span>
+                            <span style="color:#909399;font-size:11px;margin-left:auto">{{ formatTime(item.created_at) }}</span>
+                          </div>
+                        </el-option>
+                      </el-select>
+                      <div v-if="selectedOriginalReview" class="original-review-hint">
+                        <el-tag size="small" :type="statusTagType(selectedOriginalReview.review_status)">
+                          {{ originalStatusText(selectedOriginalReview.review_status) }}
+                        </el-tag>
+                        <span v-if="selectedOriginalReview.review_status === 'pending'" style="color:#909399;font-size:12px">
+                          → 将作废此待审核单，以新单下到 ERP
+                        </span>
+                        <span v-else-if="selectedOriginalReview.review_status === 'approved'" style="color:#e6a23c;font-size:12px">
+                          → 将作废 ERP 订单 {{ selectedOriginalReview.erp_order_no }}，重新下单并通知群
+                        </span>
+                      </div>
+                    </div>
+                  </div>
                 </div>
-                <!-- 正常类型：下单内容编辑表格 -->
-                <div v-else class="edit-form-area">
+                <!-- 编辑表格（正常单直接显示，修改单在选择原单后显示） -->
+                <div v-if="selectedReview.review_type !== 'modify' || selectedOriginalReviewId" class="edit-form-area">
                   <el-table :data="editForm.items" border size="small" class="order-table" @keydown="onTableKeydown">
                     <el-table-column type="index" label="序" width="40" align="center" />
                     <el-table-column label="款号" min-width="90" align="center" header-align="center" class-name="select-col">
@@ -230,7 +270,7 @@
             </div>
             <div class="footer-actions">
               <template v-if="selectedReview.review_status === 'pending' && selectedReview.review_type === 'modify'">
-                <el-button type="success" :loading="actionLoading" @click="handleModifyDone">已手动修改完成</el-button>
+                <el-button type="primary" :loading="actionLoading" @click="handleProcessModify">修改</el-button>
                 <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">废单</el-button>
               </template>
               <template v-else-if="selectedReview.review_status === 'pending'">
@@ -332,9 +372,11 @@ import {
   approveReview,
   checkDuplicate,
   getContextMessages,
+  getCustomerReviewHistory,
   getReviewDetail,
   getReviewList,
   markModifyDone,
+  processModifyReview,
   replaceReview,
   reparseReview,
   revertPending,
@@ -481,6 +523,68 @@ const isReviewImage = computed(() => {
   const mime = (selectedReview.value.attachment_mime || '').toLowerCase()
   return mt === 'image' || mime.startsWith('image/')
 })
+
+// ---- 修改审核单：原始订单选择 ----
+const selectedOriginalReviewId = ref(null)
+const originalReviewOptions = ref([])
+const originalReviewsLoading = ref(false)
+
+const selectedOriginalReview = computed(() => {
+  if (!selectedOriginalReviewId.value) return null
+  return originalReviewOptions.value.find(r => r.id === selectedOriginalReviewId.value) || null
+})
+
+const originalStatusText = (status) => {
+  const map = { pending: '待审核', approved: '已下单', replaced: '已替换' }
+  return map[status] || status
+}
+
+const formatTime = (dt) => {
+  if (!dt) return ''
+  return String(dt).replace('T', ' ').slice(0, 16)
+}
+
+const onOriginalReviewSelected = async (reviewId) => {
+  if (!reviewId) return
+  try {
+    const res = await getReviewDetail(reviewId)
+    const origData = res.data
+    const origOrder = origData?.manual_order || origData?.parsed_order || null
+    if (origOrder?.items?.length) {
+      editForm.items = (origOrder.items || []).map(item => {
+        const row = { product_no: item.product_no || '', color: item.color || '' }
+        STANDARD_SIZES.forEach(s => { row[`s_${s}`] = 0 })
+        ;(item.sizes || []).forEach(sz => {
+          const key = `s_${sz.size}`
+          if (key in row) row[key] = sz.qty || 0
+        })
+        return row
+      })
+      ElMessage.success('已加载原始订单内容到编辑表格，请按客户要求修改后点击"处理修改"')
+    } else {
+      ElMessage.warning('原始订单没有可加载的明细项')
+    }
+  } catch (e) {
+    ElMessage.error('加载原始订单详情失败')
+  }
+}
+
+const onOriginalSelectOpen = async (visible) => {
+  if (!visible) return
+  if (!selectedCustomerId.value) {
+    ElMessage.warning('请先在底部选择客户')
+    return
+  }
+  originalReviewsLoading.value = true
+  try {
+    const res = await getCustomerReviewHistory(selectedCustomerId.value)
+    originalReviewOptions.value = (res.data || []).filter(r => r.id !== selectedReview.value?.id)
+  } catch (e) {
+    ElMessage.error('加载历史订单失败')
+  } finally {
+    originalReviewsLoading.value = false
+  }
+}
 
 const STANDARD_SIZES = ['S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL']
 
@@ -724,6 +828,8 @@ const loadMoreReviews = async () => {
 
 const selectReview = async (item) => {
   resetSourceZoom()
+  selectedOriginalReviewId.value = null
+  originalReviewOptions.value = []
   const res = await getReviewDetail(item.id)
   selectedReview.value = res.data
   selectedCustomerId.value = res.data.customer_id ? Number(res.data.customer_id) : null
@@ -916,6 +1022,69 @@ const handleVoid = async () => {
   try {
     await voidReview(selectedReview.value.id, { review_note: reviewNote.value })
     ElMessage.success('已标记为废单')
+    await fetchReviews()
+  } finally {
+    actionLoading.value = false
+  }
+}
+
+const handleProcessModify = async () => {
+  if (!selectedReview.value) return
+  if (!ensureCustomerSelected()) return
+  if (!selectedOriginalReviewId.value) {
+    ElMessage.warning('请先在上方选择需要替换的原始订单')
+    return
+  }
+  // 构建编辑后的订单数据
+  const items = editForm.items
+    .filter(row => row.product_no && rowTotal(row) > 0)
+    .map(row => {
+      const sizes = STANDARD_SIZES
+        .filter(s => row[`s_${s}`] > 0)
+        .map(s => ({ size: s, qty: row[`s_${s}`] }))
+      return { product_no: row.product_no, color: row.color, sizes }
+    })
+  if (items.length === 0) {
+    ElMessage.warning('请至少填写一条有数量的明细再提交')
+    return
+  }
+  const orig = selectedOriginalReview.value
+  const confirmMsg = orig?.review_status === 'approved'
+    ? `确认作废原 ERP 订单 ${orig.erp_order_no}，并用修改后的内容重新下单？\n（将同时在群内通知订单变更）`
+    : `确认作废原待审核单 #${orig?.review_uid || orig?.id}，并用修改后的内容下单到 ERP？`
+  await ElMessageBox.confirm(confirmMsg, '处理修改', {
+    confirmButtonText: '确认处理',
+    cancelButtonText: '取消',
+    type: 'warning'
+  })
+  actionLoading.value = true
+  try {
+    const orderData = {
+      order_date: new Date().toISOString().slice(0, 19).replace('T', ' '),
+      remark: reviewNote.value,
+      items
+    }
+    const res = await processModifyReview(selectedReview.value.id, {
+      customer_id: selectedCustomerId.value,
+      original_review_id: selectedOriginalReviewId.value,
+      order_data: orderData,
+      review_note: reviewNote.value,
+      include_ai_remark: includeAiRemark.value
+    })
+    const d = res.data || {}
+    _printDebugLogs(d)
+    let msg = `修改处理完成，新ERP单号: ${d.new_order_no || '-'}`
+    if (d.voided_erp_order) msg += `，已作废旧单: ${d.voided_erp_order}`
+    if (d.auto_print?.printed) {
+      msg += `，${d.auto_print.message || '配货单已加入打印队列'}`
+      ElMessage.success(msg)
+    } else if (d.auto_print && !d.auto_print.printed) {
+      msg += `，自动打印失败: ${d.auto_print.error || '未知错误'}`
+      ElMessage({ message: msg, type: 'warning', duration: 6000 })
+    } else {
+      ElMessage.success(msg)
+    }
+    selectedOriginalReviewId.value = null
     await fetchReviews()
   } finally {
     actionLoading.value = false
@@ -1590,8 +1759,9 @@ onBeforeUnmount(() => {
 
 .modify-desc-area {
   padding: 12px;
-  flex: 1;
+  flex-shrink: 0;
   overflow-y: auto;
+  max-height: 40%;
 }
 .modify-desc-content {
   display: flex;
@@ -1609,6 +1779,15 @@ onBeforeUnmount(() => {
   color: #303133;
   line-height: 1.6;
   word-break: break-all;
+}
+.original-review-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: #fdf6ec;
+  border-radius: 4px;
 }
 
 .edit-form-area {

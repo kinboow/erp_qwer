@@ -13,6 +13,7 @@ from app.routers import auth, users, wechat, roles, customers, logs, wechat_runt
 from app.routers import unshipped_report as local_unshipped_report
 from app.routers import ai_config as ai_config_router
 from app.routers import printer as printer_router
+from app.routers import shipping_scans as shipping_scans_router
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
@@ -176,6 +177,7 @@ app.include_router(system_messages.router, prefix="/api/system-messages", tags=[
 app.include_router(system_activities.router, prefix="/api/system-activities", tags=["系统动态"])
 app.include_router(ai_config_router.router, prefix="/api/ai", tags=["AI-模型配置"])
 app.include_router(printer_router.router)
+app.include_router(shipping_scans_router.router, prefix="/api/shipping", tags=["发货扫码记录"])
 
 # ncloud2 ERP API 路由（弘兆云 ERP 操作）
 app.include_router(ncloud_auth.router, prefix="/api/erp", tags=["ERP-认证"])

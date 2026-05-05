@@ -19,3 +19,19 @@ export const testAiConnection = (data) => {
 export const getAiCallLogs = (params) => {
   return request({ url: '/api/ai/call-logs', method: 'get', params })
 }
+
+export const getAiCircuitBreakerStatus = () => {
+  return request({ url: '/api/ai/circuit-breaker/status', method: 'get' })
+}
+
+export const getAiBufferedMessages = () => {
+  return request({ url: '/api/ai/circuit-breaker/buffered-messages', method: 'get' })
+}
+
+export const recoverAi = () => {
+  return request({ url: '/api/ai/circuit-breaker/recover', method: 'post', timeout: 60000 })
+}
+
+export const reprocessAiMessages = (data) => {
+  return request({ url: '/api/ai/circuit-breaker/reprocess', method: 'post', data, timeout: 120000 })
+}

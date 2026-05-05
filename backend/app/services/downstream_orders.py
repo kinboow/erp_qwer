@@ -1886,21 +1886,22 @@ async def process_modify_review(
     original_review_id: int,
     customer_id: int,
     current_user: User,
+    order_data: dict[str, Any],
     review_note: str = "",
     *,
     include_ai_remark: bool = True,
 ) -> dict[str, Any]:
     """
     处理待修改审核单：
-    - 查找原始审核单
-    - 如果原始单是 pending → 作废它，再用当前修改单的新内容下 ERP 新单
+    - 前端传入编辑好的新订单数据 order_data
+    - 如果原始单是 pending → 作废它，再用新内容下 ERP 新单
     - 如果原始单是 approved → 在 ERP 中作废旧销售订单，再下新单，群通知
     """
     import time as _t; _t0 = _t.time(); _logs = []
     def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
     _log("处理待修改审核单 开始")
 
-    # 1. 加载当前修改审核单（带新的下单内容）
+    # 1. 加载当前修改审核单
     modify_row = db.execute(
         text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": modify_review_id}
     ).mappings().first()
@@ -1922,8 +1923,9 @@ async def process_modify_review(
     customer = _load_customer(db, customer_id)
     erp_customer_id = customer.get("erp_customer_id") or ""
 
-    # 3. 准备新订单数据（从修改审核单的 parsed_order_json 中取）
-    order_data = _review_order_data(modify_row)
+    # 3. 使用前端传入的编辑后订单数据
+    if not order_data.get("items"):
+        raise ValueError("订单明细不能为空")
     review_uid = modify_row.get("review_uid") or ""
     if not include_ai_remark:
         order_data["remark"] = ""
@@ -2011,7 +2013,7 @@ async def process_modify_review(
         text(
             "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, "
             "review_status = 'approved', erp_order_no = :erp_order_no, "
-            "replaced_order_no = :replaced_order_no, "
+            "replaced_order_no = :replaced_order_no, manual_order_json = :manual_order_json, "
             "review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, "
             "operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() "
             "WHERE id = :id"
@@ -2022,6 +2024,7 @@ async def process_modify_review(
             "customer_name": customer.get("customer_name") or "",
             "erp_order_no": new_order_no,
             "replaced_order_no": voided_erp_order,
+            "manual_order_json": _json_dumps(order_data),
             "review_note": review_note,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,

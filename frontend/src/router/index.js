@@ -147,6 +147,12 @@ const routes = [
         meta: { title: '库存查询' }
       },
       {
+        path: 'shipping-scan-records',
+        name: 'ShippingScanRecords',
+        component: () => import('@/views/business/ShippingScanRecords.vue'),
+        meta: { title: '发货单识别' }
+      },
+      {
         path: 'unshipped-report',
         name: 'UnshippedReport',
         component: () => import('@/views/business/UnshippedReport.vue'),

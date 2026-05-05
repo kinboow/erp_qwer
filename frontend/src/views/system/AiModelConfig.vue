@@ -67,14 +67,99 @@
       </div>
     </div>
 
+    <!-- 熔断器状态卡片 -->
+    <div class="config-card" :class="{ 'card-error': cbStatus.tripped }">
+      <div class="card-title">
+        <el-icon><Warning /></el-icon>
+        <span>AI 服务状态</span>
+        <el-tag v-if="cbStatus.tripped" type="danger" size="small" style="margin-left:auto">已暂停</el-tag>
+        <el-tag v-else type="success" size="small" style="margin-left:auto">正常</el-tag>
+      </div>
+
+      <template v-if="cbStatus.tripped">
+        <el-alert
+          type="error"
+          :closable="false"
+          show-icon
+          style="margin-bottom:16px"
+        >
+          <template #title>
+            AI 连续 {{ cbStatus.consecutive_errors }} 次调用失败，已自动暂停
+          </template>
+          <template #default>
+            <div style="margin-top:4px">错误：{{ cbStatus.last_error }}</div>
+            <div style="margin-top:2px;color:#909399;font-size:12px">暂停于 {{ cbStatus.tripped_at }}</div>
+            <div style="margin-top:2px;color:#909399;font-size:12px">期间缓冲了 {{ cbStatus.buffered_message_count || 0 }} 条客户消息</div>
+          </template>
+        </el-alert>
+
+        <div class="form-actions">
+          <el-button type="primary" @click="handleRecover" :loading="recovering">
+            <el-icon><RefreshRight /></el-icon>
+            我已恢复
+          </el-button>
+        </div>
+      </template>
+
+      <template v-else>
+        <div style="color:#67c23a;font-size:13px;display:flex;align-items:center;gap:6px">
+          <el-icon><CircleCheck /></el-icon>
+          AI 服务运行正常
+          <span v-if="cbStatus.last_error_at" style="color:#909399;margin-left:12px;font-size:12px">
+            最近错误：{{ cbStatus.last_error_at }}
+          </span>
+        </div>
+        <div class="form-actions" style="margin-top:12px">
+          <el-button type="primary" disabled plain>
+            <el-icon><RefreshRight /></el-icon>
+            我已恢复
+          </el-button>
+        </div>
+      </template>
+    </div>
+
+    <!-- 缓冲消息选择对话框 -->
+    <el-dialog v-model="reprocessDialogVisible" title="选择需要重新处理的消息" width="680px">
+      <el-alert type="info" :closable="false" style="margin-bottom:12px">
+        AI 已恢复正常，以下是暂停期间收到的消息。请勾选需要重新交给 AI 处理的项目。
+        发货扫码类消息会自动检查纸张ID是否已识别过，避免重复下单。
+      </el-alert>
+      <el-table :data="bufferedMessages" @selection-change="onBufferedSelectionChange" max-height="400" border>
+        <el-table-column type="selection" width="45" />
+        <el-table-column label="类型" width="90">
+          <template #default="{ row }">
+            <el-tag v-if="row.message_type === 'shipping_scan'" type="warning" size="small">发货扫码</el-tag>
+            <el-tag v-else type="primary" size="small">客户群</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="客户/订单" width="130">
+          <template #default="{ row }">{{ row.order_no || row.customer_name || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="发送人" prop="sender_name" width="90" />
+        <el-table-column label="内容" prop="content_preview" min-width="180" show-overflow-tooltip />
+        <el-table-column label="时间" width="150">
+          <template #default="{ row }">{{ row.created_at?.replace('T', ' ')?.slice(0, 19) || '-' }}</template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="handleSkipReprocess">跳过（不处理）</el-button>
+        <el-button type="primary" @click="handleReprocess" :loading="reprocessing" :disabled="!hasSelectedItems">
+          处理选中 ({{ selectedCount }} 项)
+        </el-button>
+      </template>
+    </el-dialog>
+
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Cpu, Setting, Connection, Check } from '@element-plus/icons-vue'
-import { getAiConfig, getAiProviders, saveAiConfig, testAiConnection } from '@/api/aiConfig'
+import { Cpu, Setting, Connection, Check, Warning, RefreshRight, CircleCheck } from '@element-plus/icons-vue'
+import {
+  getAiConfig, getAiProviders, saveAiConfig, testAiConnection,
+  getAiCircuitBreakerStatus, getAiBufferedMessages, recoverAi, reprocessAiMessages
+} from '@/api/aiConfig'
 
 const saving = ref(false)
 const testing = ref(false)
@@ -200,9 +285,105 @@ async function handleTest() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// AI 熔断器
+// ---------------------------------------------------------------------------
+const cbStatus = ref({ tripped: false, consecutive_errors: 0 })
+const recovering = ref(false)
+const reprocessDialogVisible = ref(false)
+const bufferedMessages = ref([])
+const selectedItems = ref([])
+const reprocessing = ref(false)
+const selectedRoomIds = computed(() => {
+  const ids = new Set()
+  selectedItems.value.filter(r => r.message_type !== 'shipping_scan' && r.room_id).forEach(r => ids.add(r.room_id))
+  return [...ids]
+})
+const selectedShippingRecordIds = computed(() => {
+  return selectedItems.value.filter(r => r.message_type === 'shipping_scan' && r.record_id).map(r => r.record_id)
+})
+const hasSelectedItems = computed(() => selectedRoomIds.value.length > 0 || selectedShippingRecordIds.value.length > 0)
+const selectedCount = computed(() => selectedRoomIds.value.length + selectedShippingRecordIds.value.length)
+let cbPollTimer = null
+
+async function loadCbStatus() {
+  try {
+    const res = await getAiCircuitBreakerStatus()
+    cbStatus.value = res.data || { tripped: false }
+  } catch { /* ignore */ }
+}
+
+async function handleRecover() {
+  recovering.value = true
+  try {
+    const res = await recoverAi()
+    if (res.code === 200) {
+      ElMessage.success('AI 测试通过，已恢复正常')
+      await loadCbStatus()
+      // 有缓冲消息则弹出选择对话框
+      if ((res.data?.buffered_count || 0) > 0) {
+        const msgRes = await getAiBufferedMessages()
+        bufferedMessages.value = msgRes.data || []
+        if (bufferedMessages.value.length > 0) {
+          reprocessDialogVisible.value = true
+        }
+      }
+    } else {
+      ElMessage.error(res.message || 'AI 恢复失败，请检查配置')
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.message || e?.message || 'AI 恢复失败')
+  } finally {
+    recovering.value = false
+  }
+}
+
+function onBufferedSelectionChange(rows) {
+  selectedItems.value = rows
+}
+
+function handleSkipReprocess() {
+  reprocessDialogVisible.value = false
+  bufferedMessages.value = []
+  selectedItems.value = []
+}
+
+async function handleReprocess() {
+  if (!hasSelectedItems.value) return
+  reprocessing.value = true
+  try {
+    const res = await reprocessAiMessages({
+      room_ids: selectedRoomIds.value,
+      shipping_record_ids: selectedShippingRecordIds.value,
+    })
+    const d = res.data || {}
+    const okRooms = (d.processed_rooms || []).length
+    const okScans = (d.processed_scans || []).length
+    const errCount = (d.errors || []).length
+    let msg = ''
+    if (okRooms) msg += `${okRooms} 个客户群`
+    if (okScans) msg += `${msg ? '、' : ''}${okScans} 个发货扫码`
+    if (errCount) msg += `，${errCount} 项失败`
+    ElMessage.success(`已处理 ${msg || '0 项'}`)
+    reprocessDialogVisible.value = false
+    bufferedMessages.value = []
+    selectedItems.value = []
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.message || '重处理失败')
+  } finally {
+    reprocessing.value = false
+  }
+}
+
 onMounted(async () => {
   await loadProviders()
   await loadConfig()
+  await loadCbStatus()
+  cbPollTimer = setInterval(loadCbStatus, 10000)
+})
+
+onUnmounted(() => {
+  if (cbPollTimer) clearInterval(cbPollTimer)
 })
 
 watch(
@@ -295,6 +476,11 @@ watch(
 .form-actions {
   display: flex;
   gap: 12px;
+}
+
+.card-error {
+  border: 1.5px solid #f56c6c;
+  background: #fef0f0 !important;
 }
 
 </style>

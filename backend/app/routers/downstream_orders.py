@@ -58,6 +58,7 @@ class ReviewVoidPayload(BaseModel):
 class ProcessModifyPayload(BaseModel):
     customer_id: int
     original_review_id: int
+    order_data: dict[str, Any]
     review_note: Optional[str] = ""
     include_ai_remark: Optional[bool] = True
 
@@ -333,6 +334,65 @@ def modify_done_api(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reviews/{review_id}/process-modify", summary="处理待修改审核单（作废原单+下新单）")
+async def process_modify_api(
+    review_id: int,
+    payload: ProcessModifyPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        from app.services.downstream_orders import process_modify_review
+        data = await process_modify_review(
+            db, review_id, payload.original_review_id, payload.customer_id,
+            current_user, payload.order_data, payload.review_note or "",
+            include_ai_remark=payload.include_ai_remark if payload.include_ai_remark is not None else True,
+        )
+        return json_response(message="修改处理完成", data=data)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/reviews/customer-history", summary="获取指定客户的历史审核单（用于选择原始订单）")
+def get_customer_review_history(
+    customer_id: int = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    rows = db.execute(
+        text(
+            "SELECT id, review_uid, review_status, review_type, erp_order_no, order_intent, "
+            "customer_name, sender_name, content_text, created_at, parsed_order_json "
+            "FROM downstream_order_reviews "
+            "WHERE customer_id = :cid AND review_status IN ('pending', 'approved', 'replaced') "
+            "ORDER BY created_at DESC LIMIT 50"
+        ),
+        {"cid": customer_id},
+    ).mappings().all()
+    result = []
+    for r in rows:
+        item = dict(r)
+        # 简要描述
+        parsed = None
+        try:
+            import json as _j
+            parsed = _j.loads(item.get("parsed_order_json") or "null")
+        except Exception:
+            pass
+        summary_parts = []
+        if parsed and isinstance(parsed, dict):
+            for pi in (parsed.get("items") or [])[:3]:
+                pno = pi.get("product_no", "")
+                color = pi.get("color", "")
+                summary_parts.append(f"{pno} {color}".strip())
+        item["items_summary"] = ", ".join(summary_parts) if summary_parts else (item.get("content_text") or "")[:60]
+        item.pop("parsed_order_json", None)
+        result.append(item)
+    return json_response(data=result)
 
 
 @router.post("/reviews/{review_id}/revert-pending", summary="废单转为待审核")
