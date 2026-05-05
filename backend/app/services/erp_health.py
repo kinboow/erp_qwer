@@ -76,7 +76,7 @@ async def refresh_erp_health_status() -> dict[str, Any]:
         await _check_once()
         current_online = _status.get("online", False)
 
-        # 状态由在线变为离线时，写入紧急系统动态
+        # 状态由在线变为离线时，写入紧急系统动态 + 系统消息 + 语音告警
         if _prev_online is not None and _prev_online and not current_online:
             error_msg = _status.get("last_error") or "未知原因"
             try:
@@ -87,6 +87,46 @@ async def refresh_erp_health_status() -> dict[str, Any]:
                     type="urgent",
                     source="erp_health",
                 )
+            except Exception:
+                pass
+            try:
+                from app.services.system_messages import create_system_message_background
+                create_system_message_background(
+                    title="ERP 连接离线",
+                    content=f"ERP 连接检测失败：{error_msg}，请检查 ERP 服务状态",
+                    level="error",
+                    source="erp_health",
+                )
+            except Exception:
+                pass
+            # 服务器语音告警
+            try:
+                from app.services.voice_alert import speak_alert
+                speak_alert("ERP已掉线，请快速处理！", repeat=3)
+            except Exception:
+                pass
+            # 通知前端
+            try:
+                from app.services import ws_notify
+                await ws_notify.broadcast("erp_offline", {"error": error_msg})
+            except Exception:
+                pass
+
+        # 状态由离线变为在线时，写入系统消息 + 通知前端
+        if _prev_online is not None and not _prev_online and current_online:
+            try:
+                from app.services.system_messages import create_system_message_background
+                create_system_message_background(
+                    title="ERP 连接已恢复",
+                    content="ERP 连接已恢复正常",
+                    level="info",
+                    source="erp_health",
+                )
+            except Exception:
+                pass
+            try:
+                from app.services import ws_notify
+                await ws_notify.broadcast("erp_online")
             except Exception:
                 pass
 

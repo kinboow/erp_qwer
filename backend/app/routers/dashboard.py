@@ -132,10 +132,12 @@ def dashboard_stats(
     # 服务状态
     wechat_online = False
     wechat_error = ""
+    wechat_recovering = False
     try:
         from app.services.wechat_health import get_wechat_health_status
         wechat_status = get_wechat_health_status()
         wechat_online = wechat_status.get("online", False)
+        wechat_recovering = wechat_status.get("recovering", False)
         if not wechat_online:
             wechat_error = wechat_status.get("last_error") or ""
     except Exception:
@@ -224,6 +226,7 @@ def dashboard_stats(
             "daily_shipments": trend_shipments,
             "recent_activities": recent_activities,
             "wechat_online": wechat_online,
+            "wechat_recovering": wechat_recovering,
             "wechat_error": wechat_error,
             "erp_online": erp_online,
             "erp_error": erp_error,

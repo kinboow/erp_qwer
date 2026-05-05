@@ -47,12 +47,12 @@
       <!-- 第四列：两个小状态卡片 -->
       <el-col :span="6">
         <div class="status-card-group">
-          <el-tooltip :content="stats.wechat_error || '企业微信服务正常'" placement="left" :disabled="stats.wechat_online">
-            <div class="mini-status-card" :class="stats.wechat_online ? 'online' : 'offline'" @click="refreshWechatHealth">
-              <div class="mini-status-dot" :class="stats.wechat_online ? 'green' : 'red'"></div>
+          <el-tooltip :content="stats.wechat_recovering ? '正在尝试自动恢复…' : (stats.wechat_error || '企业微信服务正常')" placement="left" :disabled="stats.wechat_online && !stats.wechat_recovering">
+            <div class="mini-status-card" :class="stats.wechat_online ? 'online' : (stats.wechat_recovering ? 'recovering' : 'offline')" @click="refreshWechatHealth">
+              <div class="mini-status-dot" :class="stats.wechat_online ? 'green' : (stats.wechat_recovering ? 'yellow' : 'red')"></div>
               <div class="mini-status-info">
                 <div class="mini-status-label">企业微信</div>
-                <div class="mini-status-text">{{ stats.wechat_online ? '已连接' : '未连接' }}</div>
+                <div class="mini-status-text">{{ stats.wechat_online ? '已连接' : (stats.wechat_recovering ? '恢复中' : '未连接') }}</div>
               </div>
               <img class="mini-status-icon" :src="iconWechatStatus" alt="企业微信状态" />
             </div>
@@ -215,6 +215,7 @@
     daily_shipments: [],
     recent_activities: [],
     wechat_online: false,
+    wechat_recovering: false,
     wechat_error: '',
     erp_online: false,
     erp_error: '',
@@ -419,17 +420,54 @@ async function refreshWechatHealth() {
     const res = await request.post('/api/dashboard/refresh-wechat-health')
     const d = res.data || {}
     stats.value.wechat_online = !!d.online
+    stats.value.wechat_recovering = !!d.recovering
     stats.value.wechat_error = d.online ? '' : (d.last_error || '')
   } catch { /* ignore */ }
 }
+
+// 监听 ws_notify 事件，实时更新状态
+function onWsNotify(e) {
+  const msg = e.detail
+  if (!msg || !msg.event) return
+  switch (msg.event) {
+    case 'wechat_online':
+      stats.value.wechat_online = true
+      stats.value.wechat_recovering = false
+      stats.value.wechat_error = ''
+      break
+    case 'wechat_offline':
+      stats.value.wechat_online = false
+      stats.value.wechat_recovering = false
+      stats.value.wechat_error = msg.data?.error || '连接异常'
+      break
+    case 'erp_online':
+      stats.value.erp_online = true
+      stats.value.erp_error = ''
+      break
+    case 'erp_offline':
+      stats.value.erp_online = false
+      stats.value.erp_error = msg.data?.error || '连接异常'
+      break
+  }
+}
+
+let statsTimer = null
 
 onMounted(() => {
   updateTime()
   timer = setInterval(updateTime, 1000)
   fetchStats()
+  // 每 30 秒刷新统计数据
+  statsTimer = setInterval(fetchStats, 30000)
+  // 监听实时状态事件
+  window.addEventListener('ws_notify', onWsNotify)
 })
 
-onUnmounted(() => { if (timer) clearInterval(timer) })
+onUnmounted(() => {
+  if (timer) clearInterval(timer)
+  if (statsTimer) clearInterval(statsTimer)
+  window.removeEventListener('ws_notify', onWsNotify)
+})
 </script>
 
 <style scoped>
@@ -532,11 +570,14 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .mini-status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 .mini-status-dot.green { background-color: #00B365; box-shadow: 0 0 0 3px rgba(0,179,101,0.15); }
 .mini-status-dot.red { background-color: #F54A45; box-shadow: 0 0 0 3px rgba(245,74,69,0.15); }
+.mini-status-dot.yellow { background-color: #FF9500; box-shadow: 0 0 0 3px rgba(255,149,0,0.15); animation: pulse-yellow 1.5s infinite; }
+@keyframes pulse-yellow { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
 .mini-status-info { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 .mini-status-label { font-size: 12px; color: var(--lark-text-secondary); line-height: 1; }
 .mini-status-text { font-size: 16px; font-weight: 600; color: var(--lark-text-primary); line-height: 1.3; }
 .mini-status-card.online .mini-status-text { color: #00B365; }
+.mini-status-card.recovering .mini-status-text { color: #FF9500; }
 .mini-status-card.offline .mini-status-text { color: var(--lark-text-secondary); }
 .mini-status-icon { width: 24px; height: 24px; flex-shrink: 0; object-fit: contain; }
 

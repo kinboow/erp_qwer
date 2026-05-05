@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import time
 from typing import Any, Optional
 
 from sqlalchemy import text
@@ -18,36 +17,30 @@ from app.services.ai_chat_service import process_customer_group_message
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 客户群消息：缓冲 → 延迟 → 批量送入 AI 对话
+# 客户群消息：实时送入 AI 对话
 # ---------------------------------------------------------------------------
-AI_BUFFER_DELAY_SECONDS = 120  # 缓冲 2 分钟再送 AI
-
-# room_id → {"messages": [...], "task": asyncio.Task | None, "last_ts": float}
-_room_buffers: dict[str, dict[str, Any]] = {}
-
-# message_server_id → room_id  用于撤回时从 buffer 中移除
-_server_id_to_room: dict[str, str] = {}
-
-# message_server_id → asyncio.Task  （旧字段，兼容撤回检测）
-_pending_delayed_tasks: dict[str, asyncio.Task] = {}
 
 
 
 
-def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: str) -> bool:
-    """检测并处理撤回消息（type=11123）。返回 True 表示本消息是撤回事件并已处理。"""
+def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: str) -> dict | None:
+    """检测并处理撤回消息（type=11123）。
+
+    返回:
+        None  — 本消息不是撤回事件
+        dict  — 撤回事件的信息，包含原始消息内容等
+    """
     message = normalized_payload.get("message") if isinstance(normalized_payload.get("message"), dict) else {}
     msg_type = message.get("type")
-    # 也兼容顶层 type
     if msg_type is None:
         msg_type = normalized_payload.get("type")
     try:
         msg_type = int(msg_type)
     except (TypeError, ValueError):
-        return False
+        return None
 
     if msg_type != 11123:
-        return False
+        return None
 
     msg_data = message.get("data") if isinstance(message.get("data"), dict) else {}
     if not msg_data:
@@ -58,9 +51,26 @@ def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: 
 
     if not recalled_server_id:
         logger.info("撤回消息: 无 message_server_id，跳过")
-        return True
+        return {"is_recall": True}
 
     logger.info("撤回消息: 检测到 server_id=%s room=%s", recalled_server_id, recall_room_id)
+
+    # 先查出原始消息内容（标记撤回前查）
+    original_msg = None
+    try:
+        row = db.execute(
+            text(
+                "SELECT id, sender_id, sender_name, message_type, content_preview, room_id "
+                "FROM message_logs "
+                "WHERE message_server_id = :sid AND is_recalled = 0 "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"sid": recalled_server_id},
+        ).mappings().first()
+        if row:
+            original_msg = dict(row)
+    except Exception as exc:
+        logger.warning("撤回消息: 查询原始消息失败: %s", exc)
 
     # 标记数据库中的原始消息为已撤回
     recalled_msg_id = mark_recalled(db, recalled_server_id, recall_room_id)
@@ -69,21 +79,12 @@ def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: 
     else:
         logger.info("撤回消息: 未找到对应原始消息 server_id=%s", recalled_server_id)
 
-    # 从缓冲区中移除已撤回的消息
-    buf_room = _server_id_to_room.pop(recalled_server_id, None)
-    if buf_room and buf_room in _room_buffers:
-        buf = _room_buffers[buf_room]
-        buf["messages"] = [m for m in buf["messages"] if m.get("server_id") != recalled_server_id]
-        logger.info("撤回消息: 已从缓冲区移除 server_id=%s room=%s remaining=%d",
-                     recalled_server_id, buf_room, len(buf["messages"]))
-
-    # 取消延迟任务
-    pending_task = _pending_delayed_tasks.pop(recalled_server_id, None)
-    if pending_task and not pending_task.done():
-        pending_task.cancel()
-        logger.info("撤回消息: 已取消延迟任务 server_id=%s", recalled_server_id)
-
-    return True
+    return {
+        "is_recall": True,
+        "recalled_server_id": recalled_server_id,
+        "recall_room_id": recall_room_id or (original_msg or {}).get("room_id", ""),
+        "original_msg": original_msg,
+    }
 
 
 def _safe_text(value: Any) -> str:
@@ -184,17 +185,38 @@ async def ingest_runtime_message(
         except Exception:
             pass
 
-    # ===== 撤回消息检测：type=11123 → 标记原消息已撤回 + 取消延迟任务 =====
-    if _handle_recall(db, normalized_payload, resolved_instance_id):
+    # ===== 撤回消息检测：type=11123 → 标记原消息已撤回 + 通知 AI =====
+    recall_info = _handle_recall(db, normalized_payload, resolved_instance_id)
+    if recall_info is not None:
+        # 如果有原始消息信息，异步通知 AI 该消息已被撤回
+        original = recall_info.get("original_msg")
+        _recall_room = recall_info.get("recall_room_id") or ""
+        if original and _recall_room:
+            _orig_sender = original.get("sender_name") or original.get("sender_id") or ""
+            _orig_type = original.get("message_type") or "text"
+            _orig_content = original.get("content_preview") or ""
+            # 查找该群对应的客户信息
+            _recall_customer = None
+            try:
+                _recall_customer = resolve_customer_by_room(db, _recall_room, resolved_instance_id)
+            except Exception:
+                pass
+            if _recall_customer:
+                asyncio.create_task(_send_recall_to_ai(
+                    room_id=_recall_room,
+                    sender_name=_orig_sender,
+                    sender_id=original.get("sender_id") or "",
+                    message_type=_orig_type,
+                    content_preview=_orig_content,
+                    customer=_recall_customer,
+                    instance_id=resolved_instance_id or "",
+                    bot_wxid=effective_wxid or "",
+                ))
         return {
             "instanceId": resolved_instance_id,
             "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
             "received": True,
             "log": log_result,
-            "review": None,
-            "at_order_triggered": False,
-            "media_order_triggered": False,
-            "shipping_scan_triggered": False,
             "recall_handled": True,
         }
 
@@ -299,9 +321,7 @@ async def ingest_runtime_message(
             "shipping_scan_triggered": shipping_scan_triggered,
         }
 
-    # ===== 客户群专线：缓冲消息 → 延迟 → 批量送 AI =====
-    ai_chat_result = None
-
+    # ===== 客户群专线：实时送 AI =====
     if not customer:
         logger.info("客户群专线跳过: customer 未找到 room=%s instance=%s", room_id, resolved_instance_id)
     elif sender_is_employee:
@@ -351,40 +371,28 @@ async def ingest_runtime_message(
         _attachment_base64 = _extracted.get("attachment_base64") or ""
         _file_name = _extracted.get("attachment_name") or ""
 
-        # 提取 message_server_id 用于撤回追踪
-        _msg_data = (normalized_payload.get("message") or {}).get("data") or normalized_payload.get("data") or {}
-        if isinstance(_msg_data, str):
-            _msg_data = {}
-        _server_id = str(_msg_data.get("message_server_id") or "").strip()
-
-        # ---- 放入缓冲区，延迟 2 分钟后统一送 AI ----
-        msg_entry = {
-            "server_id": _server_id,
-            "room_id": room_id,
-            "sender_id": log_sender_id,
-            "sender_name": _sender_name,
-            "message_type": log_msg_type,
-            "content_text": _content_text,
-            "attachment_base64": _attachment_base64,
-            "file_name": _file_name,
-            "customer": dict(customer) if customer else None,
-            "instance_id": resolved_instance_id or "",
-            "bot_wxid": bot_wxid or "",
-            "payload": normalized_payload,
-            "log_id": (log_result or {}).get("id"),
-        }
-
-        if _server_id:
-            _server_id_to_room[_server_id] = room_id
-
-        _enqueue_message(room_id, msg_entry)
+        # ---- 立即异步送 AI ----
+        asyncio.create_task(_send_msg_to_ai(
+            room_id=room_id,
+            sender_id=log_sender_id,
+            sender_name=_sender_name,
+            message_type=log_msg_type,
+            content_text=_content_text,
+            attachment_base64=_attachment_base64,
+            file_name=_file_name,
+            customer=dict(customer) if customer else None,
+            instance_id=resolved_instance_id or "",
+            bot_wxid=bot_wxid or "",
+            payload=normalized_payload,
+            log_id=(log_result or {}).get("id"),
+        ))
 
         return {
             "instanceId": resolved_instance_id,
             "wxid": bot_wxid,
             "received": True,
             "log": log_result,
-            "ai_chat": "buffered",
+            "ai_chat": "dispatched",
             "shipping_scan_triggered": False,
         }
 
@@ -404,82 +412,88 @@ async def ingest_runtime_message(
 
 
 # ---------------------------------------------------------------------------
-# 客户群消息缓冲：延迟 2 分钟，收集完整批量送 AI
+# 客户群消息：实时送 AI
 # ---------------------------------------------------------------------------
-def _enqueue_message(room_id: str, msg_entry: dict[str, Any]) -> None:
-    """将消息放入 room 缓冲区，启动/重置延迟任务。"""
-    now = time.monotonic()
-    if room_id not in _room_buffers:
-        _room_buffers[room_id] = {"messages": [], "task": None, "first_ts": now}
-
-    buf = _room_buffers[room_id]
-    buf["messages"].append(msg_entry)
-    buf["last_ts"] = now
-
-    # 如果已有延迟任务在等待，不需要重新创建（到时间后会 flush 所有积攒的消息）
-    if buf.get("task") and not buf["task"].done():
-        logger.debug("客户群缓冲: 追加消息到 room=%s buffer_size=%d", room_id, len(buf["messages"]))
-        return
-
-    # 创建新的延迟任务
-    buf["task"] = asyncio.create_task(_delayed_flush(room_id))
-    logger.info("客户群缓冲: 新建延迟任务 room=%s delay=%ds", room_id, AI_BUFFER_DELAY_SECONDS)
-
-
-async def _delayed_flush(room_id: str) -> None:
-    """等待延迟时间后，将缓冲区消息批量送 AI。"""
-    try:
-        await asyncio.sleep(AI_BUFFER_DELAY_SECONDS)
-    except asyncio.CancelledError:
-        logger.info("客户群缓冲: 延迟任务被取消 room=%s", room_id)
-        return
-
-    buf = _room_buffers.pop(room_id, None)
-    if not buf or not buf["messages"]:
-        return
-
-    messages = buf["messages"]
-    logger.info("客户群缓冲: 开始批量送 AI room=%s count=%d", room_id, len(messages))
-
-    # 逐条送 AI（AI 通过对话历史保持上下文）
+async def _send_msg_to_ai(
+    *,
+    room_id: str,
+    sender_id: str,
+    sender_name: str,
+    message_type: str,
+    content_text: str,
+    attachment_base64: str,
+    file_name: str,
+    customer: dict[str, Any] | None,
+    instance_id: str,
+    bot_wxid: str,
+    payload: dict[str, Any] | None,
+    log_id: int | None,
+) -> None:
+    """立即将一条消息送入 AI 对话。"""
     db = SessionLocal()
     try:
-        for msg in messages:
+        ai_result = await process_customer_group_message(
+            db,
+            room_id=room_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            message_type=message_type,
+            content_text=content_text,
+            attachment_base64=attachment_base64,
+            file_name=file_name,
+            customer=customer,
+            instance_id=instance_id,
+            bot_wxid=bot_wxid,
+            payload=payload,
+        )
+        logger.info("客户群 AI 对话: room=%s result=%s", room_id, ai_result)
+
+        if log_id:
             try:
-                ai_result = await process_customer_group_message(
-                    db,
-                    room_id=msg["room_id"],
-                    sender_id=msg["sender_id"],
-                    sender_name=msg["sender_name"],
-                    message_type=msg["message_type"],
-                    content_text=msg["content_text"],
-                    attachment_base64=msg.get("attachment_base64") or "",
-                    file_name=msg.get("file_name") or "",
-                    customer=msg.get("customer"),
-                    instance_id=msg.get("instance_id") or "",
-                    bot_wxid=msg.get("bot_wxid") or "",
-                    payload=msg.get("payload"),
-                )
-                logger.info("客户群 AI 对话: room=%s result=%s", room_id, ai_result)
+                from app.services.message_logs import mark_ai_recognized
+                mark_ai_recognized(db, log_id)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("客户群 AI 对话异常: room=%s err=%s", room_id, exc)
+    finally:
+        db.close()
 
-                # 标记消息已被 AI 处理
-                _log_id = msg.get("log_id")
-                if _log_id:
-                    try:
-                        from app.services.message_logs import mark_ai_recognized
-                        mark_ai_recognized(db, _log_id)
-                    except Exception:
-                        pass
-            except Exception as exc:
-                logger.warning("客户群 AI 对话异常: room=%s err=%s", room_id, exc)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
 
-            # 清理 server_id 映射
-            sid = msg.get("server_id")
-            if sid:
-                _server_id_to_room.pop(sid, None)
+async def _send_recall_to_ai(
+    *,
+    room_id: str,
+    sender_name: str,
+    sender_id: str,
+    message_type: str,
+    content_preview: str,
+    customer: dict[str, Any] | None,
+    instance_id: str,
+    bot_wxid: str,
+) -> None:
+    """将撤回事件作为一条特殊消息送入 AI 对话，告知原始内容。"""
+    # 构造撤回通知文本
+    type_label = {"text": "文字", "image": "图片", "file": "文件"}.get(message_type, message_type)
+    recall_text = (
+        f"[系统通知] {sender_name} 撤回了一条{type_label}消息。"
+        f"被撤回的原始内容：{content_preview or '（无法获取）'}"
+    )
+
+    db = SessionLocal()
+    try:
+        ai_result = await process_customer_group_message(
+            db,
+            room_id=room_id,
+            sender_id=sender_id,
+            sender_name="系统",
+            message_type="text",
+            content_text=recall_text,
+            customer=customer,
+            instance_id=instance_id,
+            bot_wxid=bot_wxid,
+        )
+        logger.info("撤回通知 AI: room=%s result=%s", room_id, ai_result)
+    except Exception as exc:
+        logger.warning("撤回通知 AI 异常: room=%s err=%s", room_id, exc)
     finally:
         db.close()

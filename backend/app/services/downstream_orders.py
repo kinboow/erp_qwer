@@ -1618,7 +1618,7 @@ async def approve_review(db: Session, review_id: int, customer_id: int, current_
     pnos = [item.get("product_no") for item in order_data.get("items", []) if item.get("product_no")]
     db.execute(
         text(
-            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'approved', erp_order_no = :erp_order_no, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'approved', erp_order_no = :erp_order_no, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
         ),
         {
             "id": review_id,
@@ -1628,6 +1628,7 @@ async def approve_review(db: Session, review_id: int, customer_id: int, current_
             "review_note": review_note,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
         },
     )
     db.commit()
@@ -1704,7 +1705,7 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
     replaced_orders = sorted({item.get("order_no") for item in unshipped_rows if item.get("order_no")})
     db.execute(
         text(
-            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'replaced', erp_order_no = :erp_order_no, replaced_order_no = :replaced_order_no, replace_source_ids = :replace_source_ids, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'replaced', erp_order_no = :erp_order_no, replaced_order_no = :replaced_order_no, replace_source_ids = :replace_source_ids, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
         ),
         {
             "id": review_id,
@@ -1716,6 +1717,7 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
             "review_note": review_note,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
         },
     )
     db.commit()
@@ -1780,7 +1782,7 @@ async def manual_order(db: Session, review_id: int, customer_id: int, order_data
     pnos = [item.get("product_no") for item in normalized.get("items", []) if item.get("product_no")]
     db.execute(
         text(
-            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'manual_ordered', manual_order_json = :manual_order_json, erp_order_no = :erp_order_no, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, review_status = 'manual_ordered', manual_order_json = :manual_order_json, erp_order_no = :erp_order_no, review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
         ),
         {
             "id": review_id,
@@ -1791,6 +1793,7 @@ async def manual_order(db: Session, review_id: int, customer_id: int, order_data
             "review_note": review_note,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
         },
     )
     db.commit()
@@ -1825,13 +1828,14 @@ def void_review(db: Session, review_id: int, current_user: User, customer_id: in
             pass
     db.execute(
         text(
-            "UPDATE downstream_order_reviews SET review_status = 'voided', review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+            "UPDATE downstream_order_reviews SET review_status = 'voided', review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
         ),
         {
             "id": review_id,
             "review_note": review_note,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
         },
     )
     db.commit()
@@ -1846,12 +1850,13 @@ def revert_to_pending(db: Session, review_id: int, current_user: User) -> dict[s
         raise ValueError("只有废单或异常状态才能转为待审核")
     db.execute(
         text(
-            "UPDATE downstream_order_reviews SET review_status = 'pending', reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, reviewed_at = NULL, updated_at = NOW() WHERE id = :id"
+            "UPDATE downstream_order_reviews SET review_status = 'pending', reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, operator_name = :operator_name, reviewed_at = NULL, updated_at = NOW() WHERE id = :id"
         ),
         {
             "id": review_id,
             "reviewer_id": current_user.id,
             "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
         },
     )
     db.commit()

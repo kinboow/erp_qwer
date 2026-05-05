@@ -73,8 +73,29 @@ async def lifespan(application: FastAPI):
     from app.services.erp_sync import start_sync_scheduler
     start_sync_scheduler(erp_client)
 
+    # 启动时立即检测一次连接状态
+    from app.services.erp_health import refresh_erp_health_status
+    from app.services.wechat_health import refresh_wechat_health_status, _try_auto_restart
+    try:
+        erp_st = await refresh_erp_health_status()
+        logger.info("[Startup] ERP 初始状态: online=%s error=%s", erp_st.get("online"), erp_st.get("last_error"))
+    except Exception as e:
+        logger.warning("[Startup] ERP 初始检测失败: %s", e)
+    try:
+        wx_st = await refresh_wechat_health_status()
+        logger.info("[Startup] 企微初始状态: online=%s error=%s", wx_st.get("online"), wx_st.get("last_error"))
+        # 启动时没有在线实例 → 智能启动企微 + 等待恢复
+        if not wx_st.get("online"):
+            logger.info("[Startup] 企微不在线，尝试智能启动...")
+            await _try_auto_restart()
+            from app.services.wechat_health import get_wechat_health_status
+            final_st = get_wechat_health_status()
+            logger.info("[Startup] 企微启动后状态: online=%s error=%s", final_st.get("online"), final_st.get("last_error"))
+    except Exception as e:
+        logger.warning("[Startup] 企微初始检测/启动失败: %s", e)
+
     start_erp_health_checker(interval_seconds=20)
-    start_wechat_health_checker(interval_seconds=15)
+    start_wechat_health_checker(interval_seconds=3)
     start_room_cache_refresher(interval_seconds=300)
 
     root_logger = logging.getLogger()

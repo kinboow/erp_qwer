@@ -83,6 +83,9 @@
             <span v-else class="text-muted">无解析结果</span>
           </template>
         </el-table-column>
+        <el-table-column prop="operator_name" label="操作人" width="100" align="center" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.operator_name || '-' }}</template>
+        </el-table-column>
         <el-table-column label="创建时间" width="170">
           <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
         </el-table-column>
@@ -290,7 +293,7 @@ const batchRevertPending = async () => {
 const handleExport = () => {
   const rows = selectedRows.value.length > 0 ? selectedRows.value : list.value
   if (rows.length === 0) { ElMessage.warning('没有可导出的数据'); return }
-  const headers = ['审核单号', '审核状态', '客户', '来源群聊', '发送人', '消息类型', '创建时间', '备注']
+  const headers = ['审核单号', '审核状态', '客户', '来源群聊', '发送人', '消息类型', '操作人', '创建时间', '备注']
   const csvRows = rows.map(r => [
     r.review_uid || '',
     statusText(r.review_status),
@@ -298,6 +301,7 @@ const handleExport = () => {
     r.room_name || '',
     r.sender_name || '',
     msgTypeText(r.message_type),
+    r.operator_name || '',
     formatDate(r.created_at),
     (r.review_note || '').replace(/"/g, '""')
   ])

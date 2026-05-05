@@ -256,7 +256,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import {
   DataLine, User, Setting, Fold, Expand, Box, UserFilled,
   Search, Bell, SwitchButton, Stamp, Management, Goods, List, QuestionFilled,
@@ -581,11 +581,77 @@ function onMsgUnreadChanged(e) {
   }
 }
 
+// ========== 企微掉线弹窗通知 ==========
+let wechatNotifyWs = null
+let wechatNotifyReconnectTimer = null
+let _wechatOfflineNotification = null
+
+function connectWechatNotifyWs() {
+  if (wechatNotifyWs && wechatNotifyWs.readyState <= 1) return
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+  wechatNotifyWs = new WebSocket(`${proto}://${location.host}/ws/notify`)
+  wechatNotifyWs.onmessage = (evt) => {
+    try {
+      const msg = JSON.parse(evt.data)
+      // 转发给全局，Dashboard 等组件可监听
+      window.dispatchEvent(new CustomEvent('ws_notify', { detail: msg }))
+      if (msg.event === 'wechat_offline') {
+        showWechatOfflineNotification(msg.data?.error || '')
+      } else if (msg.event === 'wechat_online') {
+        closeWechatOfflineNotification()
+        ElNotification.success({
+          title: '企业微信已恢复',
+          message: '企业微信连接已自动恢复正常',
+          position: 'bottom-right',
+          duration: 5000,
+        })
+      }
+    } catch { /* ignore */ }
+  }
+  wechatNotifyWs.onclose = () => {
+    clearTimeout(wechatNotifyReconnectTimer)
+    wechatNotifyReconnectTimer = setTimeout(connectWechatNotifyWs, 3000)
+  }
+  wechatNotifyWs.onerror = () => { /* onclose will handle reconnect */ }
+}
+
+function showWechatOfflineNotification(errorMsg) {
+  closeWechatOfflineNotification()
+  _wechatOfflineNotification = ElNotification.warning({
+    title: '企业微信已掉线',
+    message: errorMsg
+      ? `检测原因：${errorMsg}，自动恢复失败，请检查企微服务或手动重连。`
+      : '企业微信连接异常，请前往外部配置页面检查。',
+    position: 'bottom-right',
+    duration: 0,
+    showClose: true,
+  })
+}
+
+function closeWechatOfflineNotification() {
+  if (_wechatOfflineNotification) {
+    _wechatOfflineNotification.close()
+    _wechatOfflineNotification = null
+  }
+}
+
+async function checkInitialWechatStatus() {
+  try {
+    const res = await request.get('/api/dashboard/stats', { params: { range: '7d' } })
+    const data = res.data || {}
+    if (!data.wechat_online && !data.wechat_recovering) {
+      showWechatOfflineNotification(data.wechat_error || '')
+    }
+  } catch { /* ignore */ }
+}
+
 onMounted(() => {
   userStore.fetchUserInfo(true).catch(() => {})
   window.addEventListener('keydown', handleGlobalShortcut)
   window.addEventListener('msg-unread-changed', onMsgUnreadChanged)
   startMsgPoll()
+  connectWechatNotifyWs()
+  checkInitialWechatStatus()
 })
 
 onUnmounted(() => {
@@ -593,6 +659,9 @@ onUnmounted(() => {
   window.removeEventListener('msg-unread-changed', onMsgUnreadChanged)
   clearTimeout(searchTimer)
   clearInterval(msgPollTimer)
+  clearTimeout(wechatNotifyReconnectTimer)
+  if (wechatNotifyWs) { wechatNotifyWs.close(); wechatNotifyWs = null }
+  closeWechatOfflineNotification()
 })
 </script>
 

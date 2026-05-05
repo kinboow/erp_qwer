@@ -22,8 +22,6 @@ from app.ncloud.services.inventory import query_inventory as erp_query_inventory
 from app.ncloud.services.sales_orders import get_order_detail, list_orders
 from app.ncloud.services.shipments import get_shipment_detail, list_shipments
 from app.ncloud.services.unshipped_report import query_unshipped_report as erp_query_unshipped
-from app.services.system_activities import create_activity_background
-from app.services.system_messages import create_system_message_background
 
 logger = logging.getLogger(__name__)
 
@@ -1481,21 +1479,8 @@ def _record_sync_cycle_message(cycle_result: dict[str, Any], trigger: str = "定
     status_text = "部分失败" if has_error else "全部完成"
     title = f"【{trigger}】ERP 同步{status_text}"
 
-    try:
-        create_activity_background(
-            title=title,
-            content=f"【{trigger}】ERP 同步于 {now.strftime('%H:%M:%S')} {status_text}：\n{summary}",
-            type=msg_type,
-            source="erp_sync",
-        )
-        create_system_message_background(
-            title=title,
-            content=f"【{trigger}】ERP 同步于 {now.strftime('%H:%M:%S')} {status_text}：\n{summary}",
-            level=level,
-            source="erp_sync",
-        )
-    except Exception:
-        logger.exception("[ERP Sync] 写入同步汇总记录失败")
+    # ERP 定时同步结果只记录到系统日志（logger），不写系统动态和系统消息
+    logger.info("[ERP Sync] %s：\n%s", title, summary)
 
 
 async def _sync_loop(erp_client: ERPClient) -> None:
