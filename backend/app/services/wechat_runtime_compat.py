@@ -8,288 +8,30 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.services.downstream_orders import create_review_from_callback, resolve_customer_by_room, _extract_callback_message
+from app.services.downstream_orders import resolve_customer_by_room, _extract_callback_message
 from app.services.media_archive import download_and_archive_background
 from app.services.message_logs import mark_recalled, record_message_log
-from app.services.ai_order_parser import AIOrderParser
 from app.services.at_order_handler import is_at_bot
-from app.services.pending_order_session import (
-    find_active_session, append_followup_message, get_original_summary,
-    create_pending_session, update_session_missing_fields,
-    mark_session_completed, get_merged_context, cleanup_expired_sessions,
-)
 from app.services.shipping_scan_handler import handle_shipping_scan, resolve_shipping_room
-from app.services.wechat_reply import send_room_at
+from app.services.ai_chat_service import process_customer_group_message
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# 客户群消息：回复"收到"后走通用审核链 create_review_from_callback
+# 客户群消息：缓冲 → 延迟 → 批量送入 AI 对话
 # ---------------------------------------------------------------------------
-STARTUP_GRACE_SECONDS = 30   # 启动后多少秒内的消息不回复"收到"（避免积压消息被批量回复）
-CLASSIFY_WINDOW_SECONDS = 150  # 订单意图分类：报货后等待 2.5 分钟收集上下文
-CLASSIFY_PRE_MSG_COUNT = 10    # 分类时向前取多少条聊天记录
+AI_BUFFER_DELAY_SECONDS = 120  # 缓冲 2 分钟再送 AI
 
-# 模块加载时间（服务启动时）
-_startup_time = time.monotonic()
+# room_id → {"messages": [...], "task": asyncio.Task | None, "last_ts": float}
+_room_buffers: dict[str, dict[str, Any]] = {}
 
-# message_server_id → asyncio.Task  用于撤回时取消延迟任务（保留用于撤回检测）
+# message_server_id → room_id  用于撤回时从 buffer 中移除
+_server_id_to_room: dict[str, str] = {}
+
+# message_server_id → asyncio.Task  （旧字段，兼容撤回检测）
 _pending_delayed_tasks: dict[str, asyncio.Task] = {}
 
 
-def _is_after_startup() -> bool:
-    """判断当前是否已过启动宽限期，只有过了宽限期的消息才回复'收到'"""
-    return (time.monotonic() - _startup_time) > STARTUP_GRACE_SECONDS
-
-
-async def _reply_received(room_id: str, sender_id: str, instance_id: str) -> None:
-    """在客户群中回复「收到」（使用独立 DB session）"""
-    db = SessionLocal()
-    try:
-        inst_id = int(instance_id) if instance_id.isdigit() else None
-        await send_room_at(db, room_id, "收到",
-                           at_list=[sender_id], instance_id=inst_id)
-    except Exception as exc:
-        logger.warning("回复收到失败: room=%s err=%s", room_id, exc)
-    finally:
-        db.close()
-
-
-async def _reply_missing_fields(
-    room_id: str, sender_id: str, instance_id: str, missing_fields: list[str],
-) -> None:
-    """在客户群中@发送人告知缺少哪些字段（使用独立 DB session）"""
-    db = SessionLocal()
-    try:
-        inst_id = int(instance_id) if instance_id.isdigit() else None
-        fields_text = "、".join(missing_fields)
-        msg = f"您的报货信息缺少以下内容：{fields_text}，请补充后我会继续处理"
-        await send_room_at(db, room_id, msg,
-                           at_list=[sender_id], instance_id=inst_id)
-    except Exception as exc:
-        logger.warning("回复缺失字段失败: room=%s err=%s", room_id, exc)
-    finally:
-        db.close()
-
-
-async def _handle_pending_session_followup(
-    db: Session,
-    session: dict[str, Any],
-    ctx_msgs: list[dict[str, Any]],
-    room_id: str,
-    sender_id: str,
-    instance_id: str,
-    normalized_payload: dict[str, Any],
-) -> dict[str, Any]:
-    """处理挂起会话的后续消息：调用补全智能体判断是否已补全。
-
-    返回:
-        {"handled": True/False, "review": ...}
-    """
-    session_id = session["id"]
-    missing_fields = json.loads(session["missing_fields"]) if isinstance(session["missing_fields"], str) else session["missing_fields"]
-
-    # 追加后续消息到会话
-    followup_msg = ctx_msgs[0] if ctx_msgs else {"type": "text", "content": ""}
-    all_followups = append_followup_message(db, session_id, followup_msg)
-    logger.info("[PendingSession] 追加后续消息 session=%d followup_count=%d", session_id, len(all_followups))
-
-    # 调用补全智能体
-    original_summary = get_original_summary(session)
-    parser = AIOrderParser()
-    try:
-        completion_result = await parser.check_completion(
-            missing_fields=missing_fields,
-            original_summary=original_summary,
-            followup_messages=all_followups,
-            db=db,
-        )
-    except Exception as exc:
-        logger.warning("[PendingSession] 补全智能体异常: session=%d err=%s", session_id, exc)
-        return {"handled": True, "review": None}
-
-    logger.info(
-        "[PendingSession] 补全判断 session=%d is_complete=%s still_missing=%s reason=%s",
-        session_id, completion_result.get("is_complete"), completion_result.get("still_missing"),
-        completion_result.get("reason"),
-    )
-
-    if completion_result.get("is_complete"):
-        # 已补全 → 标记完成 → 合并上下文走审核链
-        mark_session_completed(db, session_id)
-        merged_context = get_merged_context(session)
-        # 追加当前新消息
-        merged_context.extend(ctx_msgs)
-
-        # 回复收到
-        if _is_after_startup():
-            asyncio.create_task(_reply_received(room_id, sender_id, instance_id))
-
-        # 走审核链
-        review_result = await create_review_from_callback(
-            db, normalized_payload, instance_id or None,
-        )
-        logger.info("[PendingSession] 补全后进入审核链 session=%d review=%s",
-                    session_id,
-                    review_result.get("id") if isinstance(review_result, dict) and not review_result.get("skipped") else "skipped")
-        return {"handled": True, "review": review_result}
-
-    # 未补全 → 更新剩余缺失字段
-    still_missing = completion_result.get("still_missing") or missing_fields
-    if still_missing != missing_fields:
-        update_session_missing_fields(db, session_id, still_missing)
-
-    # 如果不是无关消息，不需要再回复
-    if not completion_result.get("is_irrelevant"):
-        logger.info("[PendingSession] 部分补全但仍缺: %s session=%d", still_missing, session_id)
-    return {"handled": True, "review": None}
-
-
-async def _collect_and_classify_order(
-    review_id: int,
-    room_id: str,
-    trigger_log_id: int,
-    trigger_created_at: str,
-) -> None:
-    """后台任务：等待 2.5 分钟后收集上下文，调用 AI 判断订单意图（new/replace/append）。
-
-    步骤:
-    1. 等待 CLASSIFY_WINDOW_SECONDS 秒
-    2. 从 message_logs 查询触发消息前的 N 条消息（排除 @bot）
-    3. 从 message_logs 查询触发消息后 2.5 分钟内的所有消息
-    4. 合并上下文 → 调用 classify_order AI
-    5. 将结果写入 downstream_order_reviews.order_intent
-    """
-    await asyncio.sleep(CLASSIFY_WINDOW_SECONDS)
-
-    db = SessionLocal()
-    try:
-        # ---- 查询触发消息之前的 N 条（排除 @bot 消息） ----
-        pre_rows = db.execute(
-            text(
-                "SELECT sender_name, message_type, content_preview, created_at "
-                "FROM message_logs "
-                "WHERE room_id = :room_id AND id < :trigger_id AND is_at_bot = 0 "
-                "ORDER BY id DESC LIMIT :limit"
-            ),
-            {"room_id": room_id, "trigger_id": trigger_log_id, "limit": CLASSIFY_PRE_MSG_COUNT},
-        ).mappings().all()
-        pre_msgs = list(reversed(pre_rows))  # 恢复时间正序
-
-        # ---- 查询触发消息之后 2.5 分钟内的所有消息 ----
-        post_rows = db.execute(
-            text(
-                "SELECT sender_name, message_type, content_preview, created_at "
-                "FROM message_logs "
-                "WHERE room_id = :room_id AND id > :trigger_id "
-                "AND created_at <= DATE_ADD(:trigger_at, INTERVAL :window SECOND) "
-                "ORDER BY id ASC"
-            ),
-            {
-                "room_id": room_id,
-                "trigger_id": trigger_log_id,
-                "trigger_at": trigger_created_at,
-                "window": CLASSIFY_WINDOW_SECONDS,
-            },
-        ).mappings().all()
-
-        # ---- 构建 context_messages ----
-        context: list[dict[str, Any]] = []
-        for r in pre_msgs:
-            context.append({
-                "type": "text",
-                "content": f"[{r['sender_name'] or ''}] {r['content_preview'] or ''}",
-            })
-        context.append({"type": "text", "content": "===== 以下是客户发送的报货消息 ====="})
-        for r in post_rows:
-            context.append({
-                "type": "text",
-                "content": f"[{r['sender_name'] or ''}] {r['content_preview'] or ''}",
-            })
-
-        if not pre_msgs and not post_rows:
-            # 没有上下文可判断，默认新下单
-            db.execute(
-                text(
-                    "UPDATE downstream_order_reviews "
-                    "SET order_intent = 'new', order_intent_reason = '无上下文消息，默认新下单' "
-                    "WHERE id = :id"
-                ),
-                {"id": review_id},
-            )
-            db.commit()
-            logger.info("[OrderClassify] review=%d 无上下文，默认 intent=new", review_id)
-            return
-
-        # ---- 调用分类 AI ----
-        parser = AIOrderParser()
-        result = await parser.classify_order(context, db=db)
-        intent = result.get("intent", "new")
-        reason = result.get("reason", "")
-        logger.info("[OrderClassify] review=%d intent=%s confidence=%s reason=%s",
-                    review_id, intent, result.get("confidence"), reason)
-
-        # ---- 写入审核记录 ----
-        db.execute(
-            text(
-                "UPDATE downstream_order_reviews "
-                "SET order_intent = :intent, order_intent_reason = :reason "
-                "WHERE id = :id"
-            ),
-            {"id": review_id, "intent": intent, "reason": (reason or "")[:500]},
-        )
-        db.commit()
-    except Exception as exc:
-        logger.warning("[OrderClassify] review=%d 分类异常: %s", review_id, exc)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-    finally:
-        db.close()
-
-
-def _build_validate_context(
-    extracted: dict[str, Any],
-    log_result: Optional[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """根据 _extract_callback_message 的结果构建 validate_order 所需的 context_messages。
-
-    返回空列表表示没有可验证的内容。
-    """
-    msg_type = extracted.get("message_type") or "text"
-    content_text = (extracted.get("content_text") or "").strip()
-    attachment_base64 = extracted.get("attachment_base64") or ""
-    attachment_name = extracted.get("attachment_name") or ""
-
-    # 补充 content_text：如果 extracted 没有，从 log_result 取
-    if not content_text and log_result:
-        content_text = str(log_result.get("content_preview") or "").strip()
-
-    msgs: list[dict[str, Any]] = []
-
-    if msg_type == "image":
-        if attachment_base64:
-            mime = extracted.get("attachment_mime") or "image/png"
-            msgs.append({"type": "image", "base64": attachment_base64, "mime": mime})
-        elif content_text:
-            # 图片无 base64 但有说明文字，用文字验证
-            msgs.append({"type": "text", "content": content_text})
-        # 图片既没 base64 也没文字 → 返回空，保守放行（由调用方兜底）
-    elif msg_type == "file":
-        if attachment_base64 and attachment_name.lower().endswith((".xlsx", ".xls")):
-            from app.services.downstream_orders import _extract_excel_summary
-            summary = _extract_excel_summary(attachment_base64)
-            if summary:
-                msgs.append({"type": "file", "file_name": attachment_name, "excel_summary": summary})
-        elif content_text:
-            msgs.append({"type": "text", "content": content_text})
-    else:
-        # 文字类消息
-        if content_text:
-            msgs.append({"type": "text", "content": content_text})
-
-    return msgs
 
 
 def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: str) -> bool:
@@ -326,6 +68,14 @@ def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: 
         logger.info("撤回消息: 已标记 msg_log_id=%d server_id=%s", recalled_msg_id, recalled_server_id)
     else:
         logger.info("撤回消息: 未找到对应原始消息 server_id=%s", recalled_server_id)
+
+    # 从缓冲区中移除已撤回的消息
+    buf_room = _server_id_to_room.pop(recalled_server_id, None)
+    if buf_room and buf_room in _room_buffers:
+        buf = _room_buffers[buf_room]
+        buf["messages"] = [m for m in buf["messages"] if m.get("server_id") != recalled_server_id]
+        logger.info("撤回消息: 已从缓冲区移除 server_id=%s room=%s remaining=%d",
+                     recalled_server_id, buf_room, len(buf["messages"]))
 
     # 取消延迟任务
     pending_task = _pending_delayed_tasks.pop(recalled_server_id, None)
@@ -549,8 +299,8 @@ async def ingest_runtime_message(
             "shipping_scan_triggered": shipping_scan_triggered,
         }
 
-    # ===== 客户群专线：统一走通用审核链 create_review_from_callback =====
-    review_result = None
+    # ===== 客户群专线：缓冲消息 → 延迟 → 批量送 AI =====
+    ai_chat_result = None
 
     if not customer:
         logger.info("客户群专线跳过: customer 未找到 room=%s instance=%s", room_id, resolved_instance_id)
@@ -558,163 +308,83 @@ async def ingest_runtime_message(
         logger.info("客户群专线跳过: 发送者是员工 sender=%s room=%s", log_sender_id, room_id)
 
     if customer and not sender_is_employee:
-        try:
-            # 标记 @bot 消息
-            _is_at = False
-            bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
-            if (bot_wxid or resolved_instance_id) and is_at_bot(normalized_payload, bot_wxid, resolved_instance_id):
-                _is_at = True
-                _log_id = (log_result or {}).get("id")
-                if _log_id:
-                    try:
-                        db.execute(text("UPDATE message_logs SET is_at_bot = 1 WHERE id = :id"), {"id": _log_id})
-                        db.commit()
-                    except Exception:
-                        pass
+        bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
 
-            # 判断消息子类型
-            is_image = log_msg_type in ("image", "img", "picture")
-            is_excel = False
-            if log_msg_type == "file":
-                _msg_data = (normalized_payload.get("message") or {}).get("data") or normalized_payload.get("data") or {}
-                if isinstance(_msg_data, str):
-                    _msg_data = {}
-                _file_name = str(
-                    _msg_data.get("file_name") or _msg_data.get("filename")
-                    or normalized_payload.get("file_name") or normalized_payload.get("filename")
-                    or (log_result or {}).get("content_preview") or ""
-                ).lower()
-                is_excel = _file_name.endswith((".xlsx", ".xls"))
+        # ---- 过滤：机器人自身发送的消息不送 AI ----
+        if log_sender_id and bot_wxid and log_sender_id == bot_wxid:
+            logger.info("客户群: 跳过机器人自身消息 sender=%s room=%s", log_sender_id, room_id)
+            return {
+                "instanceId": resolved_instance_id,
+                "wxid": bot_wxid,
+                "received": True, "log": log_result,
+                "ai_chat": None, "shipping_scan_triggered": False,
+                "skipped": "bot_self_message",
+            }
 
-            # ---- 构建验证上下文 ----
-            extracted = _extract_callback_message(normalized_payload, resolved_instance_id or None)
-            ctx_msgs = _build_validate_context(extracted, log_result)
-
-            # ---- 优先检查：是否有该发送人的挂起会话 ----
-            pending_session = None
-            try:
-                pending_session = find_active_session(db, room_id, log_sender_id)
-            except Exception as ps_exc:
-                logger.debug("查找挂起会话异常: %s", ps_exc)
-
-            if pending_session:
-                logger.info("发现挂起会话 id=%d room=%s sender=%s, 进入补全流程",
-                            pending_session["id"], room_id, log_sender_id)
-                followup_result = await _handle_pending_session_followup(
-                    db, pending_session, ctx_msgs,
-                    room_id, log_sender_id, resolved_instance_id,
-                    normalized_payload,
-                )
-                review_result = followup_result.get("review")
-                # 无论补全是否成功，此消息已被挂起会话处理
+        # ---- 过滤：非图片且非 Excel 的文件不送 AI ----
+        if log_msg_type == "file":
+            _fn = str((log_result or {}).get("content_preview") or "").lower()
+            if not (_fn.endswith(".xlsx") or _fn.endswith(".xls")):
+                logger.info("客户群: 跳过非 Excel 文件 file=%s room=%s", _fn, room_id)
                 return {
                     "instanceId": resolved_instance_id,
-                    "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
-                    "received": True,
-                    "log": log_result,
-                    "review": review_result,
-                    "shipping_scan_triggered": False,
-                    "pending_session_handled": True,
+                    "wxid": bot_wxid,
+                    "received": True, "log": log_result,
+                    "ai_chat": None, "shipping_scan_triggered": False,
+                    "skipped": "non_excel_file",
                 }
 
-            # ---- 定期清理过期会话 ----
-            try:
-                cleanup_expired_sessions(db)
-            except Exception:
-                pass
-
-            # ---- 报货验证：判断是否为报货信息 + 信息完整性 ----
-            is_order = False
-            is_complete = True
-            missing_fields: list[str] = []
-            validation_reason = ""
-            if ctx_msgs:
+        # 标记 @bot 消息（保留，用于日志分析）
+        if (bot_wxid or resolved_instance_id) and is_at_bot(normalized_payload, bot_wxid, resolved_instance_id):
+            _log_id = (log_result or {}).get("id")
+            if _log_id:
                 try:
-                    parser = AIOrderParser()
-                    validation = await parser.validate_order(ctx_msgs, db=db)
-                    is_order = validation.get("is_order", False)
-                    is_complete = validation.get("is_complete", True)
-                    missing_fields = validation.get("missing_fields") or []
-                    validation_reason = validation.get("reason", "")
-                    logger.info("报货验证: room=%s is_order=%s is_complete=%s missing=%s reason=%s",
-                                room_id, is_order, is_complete, missing_fields, validation_reason)
-                except Exception as val_exc:
-                    is_order = True
-                    is_complete = True  # 验证异常时保守放行
-                    logger.warning("报货验证异常，保守处理为完整报货: room=%s err=%s", room_id, val_exc)
-            else:
-                is_order = is_image or is_excel
-                logger.debug("报货验证: 无可验证内容，保守判定 is_order=%s room=%s type=%s",
-                             is_order, room_id, log_msg_type)
+                    db.execute(text("UPDATE message_logs SET is_at_bot = 1 WHERE id = :id"), {"id": _log_id})
+                    db.commit()
+                except Exception:
+                    pass
 
-            # ---- 非报货消息：跳过 ----
-            if not is_order:
-                logger.info("客户群非报货消息，跳过: room=%s type=%s", room_id, log_msg_type)
-                return {
-                    "instanceId": resolved_instance_id,
-                    "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
-                    "received": True,
-                    "log": log_result,
-                    "review": None,
-                    "shipping_scan_triggered": False,
-                    "order_validated": False,
-                }
+        # ---- 提取消息内容 ----
+        _extracted = _extract_callback_message(normalized_payload, resolved_instance_id or None)
+        _content_text = (_extracted.get("content_text") or "").strip()
+        _sender_name = str((log_result or {}).get("sender_name") or _extracted.get("sender_name") or "").strip()
+        _attachment_base64 = _extracted.get("attachment_base64") or ""
+        _file_name = _extracted.get("attachment_name") or ""
 
-            # ---- 是报货但信息不完整：挂起会话 ----
-            if not is_complete and missing_fields:
-                logger.info("报货信息不完整，创建挂起会话: room=%s sender=%s missing=%s",
-                            room_id, log_sender_id, missing_fields)
-                try:
-                    create_pending_session(
-                        db=db,
-                        room_id=room_id,
-                        sender_id=log_sender_id,
-                        instance_id=resolved_instance_id,
-                        customer_id=customer.get("id") if customer else None,
-                        customer_name=customer.get("customer_name", "") if customer else "",
-                        missing_fields=missing_fields,
-                        context_messages=ctx_msgs,
-                        original_payload=normalized_payload,
-                        ai_reason=validation_reason,
-                    )
-                    # 通知客户缺少什么
-                    if _is_after_startup():
-                        asyncio.create_task(_reply_missing_fields(
-                            room_id, log_sender_id, resolved_instance_id, missing_fields,
-                        ))
-                except Exception as ps_exc:
-                    logger.warning("创建挂起会话失败: %s", ps_exc)
-                return {
-                    "instanceId": resolved_instance_id,
-                    "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
-                    "received": True,
-                    "log": log_result,
-                    "review": None,
-                    "shipping_scan_triggered": False,
-                    "order_incomplete": True,
-                    "missing_fields": missing_fields,
-                }
+        # 提取 message_server_id 用于撤回追踪
+        _msg_data = (normalized_payload.get("message") or {}).get("data") or normalized_payload.get("data") or {}
+        if isinstance(_msg_data, str):
+            _msg_data = {}
+        _server_id = str(_msg_data.get("message_server_id") or "").strip()
 
-            # ---- 是完整报货消息：回复"收到" + 走审核链 ----
-            if (_is_at or is_image or is_excel) and _is_after_startup():
-                asyncio.create_task(_reply_received(room_id, log_sender_id, resolved_instance_id))
+        # ---- 放入缓冲区，延迟 2 分钟后统一送 AI ----
+        msg_entry = {
+            "server_id": _server_id,
+            "room_id": room_id,
+            "sender_id": log_sender_id,
+            "sender_name": _sender_name,
+            "message_type": log_msg_type,
+            "content_text": _content_text,
+            "attachment_base64": _attachment_base64,
+            "file_name": _file_name,
+            "customer": dict(customer) if customer else None,
+            "instance_id": resolved_instance_id or "",
+            "bot_wxid": bot_wxid or "",
+            "payload": normalized_payload,
+            "log_id": (log_result or {}).get("id"),
+        }
 
-            review_result = await create_review_from_callback(db, normalized_payload, resolved_instance_id or None)
-            logger.info("客户群审核: room=%s review=%s", room_id,
-                        review_result.get("id") if isinstance(review_result, dict) and not review_result.get("skipped") else "skipped")
-        except Exception as exc:
-            logger.warning("客户群审核创建异常: %s", exc)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+        if _server_id:
+            _server_id_to_room[_server_id] = room_id
+
+        _enqueue_message(room_id, msg_entry)
 
         return {
             "instanceId": resolved_instance_id,
-            "wxid": effective_wxid or _safe_text(normalized_payload.get("wxid")),
+            "wxid": bot_wxid,
             "received": True,
             "log": log_result,
-            "review": review_result,
+            "ai_chat": "buffered",
             "shipping_scan_triggered": False,
         }
 
@@ -731,3 +401,85 @@ async def ingest_runtime_message(
         "media_order_triggered": False,
         "shipping_scan_triggered": shipping_scan_triggered,
     }
+
+
+# ---------------------------------------------------------------------------
+# 客户群消息缓冲：延迟 2 分钟，收集完整批量送 AI
+# ---------------------------------------------------------------------------
+def _enqueue_message(room_id: str, msg_entry: dict[str, Any]) -> None:
+    """将消息放入 room 缓冲区，启动/重置延迟任务。"""
+    now = time.monotonic()
+    if room_id not in _room_buffers:
+        _room_buffers[room_id] = {"messages": [], "task": None, "first_ts": now}
+
+    buf = _room_buffers[room_id]
+    buf["messages"].append(msg_entry)
+    buf["last_ts"] = now
+
+    # 如果已有延迟任务在等待，不需要重新创建（到时间后会 flush 所有积攒的消息）
+    if buf.get("task") and not buf["task"].done():
+        logger.debug("客户群缓冲: 追加消息到 room=%s buffer_size=%d", room_id, len(buf["messages"]))
+        return
+
+    # 创建新的延迟任务
+    buf["task"] = asyncio.create_task(_delayed_flush(room_id))
+    logger.info("客户群缓冲: 新建延迟任务 room=%s delay=%ds", room_id, AI_BUFFER_DELAY_SECONDS)
+
+
+async def _delayed_flush(room_id: str) -> None:
+    """等待延迟时间后，将缓冲区消息批量送 AI。"""
+    try:
+        await asyncio.sleep(AI_BUFFER_DELAY_SECONDS)
+    except asyncio.CancelledError:
+        logger.info("客户群缓冲: 延迟任务被取消 room=%s", room_id)
+        return
+
+    buf = _room_buffers.pop(room_id, None)
+    if not buf or not buf["messages"]:
+        return
+
+    messages = buf["messages"]
+    logger.info("客户群缓冲: 开始批量送 AI room=%s count=%d", room_id, len(messages))
+
+    # 逐条送 AI（AI 通过对话历史保持上下文）
+    db = SessionLocal()
+    try:
+        for msg in messages:
+            try:
+                ai_result = await process_customer_group_message(
+                    db,
+                    room_id=msg["room_id"],
+                    sender_id=msg["sender_id"],
+                    sender_name=msg["sender_name"],
+                    message_type=msg["message_type"],
+                    content_text=msg["content_text"],
+                    attachment_base64=msg.get("attachment_base64") or "",
+                    file_name=msg.get("file_name") or "",
+                    customer=msg.get("customer"),
+                    instance_id=msg.get("instance_id") or "",
+                    bot_wxid=msg.get("bot_wxid") or "",
+                    payload=msg.get("payload"),
+                )
+                logger.info("客户群 AI 对话: room=%s result=%s", room_id, ai_result)
+
+                # 标记消息已被 AI 处理
+                _log_id = msg.get("log_id")
+                if _log_id:
+                    try:
+                        from app.services.message_logs import mark_ai_recognized
+                        mark_ai_recognized(db, _log_id)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                logger.warning("客户群 AI 对话异常: room=%s err=%s", room_id, exc)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+
+            # 清理 server_id 映射
+            sid = msg.get("server_id")
+            if sid:
+                _server_id_to_room.pop(sid, None)
+    finally:
+        db.close()

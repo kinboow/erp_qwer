@@ -1180,7 +1180,8 @@ async def handle_media_order(
 
 
 # ---------------------------------------------------------------------------
-# 启动时补扫未识别的消息（图片/文件 + @bot）
+# 启动时补扫未识别的消息（仅发货群扫码图片）
+# 客户群消息现已由 AI 对话实时处理，无需补扫
 # ---------------------------------------------------------------------------
 def _restore_payload(msg: dict[str, Any]) -> dict[str, Any]:
     """从 message_logs 行恢复原始 payload dict"""
@@ -1194,135 +1195,69 @@ def _restore_payload(msg: dict[str, Any]) -> dict[str, Any]:
 
 
 async def rescan_unrecognized_messages() -> None:
-    """扫描最近未被 AI 识别的图片/文件消息和 @bot 消息，重新触发识别流程。"""
-    from app.services.message_logs import get_unrecognized_media_messages, get_unrecognized_at_messages, increment_rescan_count
+    """启动时补扫发货群中未识别的图片消息（二维码扫码），重新触发识别流程。
+    客户群消息由 AI 对话实时处理，不再需要补扫。
+    """
+    from app.services.message_logs import get_unrecognized_media_messages, increment_rescan_count
 
     db = SessionLocal()
     try:
         pending_media = get_unrecognized_media_messages(db, limit=15)
-        pending_at = get_unrecognized_at_messages(db, limit=15)
     finally:
         db.close()
 
-    # --- 补扫图片/文件消息 ---
-    if pending_media:
-        logger.info("[启动补扫] 发现 %d 条未识别的图片/文件消息", len(pending_media))
-        for msg in pending_media:
-            msg_id = msg.get("id") or 0
-            room_id = str(msg.get("room_id") or "").strip()
-            sender_id = str(msg.get("sender_id") or "").strip()
-            instance_id = str(msg.get("instance_id") or "").strip()
-            message_type = str(msg.get("message_type") or "").lower()
-
-            if not room_id:
-                _mark_msg_recognized(msg_id)
-                continue
-
-            payload = _restore_payload(msg)
-            if not payload:
-                _mark_msg_recognized(msg_id)
-                continue
-
-            db2 = SessionLocal()
-            try:
-                customer = resolve_customer_by_room(db2, room_id, instance_id)
-            finally:
-                db2.close()
-
-            if not customer:
-                # 不是客户群 → 检查是否为发货群
-                from app.services.shipping_scan_handler import resolve_shipping_room, handle_shipping_scan
-                db3 = SessionLocal()
-                try:
-                    shipping_room = resolve_shipping_room(db3, room_id)
-                finally:
-                    db3.close()
-
-                if shipping_room and message_type in ("image", "img", "picture"):
-                    # 递增重试计数，每次启动最多补扫1次，累计超过3次启动仍失败则放弃
-                    db_cnt = SessionLocal()
-                    try:
-                        count = increment_rescan_count(db_cnt, msg_id)
-                    finally:
-                        db_cnt.close()
-                    if count > 3:
-                        logger.info("[启动补扫] 发货扫码已重试%d次，放弃 id=%d", count, msg_id)
-                        _mark_msg_recognized(msg_id)
-                        # 通知群：已放弃
-                        from app.services.shipping_scan_handler import _notify_scan_failure
-                        asyncio.create_task(_notify_scan_failure(
-                            room_id, sender_id, msg_id,
-                            f"多次补扫仍识别失败，已放弃 (重试{count}次)", instance_id,
-                        ))
-                    else:
-                        logger.info("[启动补扫] 重新触发发货扫码 id=%d room=%s (第%d次)", msg_id, room_id, count)
-                        asyncio.create_task(handle_shipping_scan(
-                            room_id=room_id,
-                            sender_id=sender_id,
-                            msg_log_id=msg_id,
-                            instance_id=instance_id,
-                            payload=payload,
-                        ))
-                else:
-                    logger.info("[启动补扫] 跳过媒体 id=%d: room=%s 无绑定客户也非发货群", msg_id, room_id)
-                    _mark_msg_recognized(msg_id)
-                continue
-
-            logger.info("[启动补扫] 重新触发媒体 id=%d room=%s type=%s", msg_id, room_id, message_type)
-            asyncio.create_task(handle_media_order(
-                room_id=room_id,
-                sender_id=sender_id,
-                customer=dict(customer),
-                msg_log_id=msg_id,
-                instance_id=instance_id,
-                payload=payload,
-                message_type=message_type if message_type in ("image", "file") else "image",
-            ))
-    else:
+    if not pending_media:
         logger.info("[启动补扫] 没有未识别的图片/文件消息")
+        return
 
-    # --- 补扫 @bot 消息 ---
-    if pending_at:
-        logger.info("[启动补扫] 发现 %d 条未识别的 @bot 消息", len(pending_at))
-        for msg in pending_at:
-            msg_id = msg.get("id") or 0
-            room_id = str(msg.get("room_id") or "").strip()
-            sender_id = str(msg.get("sender_id") or "").strip()
-            instance_id = str(msg.get("instance_id") or "").strip()
-            content = str(msg.get("content_preview") or "").strip()
+    logger.info("[启动补扫] 发现 %d 条未识别的图片/文件消息", len(pending_media))
+    for msg in pending_media:
+        msg_id = msg.get("id") or 0
+        room_id = str(msg.get("room_id") or "").strip()
+        sender_id = str(msg.get("sender_id") or "").strip()
+        instance_id = str(msg.get("instance_id") or "").strip()
+        message_type = str(msg.get("message_type") or "").lower()
 
-            if not room_id or not content:
-                _mark_msg_recognized(msg_id)
-                continue
+        if not room_id:
+            _mark_msg_recognized(msg_id)
+            continue
 
-            payload = _restore_payload(msg)
-            # 从 payload 提取触发信息
-            trigger_info = extract_trigger_info(payload, instance_id)
-            trigger_content = trigger_info.get("content") or content
+        payload = _restore_payload(msg)
+        if not payload:
+            _mark_msg_recognized(msg_id)
+            continue
 
-            if not trigger_content.strip():
-                _mark_msg_recognized(msg_id)
-                continue
+        # 只补扫发货群的图片（二维码扫码），客户群消息已实时处理
+        from app.services.shipping_scan_handler import resolve_shipping_room, handle_shipping_scan
+        db2 = SessionLocal()
+        try:
+            shipping_room = resolve_shipping_room(db2, room_id)
+        finally:
+            db2.close()
 
-            db2 = SessionLocal()
+        if shipping_room and message_type in ("image", "img", "picture"):
+            db_cnt = SessionLocal()
             try:
-                customer = resolve_customer_by_room(db2, room_id, instance_id)
+                count = increment_rescan_count(db_cnt, msg_id)
             finally:
-                db2.close()
-
-            if not customer:
-                logger.info("[启动补扫] 跳过@消息 id=%d: room=%s 无绑定客户", msg_id, room_id)
+                db_cnt.close()
+            if count > 3:
+                logger.info("[启动补扫] 发货扫码已重试%d次，放弃 id=%d", count, msg_id)
                 _mark_msg_recognized(msg_id)
-                continue
-
-            logger.info("[启动补扫] 重新触发@消息 id=%d room=%s content=%s", msg_id, room_id, trigger_content[:50])
-            asyncio.create_task(handle_at_order(
-                room_id=room_id,
-                sender_id=sender_id,
-                customer=dict(customer),
-                trigger_msg_id=msg_id,
-                instance_id=instance_id,
-                trigger_content=trigger_content,
-            ))
-    else:
-        logger.info("[启动补扫] 没有未识别的 @bot 消息")
+                from app.services.shipping_scan_handler import _notify_scan_failure
+                asyncio.create_task(_notify_scan_failure(
+                    room_id, sender_id, msg_id,
+                    f"多次补扫仍识别失败，已放弃 (重试{count}次)", instance_id,
+                ))
+            else:
+                logger.info("[启动补扫] 重新触发发货扫码 id=%d room=%s (第%d次)", msg_id, room_id, count)
+                asyncio.create_task(handle_shipping_scan(
+                    room_id=room_id,
+                    sender_id=sender_id,
+                    msg_log_id=msg_id,
+                    instance_id=instance_id,
+                    payload=payload,
+                ))
+        else:
+            # 非发货群图片或非图片类型 → 标记为已处理（客户群已实时处理）
+            _mark_msg_recognized(msg_id)

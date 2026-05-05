@@ -292,7 +292,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox, ElImageViewer } from 'element-plus'
 import { Loading, Picture, Document, WarningFilled } from '@element-plus/icons-vue'
@@ -569,7 +569,7 @@ const formatRawMessage = (row) => {
 
 const fetchCustomers = async () => {
   try {
-    const res = await getCustomerList({ page: 1, pageSize: 500 }, { silentError: true })
+    const res = await getCustomerList({ page: 1, pageSize: 9999 }, { silentError: true })
     customerOptions.value = res?.data?.list || []
   } catch {
     customerOptions.value = []
@@ -586,6 +586,8 @@ const _connectSSE = () => {
       const payload = JSON.parse(e.data)
       if (payload.event === 'new_review') {
         await _silentRefresh()
+        // 新审核单可能来自新客户，静默刷新客户列表
+        fetchCustomers()
       }
     } catch {}
   }
@@ -679,7 +681,7 @@ const selectReview = async (item) => {
   resetSourceZoom()
   const res = await getReviewDetail(item.id)
   selectedReview.value = res.data
-  selectedCustomerId.value = res.data.customer_id || null
+  selectedCustomerId.value = res.data.customer_id ? Number(res.data.customer_id) : null
   reviewNote.value = res.data.review_note || ''
   populateEditForm()
   await fetchContextMessages(item.id)
@@ -984,6 +986,11 @@ onMounted(async () => {
   await Promise.all([fetchCustomers(), fetchProductOptions()])
   await fetchReviews()
   _connectSSE()
+})
+
+onActivated(() => {
+  // keep-alive 场景下重新激活时刷新客户列表（客户可能已新增/修改）
+  fetchCustomers()
 })
 
 onBeforeUnmount(() => {

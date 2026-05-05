@@ -260,5 +260,20 @@ def ensure_downstream_support_tables(db: Session):
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     ))
 
+    # ---------- AI 对话消息表（per-room 上下文，Function Calling 架构） ----------
+    db.execute(text(
+        "CREATE TABLE IF NOT EXISTS ai_chat_messages ("
+        "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
+        "room_id VARCHAR(100) NOT NULL COMMENT '群聊 ID', "
+        "role VARCHAR(20) NOT NULL COMMENT 'system/user/assistant/tool', "
+        "content MEDIUMTEXT NULL COMMENT '文本内容 / JSON multimodal', "
+        "name VARCHAR(200) NULL COMMENT 'user=发送人, tool=工具名', "
+        "tool_calls JSON NULL COMMENT 'assistant 发起的工具调用', "
+        "tool_call_id VARCHAR(100) NULL COMMENT 'tool 消息对应的 call id', "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+        "INDEX idx_room_created (room_id, created_at)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ))
+
     db.commit()
     _tables_ensured = True

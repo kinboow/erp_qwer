@@ -1608,6 +1608,9 @@ async def approve_review(db: Session, review_id: int, customer_id: int, current_
         raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     order_data = _review_order_data(row)
     _inject_review_uid_to_remark(order_data, review_uid)
+    if review_note:
+        existing = str(order_data.get("remark") or "").strip()
+        order_data["remark"] = f"{existing} {review_note}".strip() if existing else review_note
     _log("调用 ERP 创建订单+审核...")
     result = await erp_bridge.create_sales_order(order_data, customer)
     new_order_no = result.get("order_no") or ""
@@ -1681,6 +1684,9 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
         raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     order_data = _review_order_data(row)
     _inject_review_uid_to_remark(order_data, review_uid)
+    if review_note:
+        existing = str(order_data.get("remark") or "").strip()
+        order_data["remark"] = f"{existing} {review_note}".strip() if existing else review_note
     # 查询该客户所有未发货订单（不限货号），时间范围放宽到 5 年
     begin_date = (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
     end_date = datetime.now().strftime("%Y-%m-%d")
@@ -1764,6 +1770,9 @@ async def manual_order(db: Session, review_id: int, customer_id: int, order_data
         raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
     normalized = _normalize_order(order_data, customer.get("customer_name") or "")
     _inject_review_uid_to_remark(normalized, review_uid)
+    if review_note:
+        existing = str(normalized.get("remark") or "").strip()
+        normalized["remark"] = f"{existing} {review_note}".strip() if existing else review_note
     _log("调用 ERP 创建订单+审核...")
     result = await erp_bridge.create_sales_order(normalized, customer)
     new_order_no = result.get("order_no") or ""
