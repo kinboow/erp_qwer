@@ -9,11 +9,17 @@ from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models import User
-from app.utils.response import json_response
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["发货扫码记录"])
+
+
+def json_response(code=200, message="success", data=None):
+    resp = {"code": code, "message": message}
+    if data is not None:
+        resp["data"] = data
+    return resp
 
 
 @router.get("/scan-records", summary="获取发货扫码识别记录列表")

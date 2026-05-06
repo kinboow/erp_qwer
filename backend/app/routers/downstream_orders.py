@@ -310,11 +310,10 @@ def void_review_api(
     current_user: User = Depends(get_current_user),
 ):
     try:
-        data = void_review(db, review_id, current_user, payload.review_note or "")
+        data = void_review(db, review_id, current_user, review_note=payload.review_note or "")
         return json_response(message="已标记为废单", data=data)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -1,95 +1,92 @@
 <template>
-  <div class="scan-records-page">
-    <!-- 统计卡片 -->
-    <div class="stats-bar">
-      <div class="stat-card">
-        <div class="stat-value">{{ stats.total || 0 }}</div>
-        <div class="stat-label">总计</div>
-      </div>
-      <div class="stat-card stat-success">
-        <div class="stat-value">{{ stats.success_count || 0 }}</div>
-        <div class="stat-label">成功</div>
-      </div>
-      <div class="stat-card stat-fail">
-        <div class="stat-value">{{ stats.failed_count || 0 }}</div>
-        <div class="stat-label">失败</div>
-      </div>
-      <div class="stat-card stat-pending">
-        <div class="stat-value">{{ stats.pending_count || 0 }}</div>
-        <div class="stat-label">处理中</div>
-      </div>
+  <div class="lark-scan-records">
+    <div class="lark-page-header">
+      <div class="header-title">发货单识别</div>
+      <div class="header-desc">查看发货群扫码识别记录、AI 解析结果与发货单创建状态</div>
     </div>
 
-    <!-- 筛选栏 -->
-    <div class="filter-bar">
-      <el-input v-model="filters.order_no" placeholder="搜索订单号" clearable style="width:200px" @keyup.enter="fetchData" />
-      <el-select v-model="filters.scan_status" placeholder="识别状态" clearable style="width:140px" @change="fetchData">
-        <el-option label="成功" value="success" />
-        <el-option label="失败" value="failed" />
-        <el-option label="处理中" value="pending" />
-      </el-select>
-      <el-button type="primary" @click="fetchData">查询</el-button>
-      <el-button @click="resetFilters">重置</el-button>
-    </div>
+    <div class="lark-table-panel">
+      <div class="lark-toolbar">
+        <div class="toolbar-left">
+          <el-input v-model="filters.order_no" placeholder="搜索订单号" clearable style="width: 220px" @keyup.enter="handleSearch" />
+          <el-select v-model="filters.scan_status" placeholder="识别状态" clearable style="width: 140px" @change="handleSearch">
+            <el-option label="全部状态" value="" />
+            <el-option label="成功" value="success" />
+            <el-option label="失败" value="failed" />
+            <el-option label="处理中" value="pending" />
+          </el-select>
+          <el-button type="primary" @click="handleSearch">查询</el-button>
+          <el-button @click="resetFilters">重置</el-button>
+        </div>
+        <div class="toolbar-right">
+          <el-button @click="fetchStats">刷新统计</el-button>
+        </div>
+      </div>
 
-    <!-- 数据表格 -->
-    <el-table :data="tableData" v-loading="loading" border stripe style="width:100%" @row-click="onRowClick">
-      <el-table-column label="图片" width="90" align="center">
-        <template #default="{ row }">
-          <div class="thumb-wrap" v-if="row.msg_log_id && row.image_oss_key" @click.stop="previewImage(row)">
-            <img :src="mediaUrl(row.msg_log_id)" class="thumb-img" loading="lazy" />
-          </div>
-          <span v-else style="color:#c0c4cc;font-size:12px">无图</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="订单号" prop="order_no" min-width="130">
-        <template #default="{ row }">
-          <span v-if="row.order_no" class="link-text" @click.stop="goToOrder(row.order_no)">{{ row.order_no }}</span>
-          <span v-else style="color:#c0c4cc">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="状态" width="90" align="center">
-        <template #default="{ row }">
-          <el-tag :type="statusTagType(row.scan_status)" size="small">{{ statusText(row.scan_status) }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="发货单号" prop="shipment_no" min-width="130">
-        <template #default="{ row }">
-          <span v-if="row.shipment_no">{{ row.shipment_no }}</span>
-          <span v-else style="color:#c0c4cc">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="纸张ID" prop="paper_id" min-width="120" show-overflow-tooltip />
-      <el-table-column label="扫码人" prop="scanner_name" width="100">
-        <template #default="{ row }">
-          {{ row.scanner_name || row.sender_id || '-' }}
-        </template>
-      </el-table-column>
-      <el-table-column label="群名" prop="room_name" min-width="120" show-overflow-tooltip />
-      <el-table-column label="错误信息" prop="error_message" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span v-if="row.error_message" style="color:#f56c6c">{{ row.error_message }}</span>
-          <span v-else style="color:#c0c4cc">-</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="时间" width="160" align="center">
-        <template #default="{ row }">
-          {{ formatDate(row.created_at) }}
-        </template>
-      </el-table-column>
-    </el-table>
+      <div class="summary-bar" v-if="pagination.total > 0">
+        <span class="summary-item">共 <strong>{{ pagination.total }}</strong> 条</span>
+        <span class="summary-item">成功 <strong>{{ stats.success_count || 0 }}</strong> 条</span>
+        <span class="summary-item">失败 <strong>{{ stats.failed_count || 0 }}</strong> 条</span>
+        <span class="summary-item">处理中 <strong>{{ stats.pending_count || 0 }}</strong> 条</span>
+      </div>
 
-    <!-- 分页 -->
-    <div class="pagination-bar">
-      <el-pagination
-        v-model:current-page="pagination.page"
-        v-model:page-size="pagination.pageSize"
-        :total="pagination.total"
-        :page-sizes="[20, 50, 100]"
-        layout="total, sizes, prev, pager, next"
-        @current-change="fetchData"
-        @size-change="fetchData"
-      />
+      <el-table :data="tableData" v-loading="loading" stripe class="lark-table" highlight-current-row @row-click="onRowClick">
+        <el-table-column label="图片" width="90" align="center">
+          <template #default="{ row }">
+            <div class="thumb-wrap" v-if="row.msg_log_id && row.image_oss_key" @click.stop="previewImage(row)">
+              <img :src="mediaUrl(row.msg_log_id)" class="thumb-img" loading="lazy" />
+            </div>
+            <span v-else class="text-muted">无图</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="订单号" prop="order_no" min-width="130">
+          <template #default="{ row }">
+            <span v-if="row.order_no" class="link-text" @click.stop="goToOrder(row.order_no)">{{ row.order_no }}</span>
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag :type="statusTagType(row.scan_status)" size="small">{{ statusText(row.scan_status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="发货单号" prop="shipment_no" min-width="130">
+          <template #default="{ row }">
+            <span v-if="row.shipment_no">{{ row.shipment_no }}</span>
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="纸张ID" prop="paper_id" min-width="120" show-overflow-tooltip />
+        <el-table-column label="扫码人" prop="scanner_name" width="100">
+          <template #default="{ row }">
+            {{ row.scanner_name || row.sender_id || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="群名" prop="room_name" min-width="120" show-overflow-tooltip />
+        <el-table-column label="错误信息" prop="error_message" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.error_message" class="error-text">{{ row.error_message }}</span>
+            <span v-else class="text-muted">-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="时间" width="170">
+          <template #default="{ row }">
+            {{ formatDate(row.created_at) }}
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="lark-pagination">
+        <el-pagination
+          v-model:current-page="pagination.page"
+          v-model:page-size="pagination.pageSize"
+          :total="pagination.total"
+          :page-sizes="[20, 50, 100]"
+          layout="total, sizes, prev, pager, next, jumper"
+          @current-change="fetchData"
+          @size-change="handleSearch"
+        />
+      </div>
     </div>
 
     <!-- 图片预览 -->
@@ -190,6 +187,11 @@ const mediaUrl = (msgLogId) => {
   return `/api/downstream-orders/media/${msgLogId}?token=${encodeURIComponent(t)}`
 }
 
+const handleSearch = () => {
+  pagination.page = 1
+  fetchData()
+}
+
 const fetchData = async () => {
   loading.value = true
   try {
@@ -258,43 +260,77 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.scan-records-page {
-  padding: 20px;
-  background: #f5f6f8;
-  min-height: 100%;
+.lark-scan-records {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  height: 100%;
 }
 
-.stats-bar {
-  display: flex;
-  gap: 16px;
-  margin-bottom: 16px;
+.lark-page-header {
+  flex-shrink: 0;
 }
-.stat-card {
-  flex: 1;
-  background: #fff;
-  border-radius: 8px;
-  padding: 16px 20px;
-  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+
+.header-title {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--lark-text-primary, #1f2329);
 }
-.stat-value {
-  font-size: 28px;
-  font-weight: 700;
-  color: #303133;
-}
-.stat-label {
+
+.header-desc {
   font-size: 13px;
-  color: #909399;
+  color: var(--lark-text-secondary, #646a73);
   margin-top: 4px;
 }
-.stat-success .stat-value { color: #67c23a; }
-.stat-fail .stat-value { color: #f56c6c; }
-.stat-pending .stat-value { color: #e6a23c; }
 
-.filter-bar {
+.lark-table-panel {
+  background: var(--lark-bg-base, #fff);
+  border-radius: var(--lark-radius-lg, 8px);
+  padding: 20px;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.lark-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 14px;
+  flex-shrink: 0;
+}
+
+.toolbar-left {
   display: flex;
   gap: 10px;
-  margin-bottom: 16px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.toolbar-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.summary-bar {
+  font-size: 12px;
+  color: var(--lark-text-secondary, #646a73);
+  margin-bottom: 10px;
+  display: flex;
+  gap: 18px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.summary-bar strong {
+  color: var(--lark-text-primary, #1f2329);
+}
+
+.lark-table {
+  flex: 1;
+  min-height: 0;
 }
 
 .thumb-wrap {
@@ -325,13 +361,21 @@ onMounted(() => {
   text-decoration: underline;
 }
 
-.pagination-bar {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 16px;
+.text-muted {
+  color: #c0c4cc;
 }
 
-/* 详情抽屉 */
+.error-text {
+  color: #f56c6c;
+}
+
+.lark-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+  flex-shrink: 0;
+}
+
 .detail-section {
   display: flex;
   flex-direction: column;

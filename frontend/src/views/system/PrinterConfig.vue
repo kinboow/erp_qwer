@@ -7,6 +7,11 @@
       </div>
 
       <div class="row-item">
+        <div class="label">审核下单后自动打印配货单</div>
+        <el-switch v-model="autoPrintEnabled" active-text="已启用" inactive-text="未启用" />
+      </div>
+
+      <div class="row-item">
         <div class="label">选择客户端</div>
         <el-select v-model="selectedClient" filterable placeholder="请选择客户端" @change="onClientChange" style="width: 100%" :loading="loadingClients" loading-text="加载中...">
           <el-option
@@ -14,6 +19,19 @@
             :key="c.hostname"
             :label="`${c.hostname}${c.online ? ' (在线)' : ' (离线)'}`"
             :value="c.hostname"
+          />
+        </el-select>
+      </div>
+
+      <div v-if="availablePrinters.length > 0" class="row-item">
+        <div class="label">目标打印机</div>
+        <el-select v-model="selectedPrinter" filterable placeholder="使用客户端当前默认打印机" style="width: 100%" @change="onPrinterChange">
+          <el-option label="跟随客户端当前默认打印机" value="" />
+          <el-option
+            v-for="name in availablePrinters"
+            :key="name"
+            :label="name"
+            :value="name"
           />
         </el-select>
       </div>
@@ -42,17 +60,24 @@ const testing = ref(false)
 const saving = ref(false)
 const printTested = ref(false)
 const clients = ref([])
+const autoPrintEnabled = ref(false)
 const selectedClient = ref('')
+const selectedPrinter = ref('')
 let pollTimer = null
 
+const currentClient = computed(() => clients.value.find(x => x.hostname === selectedClient.value) || null)
+
 const currentPrinter = computed(() => {
-  const c = clients.value.find(x => x.hostname === selectedClient.value)
-  return c?.printer_name || ''
+  return currentClient.value?.printer_name || ''
 })
+
+const availablePrinters = computed(() => currentClient.value?.printers || [])
 
 async function saveTargetConfig() {
   await savePrinterConfig({
+    printer_auto_print: autoPrintEnabled.value ? 'true' : 'false',
     printer_target_client: selectedClient.value || '',
+    printer_target_printer: selectedPrinter.value || currentPrinter.value || '',
   })
 }
 
@@ -60,7 +85,9 @@ async function loadConfig() {
   try {
     const res = await getPrinterConfig()
     const cfg = res.data || {}
+    autoPrintEnabled.value = cfg.printer_auto_print === 'true'
     selectedClient.value = cfg.printer_target_client || ''
+    selectedPrinter.value = cfg.printer_target_printer || ''
   } catch {}
 }
 
@@ -82,6 +109,14 @@ async function loadClients() {
 
 async function onClientChange() {
   printTested.value = false
+  const printers = currentClient.value?.printers || []
+  if (selectedPrinter.value && !printers.includes(selectedPrinter.value)) {
+    selectedPrinter.value = ''
+  }
+}
+
+async function onPrinterChange() {
+  printTested.value = false
 }
 
 async function handleTestPrint() {
@@ -91,7 +126,7 @@ async function handleTestPrint() {
   }
   testing.value = true
   try {
-    await sendTestPrint(selectedClient.value, '')
+    await sendTestPrint(selectedClient.value, selectedPrinter.value || currentPrinter.value || '')
     printTested.value = true
     ElMessage.success('测试打印任务已发送')
   } catch (e) {

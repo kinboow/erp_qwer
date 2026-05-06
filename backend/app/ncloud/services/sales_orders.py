@@ -50,7 +50,7 @@ async def list_orders(
                 state=raw.state,
                 print_count=raw.printnum,
                 order_no=raw.dh,
-                order_date=raw.zhdate,
+                order_date=raw.zhdate or "",
                 creator=raw.zhuser,
                 customer_id=raw.khid,
                 customer_name=raw.khname,
@@ -100,7 +100,7 @@ async def get_order_detail(erp: ERPClient, dh: str) -> SalesOrderDetail:
 
     main = SalesOrderMainInfo(
         order_no=raw.main.dh,
-        order_date=raw.main.zhdate,
+        order_date=raw.main.zhdate or "",
         customer_id=raw.main.khid,
         customer_name=raw.main.khname or None,
         state=raw.main.state,

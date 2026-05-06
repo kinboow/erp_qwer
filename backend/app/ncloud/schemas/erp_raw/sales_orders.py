@@ -29,7 +29,7 @@ class ERPOrderDetailRow(BaseModel):
 class ERPOrderMain(BaseModel):
     model_config = ConfigDict(extra="ignore")
     dh: str = ""          # order number
-    zhdate: str = ""      # order date
+    zhdate: str | None = ""      # order date
     khid: str = ""        # customer ID
     khname: str | None = ""  # customer name (may be absent in detail response)
     state: int = 0        # status: 0=draft, 1=approved
@@ -58,7 +58,7 @@ class ERPOrderMain(BaseModel):
 class ERPOrderListRow(BaseModel):
     model_config = ConfigDict(extra="ignore")
     dh: str = ""              # order number
-    zhdate: str = ""          # order date
+    zhdate: str | None = ""          # order date
     khid: str = ""            # customer ID
     khname: str | None = ""   # customer name
     khaddr: str | None = ""   # customer address

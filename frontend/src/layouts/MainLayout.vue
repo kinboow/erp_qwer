@@ -55,10 +55,6 @@
               <el-icon><Box /></el-icon>
               <template #title>销售发货单</template>
             </el-menu-item>
-            <el-menu-item index="/shipping-scan-records">
-              <el-icon><Stamp /></el-icon>
-              <template #title>发货单识别</template>
-            </el-menu-item>
             <el-menu-item index="/unshipped-report">
               <el-icon><Tickets /></el-icon>
               <template #title>待发货报表</template>
@@ -77,6 +73,10 @@
             <el-menu-item index="/approval-list">
               <el-icon><DocumentChecked /></el-icon>
               <template #title>审核列表</template>
+            </el-menu-item>
+            <el-menu-item index="/shipping-scan-records">
+              <el-icon><Stamp /></el-icon>
+              <template #title>发货单识别</template>
             </el-menu-item>
           </el-sub-menu>
 

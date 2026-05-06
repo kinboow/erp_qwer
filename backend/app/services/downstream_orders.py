@@ -1807,7 +1807,7 @@ async def manual_order(db: Session, review_id: int, customer_id: int, order_data
     db.commit()
     _log("DB更新完成")
     _trigger_incremental_sync(order_no=new_order_no, product_nos=pnos)
-    _log("全流程完成 ✅")
+    _log("全流程完成 ")
     return {**result, "review_status": "manual_ordered", "_debug_logs": _logs}
 
 
@@ -1821,17 +1821,19 @@ def void_review(db: Session, review_id: int, current_user: User, customer_id: in
         try:
             customer = _load_customer(db, cid)
             erp_customer_id = customer.get("erp_customer_id") or ""
-            existing_order = _check_review_uid_in_recent_orders(db, erp_customer_id, review_uid)
-            if existing_order:
-                db.execute(text(
-                    "UPDATE downstream_order_reviews SET review_status = 'exception', review_note = :note, "
-                    "reviewer_id = :rid, reviewer_name = :rname, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
-                ), {"id": review_id, "note": f"重复下单拦截: 该审核单已在ERP订单 {existing_order} 中存在",
-                    "rid": current_user.id, "rname": current_user.real_name})
-                db.commit()
-                raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
-        except ValueError:
-            raise
+            if erp_customer_id:
+                existing_order = _check_review_uid_in_recent_orders(db, erp_customer_id, review_uid)
+                if existing_order:
+                    db.execute(text(
+                        "UPDATE downstream_order_reviews SET review_status = 'exception', review_note = :note, "
+                        "reviewer_id = :rid, reviewer_name = :rname, reviewed_at = NOW(), updated_at = NOW() WHERE id = :id"
+                    ), {"id": review_id, "note": f"重复下单拦截: 该审核单已在ERP订单 {existing_order} 中存在",
+                        "rid": current_user.id, "rname": current_user.real_name})
+                    db.commit()
+                    raise ValueError(f"该审核单已下过单，对应ERP订单号: {existing_order}，已标记为异常，请人工处理")
+        except ValueError as exc:
+            if str(exc) != "客户不存在或已停用":
+                raise
         except Exception:
             pass
     db.execute(
