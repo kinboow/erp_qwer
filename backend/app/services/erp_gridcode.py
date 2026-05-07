@@ -458,7 +458,6 @@ def _detect_in_layer(cv_img) -> list[str]:
     h, w = gray.shape[:2]
     min_side = min(w, h) * 0.02
     max_side = min(w, h) * 0.8
-    seen_centers = []  # 避免重复处理相近区域
 
     for cnt in contours:
         peri = cv2.arcLength(cnt, True)
@@ -481,17 +480,6 @@ def _detect_in_layer(cv_img) -> list[str]:
         aspect = max(rw2, rh2) / min(rw2, rh2)
         if aspect > 1.6:
             continue
-
-        # 去重：跳过已处理的相近区域
-        center = approx.reshape(4, 2).mean(axis=0)
-        skip = False
-        for sc in seen_centers:
-            if np.linalg.norm(center - sc) < side * 0.3:
-                skip = True
-                break
-        if skip:
-            continue
-        seen_centers.append(center)
 
         corners = _order_corners(approx.reshape(4, 2))
 
