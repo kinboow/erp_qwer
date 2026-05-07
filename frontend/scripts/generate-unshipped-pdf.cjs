@@ -13,7 +13,7 @@ const MARGIN_R = mm(15);
 const MARGIN_T = mm(12);
 const MARGIN_B = mm(14);
 const CONTENT_W = PAGE_W - MARGIN_L - MARGIN_R;
-const QR_SIZE = mm(22);
+const GRIDCODE_SIZE = mm(30);  // GridCode 方块码尺寸（正方形）
 
 const HEADER_ROW_H = mm(9);
 const DATA_ROW_H = mm(7);
@@ -331,10 +331,10 @@ function buildDocument(payload) {
         sectionPageCount,
       });
 
-      // 标题行 + 二维码（每个订单的每页都有）
+      // 标题行 + GridCode 方块码（每个订单的每页都有）
       content.push({
         columns: [
-          { width: QR_SIZE, text: '' },
+          { width: GRIDCODE_SIZE, text: '' },
           {
             width: '*',
             text: payload.title || '韩酷服饰-待发货单',
@@ -342,22 +342,9 @@ function buildDocument(payload) {
             bold: true,
             alignment: 'center',
           },
-          {
-            width: QR_SIZE,
-            stack: [
-              {
-                image: page.qr_data_url,
-                fit: [QR_SIZE, QR_SIZE],
-                alignment: 'right',
-              },
-              {
-                text: page.page_id || '',
-                alignment: 'center',
-                fontSize: 7,
-                margin: [0, 1, 0, 0],
-              },
-            ],
-          },
+          page.gridcode_data_url
+            ? { width: GRIDCODE_SIZE, image: page.gridcode_data_url, fit: [GRIDCODE_SIZE, GRIDCODE_SIZE], alignment: 'right' }
+            : { width: GRIDCODE_SIZE, text: '' },
         ],
         margin: [0, isFirstPhysicalPage ? 25 : 0, 0, mm(3)],
         pageBreak: isFirstPhysicalPage ? 'before' : undefined,

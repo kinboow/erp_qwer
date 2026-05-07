@@ -22,6 +22,8 @@ import io
 import json
 import logging
 import re
+import shutil
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -31,6 +33,7 @@ import httpx
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import SessionLocal
 from app.services.ai_order_parser import AIOrderParserError, ai_order_parser
 from app.services.downstream_support import ensure_downstream_support_tables
@@ -43,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 SHIPPING_SCAN_DEDUP_WINDOW = 15  # 同一条消息防重复窗口（秒）
 _processed_scans: dict[int, float] = {}  # msg_log_id → monotonic timestamp
-_opencv_qr_detector = None
+_wechat_qr_detector = None
 _QR_TEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{3,}\|[A-Fa-f0-9]{8,64}$")
 
 # ---------------------------------------------------------------------------
@@ -88,7 +91,7 @@ _SHIPPING_TABLE_PARSE_PROMPT = """\
 
 
 # ---------------------------------------------------------------------------
-# 二维码识别 — 纯二维码库路线（ZXing → pyzbar → OpenCV）
+# 码识别 — pyzbar 为主引擎（同时支持 Code128 条形码 + QR 码），微信 WeChatQRCode 兆底（仅QR）
 # ---------------------------------------------------------------------------
 def _normalize_qr_text(value: str) -> str:
     return str(value or "").replace("\n", "").replace("\r", "").strip()
@@ -124,16 +127,86 @@ def _dedupe_texts_raw(values: list[str]) -> list[str]:
     return result
 
 
-def _get_opencv_qr_detector():
-    global _opencv_qr_detector
-    if _opencv_qr_detector is None:
+def _resolve_wechat_qr_model_paths() -> tuple[str, str, str, str] | None:
+    """查找微信 QR 模型文件（detect.prototxt / detect.caffemodel / sr.prototxt / sr.caffemodel）。"""
+    explicit = (
+        (settings.WECHAT_QR_DETECT_PROTO_PATH or "").strip(),
+        (settings.WECHAT_QR_DETECT_MODEL_PATH or "").strip(),
+        (settings.WECHAT_QR_SUPER_RES_PROTO_PATH or "").strip(),
+        (settings.WECHAT_QR_SUPER_RES_MODEL_PATH or "").strip(),
+    )
+    if all(explicit):
+        if all(Path(p).is_file() for p in explicit):
+            return explicit
+        logger.warning("WeChatQRCode 模型路径已配置，但文件不存在: %s", explicit)
+
+    candidate_dirs = [
+        Path(__file__).resolve().parents[2] / "models" / "wechat_qrcode",
+        Path(__file__).resolve().parents[2] / "resources" / "wechat_qrcode",
+        Path(__file__).resolve().parents[2] / "assets" / "wechat_qrcode",
+        Path(__file__).resolve().parents[1] / "models" / "wechat_qrcode",
+    ]
+    for base_dir in candidate_dirs:
+        detect_proto = base_dir / "detect.prototxt"
+        detect_model = base_dir / "detect.caffemodel"
+        sr_proto = base_dir / "sr.prototxt"
+        sr_model = base_dir / "sr.caffemodel"
+        if detect_proto.is_file() and detect_model.is_file() and sr_proto.is_file() and sr_model.is_file():
+            return (str(detect_proto), str(detect_model), str(sr_proto), str(sr_model))
+    return None
+
+
+def _stage_wechat_qr_model_paths(model_paths: tuple[str, str, str, str]) -> tuple[str, str, str, str]:
+    """将模型文件复制到纯 ASCII 临时目录（OpenCV 不支持中文路径）。"""
+    names = ("detect.prototxt", "detect.caffemodel", "sr.prototxt", "sr.caffemodel")
+    staged_dir = Path(tempfile.gettempdir()) / "erp_wechat_qrcode_models"
+    staged_dir.mkdir(parents=True, exist_ok=True)
+    staged_paths: list[str] = []
+    for src, name in zip(model_paths, names):
+        src_path = Path(src)
+        dst_path = staged_dir / name
+        if (not dst_path.exists()) or src_path.stat().st_mtime > dst_path.stat().st_mtime or src_path.stat().st_size != dst_path.stat().st_size:
+            shutil.copyfile(src_path, dst_path)
+        staged_paths.append(str(dst_path))
+    return tuple(staged_paths)  # type: ignore[return-value]
+
+
+def _get_wechat_qr_detector():
+    """获取 WeChatQRCode 单例检测器（带模型文件自动加载）。"""
+    global _wechat_qr_detector
+    if _wechat_qr_detector is None:
         import cv2
-        _opencv_qr_detector = cv2.QRCodeDetector()
-    return _opencv_qr_detector
+        model_paths = _resolve_wechat_qr_model_paths()
+        if model_paths:
+            staged = _stage_wechat_qr_model_paths(model_paths)
+            logger.info("WeChatQRCode 加载模型: %s", staged)
+            _wechat_qr_detector = cv2.wechat_qrcode_WeChatQRCode(*staged)
+        else:
+            logger.warning("WeChatQRCode 无模型文件，回退为无参初始化；建议将 detect/sr 模型放到 backend/models/wechat_qrcode")
+            _wechat_qr_detector = cv2.wechat_qrcode_WeChatQRCode()
+    return _wechat_qr_detector
+
+
+def _wechat_qr_decode(bgr_img) -> list[str]:
+    """微信 QR 检测 + 解码（主引擎），返回经格式校验的文本列表。"""
+    detector = _get_wechat_qr_detector()
+    decoded_info, _ = detector.detectAndDecode(bgr_img)
+    if not decoded_info:
+        return []
+    return _dedupe_texts([str(s).strip() for s in decoded_info if str(s).strip()])
+
+
+def _wechat_qr_decode_raw(bgr_img) -> list[str]:
+    """微信 QR 检测 + 解码，返回所有原始文本（不做格式校验）。"""
+    detector = _get_wechat_qr_detector()
+    decoded_info, _ = detector.detectAndDecode(bgr_img)
+    if not decoded_info:
+        return []
+    return _dedupe_texts_raw([str(s).strip() for s in decoded_info if str(s).strip()])
 
 
 def _pyzbar_decode(img_array) -> list[str]:
-    """pyzbar 解码（速度最快）"""
+    """pyzbar 解码（兜底引擎）。"""
     from pyzbar.pyzbar import decode as pyzbar_decode
     from PIL import Image as PILImage
     pil = PILImage.fromarray(img_array) if not isinstance(img_array, PILImage.Image) else img_array
@@ -141,111 +214,23 @@ def _pyzbar_decode(img_array) -> list[str]:
     return _dedupe_texts([r.data.decode("utf-8").strip() for r in results if r.data])
 
 
-def _zxing_decode(image_obj) -> list[str]:
-    """zxing-cpp 解码。"""
-    try:
-        import zxingcpp
-    except ImportError:
-        return []
-
-    try:
-        results = zxingcpp.read_barcodes(
-            image_obj,
-            formats=zxingcpp.BarcodeFormat.QRCode,
-            try_rotate=True,
-            try_downscale=True,
-            try_invert=True,
-            binarizer=zxingcpp.Binarizer.LocalAverage,
-            return_errors=False,
-        )
-    except Exception:
-        return []
-
-    return _dedupe_texts([getattr(r, "text", "") for r in results if getattr(r, "text", "")])
-
-
-def _opencv_qr_decode(bgr_img) -> list[str]:
-    """OpenCV QRCodeDetector 解码"""
-    detector = _get_opencv_qr_detector()
-    val, _, _ = detector.detectAndDecode(bgr_img)
-    if val:
-        return _dedupe_texts([val.strip()])
-    # 多码检测
-    ok, decoded_info, _, _ = detector.detectAndDecodeMulti(bgr_img)
-    if ok and decoded_info:
-        return _dedupe_texts([s.strip() for s in decoded_info if s.strip()])
-    return []
-
-
-def _decode_with_fast_engines(bgr_img, rgb_img, label: str) -> list[str]:
-    """不依赖视觉检测模型的快速解码链路。"""
-    engine_calls = [
-        ("zxing", lambda: _zxing_decode(rgb_img)),
-        ("pyzbar", lambda: _pyzbar_decode(rgb_img)),
-        ("opencv", lambda: _opencv_qr_decode(bgr_img)),
-    ]
-    for engine_name, fn in engine_calls:
-        try:
-            res = fn()
-            if res:
-                logger.info("二维码: %s %s 识别成功 → %s", label, engine_name, res)
-                return res
-        except Exception as exc:
-            logger.debug("二维码: %s %s 异常: %s", label, engine_name, exc)
-    return []
-
-
-def _build_crop_variants(crop_bgr):
-    import cv2
-
-    gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
-    # 背景归一化：大 kernel 高斯模糊估计光照，消除褶皱阴影
-    bg = cv2.GaussianBlur(gray, (101, 101), 0)
-    import numpy as np
-    norm = np.clip(gray.astype(np.float32) / (bg.astype(np.float32) + 1) * 255, 0, 255).astype(np.uint8)
-
-    variants = [
-        ("color", crop_bgr),
-        ("clahe", cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR)),
-        ("norm", cv2.cvtColor(norm, cv2.COLOR_GRAY2BGR)),
-    ]
-
-    result = []
-    for name, img in variants:
-        bordered = cv2.copyMakeBorder(img, 30, 30, 30, 30, cv2.BORDER_CONSTANT, value=(255, 255, 255))
-        result.append((name, bordered, cv2.cvtColor(bordered, cv2.COLOR_BGR2RGB)))
-    return result
-
-
-def _iter_corner_crops(bgr_img):
-    """按优先级返回角落裁切：拣货单 QR 通常在右下 → 右上 → 左下 → 左上。"""
-    h, w = bgr_img.shape[:2]
-    crop_w = max(int(w * 0.40), 200)
-    crop_h = max(int(h * 0.35), 200)
-    boxes = [
-        ("bottom_right", max(0, w - crop_w), max(0, h - crop_h), w, h),
-        ("top_right", max(0, w - crop_w), 0, w, min(h, crop_h)),
-        ("bottom_left", 0, max(0, h - crop_h), min(w, crop_w), h),
-        ("top_left", 0, 0, min(w, crop_w), min(h, crop_h)),
-    ]
-    for name, x1, y1, x2, y2 in boxes:
-        crop = bgr_img[y1:y2, x1:x2]
-        if crop.size != 0:
-            yield name, crop
-
-
-# 二维码识别总超时（秒）
-_QR_DECODE_TIMEOUT = 8.0
+def _pyzbar_decode_raw(img_array) -> list[str]:
+    """pyzbar 解码，返回所有原始文本（不做格式校验）。"""
+    from pyzbar.pyzbar import decode as pyzbar_decode
+    from PIL import Image as PILImage
+    pil = PILImage.fromarray(img_array) if not isinstance(img_array, PILImage.Image) else img_array
+    results = pyzbar_decode(pil)
+    return _dedupe_texts_raw([r.data.decode("utf-8").strip() for r in results if r.data])
 
 
 def decode_qr_from_bytes(image_bytes: bytes) -> list[str]:
-    """从图片字节解码二维码，返回解码文本列表。
+    """从图片字节解码条形码/二维码，返回经发货单格式校验的文本列表。
 
-    策略（逐层升级，任一层成功即返回）：
-    1. 全图 ZXing / pyzbar / OpenCV 快速扫描（新版打印在此秒出）
-    2. 全图 CLAHE 增强扫描
-    3. 四角区域裁切 + 放大 + 背景归一化 扫描
+    支持 Code128 条形码（新版打印）和 QR 码（旧版打印）。
+    策略（三层，任一层成功即返回）：
+    1. 全图 pyzbar（条形码+QR）→ WeChatQRCode（QR兆底）
+    2. CLAHE 增强后重试
+    3. 四角裁切 + 放大（应对码在图片角落且较小的情况）
     """
     import cv2
     import numpy as np
@@ -254,56 +239,89 @@ def decode_qr_from_bytes(image_bytes: bytes) -> list[str]:
     arr = np.frombuffer(image_bytes, dtype=np.uint8)
     cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if cv_img is None:
-        logger.warning("二维码: 无法解码图片字节")
+        logger.warning("码识别: 无法解码图片字节")
         return []
-    rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
     h, w = cv_img.shape[:2]
-    logger.info("二维码: 图片尺寸 %dx%d (%d bytes)", w, h, len(image_bytes))
+    rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+    logger.info("码识别: 图片尺寸 %dx%d (%d bytes)", w, h, len(image_bytes))
 
-    def _elapsed() -> float:
-        return time.perf_counter() - started_at
+    # --- 第1层：全图直接识别 ---
+    for engine_name, fn in [
+        ("pyzbar", lambda: _pyzbar_decode(rgb)),
+        ("wechat_qrcode", lambda: _wechat_qr_decode(cv_img)),
+    ]:
+        try:
+            res = fn()
+            if res:
+                logger.info("码识别: 全图 %s 识别成功 → %s (%.3fs)", engine_name, res, time.perf_counter() - started_at)
+                return res
+        except Exception as exc:
+            logger.debug("码识别: 全图 %s 异常: %s", engine_name, exc)
 
-    # --- 1) 快速全图路径（新版打印在此命中）---
-    res = _decode_with_fast_engines(cv_img, rgb, "full")
-    if res:
-        logger.info("二维码: 总耗时 %.3fs", _elapsed())
-        return res
-
-    # --- 2) 全图 CLAHE ---
+    # --- 第2层：CLAHE 增强后重试 ---
     gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(gray)
     clahe_bgr = cv2.cvtColor(clahe, cv2.COLOR_GRAY2BGR)
-    res = _decode_with_fast_engines(clahe_bgr, cv2.cvtColor(clahe_bgr, cv2.COLOR_BGR2RGB), "clahe")
-    if res:
-        logger.info("二维码: 总耗时 %.3fs", _elapsed())
-        return res
+    for engine_name, fn in [
+        ("pyzbar", lambda: _pyzbar_decode(clahe)),
+        ("wechat_qrcode", lambda: _wechat_qr_decode(clahe_bgr)),
+    ]:
+        try:
+            res = fn()
+            if res:
+                logger.info("码识别: CLAHE %s 识别成功 → %s (%.3fs)", engine_name, res, time.perf_counter() - started_at)
+                return res
+        except Exception as exc:
+            logger.debug("码识别: CLAHE %s 异常: %s", engine_name, exc)
 
-    # --- 3) 四角区域裁切（优先右下角）---
-    for corner_name, crop in _iter_corner_crops(cv_img):
-        if _elapsed() > _QR_DECODE_TIMEOUT:
-            logger.warning("二维码: 超时 %.1fs，停止扫描", _elapsed())
-            break
-        for scale in (1, 2, 3):
-            if _elapsed() > _QR_DECODE_TIMEOUT:
-                break
-            if scale == 1:
-                scaled = crop
-            else:
-                scaled = cv2.resize(crop, (crop.shape[1] * scale, crop.shape[0] * scale), interpolation=cv2.INTER_LANCZOS4)
-            for src_label, v_bgr, v_rgb in _build_crop_variants(scaled):
-                if _elapsed() > _QR_DECODE_TIMEOUT:
-                    break
-                res = _decode_with_fast_engines(v_bgr, v_rgb, f"corner:{corner_name}:{scale}x:{src_label}")
-                if res:
-                    logger.info("二维码: 总耗时 %.3fs", _elapsed())
-                    return res
+    # --- 第3层：四角裁切 + 放大（码在角落且较小时）---
+    crop_ratio_w, crop_ratio_h = 0.45, 0.45
+    crop_w, crop_h = max(int(w * crop_ratio_w), 200), max(int(h * crop_ratio_h), 200)
+    corners = [
+        ("右下", max(0, w - crop_w), max(0, h - crop_h), w, h),
+        ("右上", max(0, w - crop_w), 0, w, min(h, crop_h)),
+        ("左下", 0, max(0, h - crop_h), min(w, crop_w), h),
+        ("左上", 0, 0, min(w, crop_w), min(h, crop_h)),
+    ]
+    for corner_name, x1, y1, x2, y2 in corners:
+        crop = cv_img[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+        scaled = cv2.resize(crop, (crop.shape[1] * 2, crop.shape[0] * 2), interpolation=cv2.INTER_LANCZOS4)
+        crop_rgb = cv2.cvtColor(scaled, cv2.COLOR_BGR2RGB)
+        # pyzbar 优先（支持条形码+QR）
+        try:
+            res = _pyzbar_decode(crop_rgb)
+            if res:
+                logger.info("码识别: 角落[%s]pyzbar 识别成功 → %s (%.3fs)", corner_name, res, time.perf_counter() - started_at)
+                return res
+        except Exception as exc:
+            logger.debug("码识别: 角落[%s]pyzbar 异常: %s", corner_name, exc)
+        # WeChatQRCode 兆底（仅QR）
+        try:
+            res = _wechat_qr_decode(scaled)
+            if res:
+                logger.info("码识别: 角落[%s]wechat 识别成功 → %s (%.3fs)", corner_name, res, time.perf_counter() - started_at)
+                return res
+        except Exception as exc:
+            logger.debug("码识别: 角落[%s]wechat 异常: %s", corner_name, exc)
+        # CLAHE 增强裁切区域
+        crop_gray = cv2.cvtColor(scaled, cv2.COLOR_BGR2GRAY)
+        crop_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(crop_gray)
+        try:
+            res = _pyzbar_decode(crop_clahe)
+            if res:
+                logger.info("码识别: 角落[%s]CLAHE+pyzbar 识别成功 → %s (%.3fs)", corner_name, res, time.perf_counter() - started_at)
+                return res
+        except Exception as exc:
+            logger.debug("码识别: 角落[%s]CLAHE+pyzbar 异常: %s", corner_name, exc)
 
-    logger.warning("二维码: 所有引擎均未识别到，耗时 %.3fs", _elapsed())
+    logger.warning("码识别: 所有引擎均未识别到，耗时 %.3fs", time.perf_counter() - started_at)
     return []
 
 
 def decode_qr_from_bytes_raw(image_bytes: bytes) -> list[str]:
-    """快速全图扫描，返回所有二维码原始文本（不做发货单格式校验）。"""
+    """快速全图扫描，返回所有条形码/二维码原始文本（不做发货单格式校验）。"""
     import cv2
     import numpy as np
 
@@ -311,43 +329,21 @@ def decode_qr_from_bytes_raw(image_bytes: bytes) -> list[str]:
     cv_img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if cv_img is None:
         return []
-    rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
 
-    raw_engine_calls = [
-        ("zxing", lambda: _zxing_decode(rgb)),
-        ("pyzbar", lambda: _pyzbar_decode(rgb)),
-        ("opencv", lambda: _opencv_qr_decode(cv_img)),
-    ]
-    all_texts: list[str] = []
-    for engine_name, fn in raw_engine_calls:
-        try:
-            res = fn()
-            all_texts.extend(res)
-        except Exception:
-            pass
-
-    # 各引擎返回的已经过 _dedupe_texts（格式校验），可能为空
-    # 再用原始方式重新跑一遍 pyzbar（最快），不做格式过滤
+    # pyzbar 主引擎（同时支持条形码和QR码）
     try:
-        from pyzbar.pyzbar import decode as pyzbar_decode
-        from PIL import Image as PILImage
-        pil = PILImage.fromarray(rgb)
-        results = pyzbar_decode(pil)
-        raw = _dedupe_texts_raw([r.data.decode("utf-8").strip() for r in results if r.data])
-        if raw:
-            return raw
+        rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
+        res = _pyzbar_decode_raw(rgb)
+        if res:
+            return res
     except Exception:
         pass
 
-    # 如果格式校验后的列表不为空，说明引擎能识别但格式不对不应走到这里
-    # 回退到 opencv 原始检测
+    # 微信 QR 兜底（仅QR码）
     try:
-        detector = _get_opencv_qr_detector()
-        ok, decoded_info, _, _ = detector.detectAndDecodeMulti(cv_img)
-        if ok and decoded_info:
-            raw = _dedupe_texts_raw([s.strip() for s in decoded_info if s.strip()])
-            if raw:
-                return raw
+        res = _wechat_qr_decode_raw(cv_img)
+        if res:
+            return res
     except Exception:
         pass
 
@@ -906,41 +902,53 @@ async def handle_shipping_scan(
             # 不标记 ai_recognized，留给补扫重试
             return
 
-        # 2. 二维码识别（非AI）
-        qr_texts = decode_qr_from_bytes(image_bytes)
-        if not qr_texts:
-            # 尝试获取原始二维码文本（未经格式校验）
+        # 2. 识别：GridCode 方块码优先 → 条形码/二维码兜底
+        order_no = ""
+        paper_id = ""
+        qr_text = ""
+
+        # 2a. GridCode 方块码检测（自定义图案，内容直接编码，最鲁棒）
+        from app.services.erp_gridcode import decode_gridcode_from_bytes
+        import time as _time
+        _gc_t0 = _time.perf_counter()
+        gridcode_results = decode_gridcode_from_bytes(image_bytes)
+        _gc_elapsed = _time.perf_counter() - _gc_t0
+        logger.info("[发货扫码] GridCode检测: results=%s 耗时=%.3fs log_id=%d", gridcode_results[:2] if gridcode_results else [], _gc_elapsed, msg_log_id)
+        if gridcode_results:
+            qr_text = gridcode_results[0]
+            qr_info = parse_qr_content(qr_text)
+            order_no = qr_info.get("order_no", "")
+            paper_id = qr_info.get("paper_id", "")
+            if order_no and paper_id:
+                logger.info("[发货扫码] GridCode识别成功 order=%s paper=%s", order_no, paper_id)
+
+        # 2b. 条形码/二维码兜底（旧版打印无 GridCode 时）
+        if not order_no:
+            qr_texts = decode_qr_from_bytes(image_bytes)
+            if qr_texts:
+                qr_text = qr_texts[0]
+                qr_info = parse_qr_content(qr_text)
+                order_no = qr_info.get("order_no", "")
+                paper_id = qr_info.get("paper_id", "")
+                if order_no and paper_id:
+                    logger.info("[发货扫码] 条码识别成功 order=%s paper=%s", order_no, paper_id)
+
+        # 2c. 全部失败
+        if not order_no or not paper_id:
+            # 尝试获取原始文本做提示
             raw_texts = decode_qr_from_bytes_raw(image_bytes)
             if raw_texts:
-                logger.info("[发货扫码] 识别到非发货单二维码 log_id=%d raw=%s", msg_log_id, raw_texts[:3])
+                logger.info("[发货扫码] 识别到非发货单条码 log_id=%d raw=%s", msg_log_id, raw_texts[:3])
                 await _notify_scan_failure(
                     room_id, sender_id, msg_log_id,
-                    "该二维码不是拣货单/配货单，请扫描正确的发货单",
+                    "该条码不是拣货单/配货单，请扫描正确的发货单",
                     instance_id, source=source_msg_id,
                 )
                 _mark_msg_recognized(msg_log_id)
             else:
-                logger.info("[发货扫码] 未识别到二维码 log_id=%d", msg_log_id)
-                await _notify_scan_failure(room_id, sender_id, msg_log_id, "二维码识别失败，请拍清晰", instance_id, source=source_msg_id)
-                # 不标记 ai_recognized，留给补扫重试
+                logger.info("[发货扫码] 未识别到任何标记 log_id=%d", msg_log_id)
+                await _notify_scan_failure(room_id, sender_id, msg_log_id, "识别失败，请拍清晰", instance_id, source=source_msg_id)
             return
-
-        qr_text = qr_texts[0]  # 取第一个二维码
-        qr_info = parse_qr_content(qr_text)
-        order_no = qr_info.get("order_no", "")
-        paper_id = qr_info.get("paper_id", "")
-
-        if not order_no or not paper_id:
-            logger.warning("[发货扫码] 二维码内容格式异常: %s", qr_text)
-            await _notify_scan_failure(
-                room_id, sender_id, msg_log_id,
-                "该二维码不是拣货单/配货单，请扫描正确的发货单",
-                instance_id, source=source_msg_id,
-            )
-            _mark_msg_recognized(msg_log_id)
-            return
-
-        logger.info("[发货扫码] 二维码识别成功 order=%s paper=%s", order_no, paper_id)
 
         # 3. 检查纸张ID去重
         db = SessionLocal()

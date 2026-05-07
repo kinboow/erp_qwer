@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "qwen3.5-flash"
     OPENAI_VISION_MODEL: str = "qwen3.5-flash"
 
+    WECHAT_QR_DETECT_PROTO_PATH: str = ""
+    WECHAT_QR_DETECT_MODEL_PATH: str = ""
+    WECHAT_QR_SUPER_RES_PROTO_PATH: str = ""
+    WECHAT_QR_SUPER_RES_MODEL_PATH: str = ""
+
     # ERP集成配置
     ERP_BASE_URL: str = ""
     ERP_USERNAME: str = ""

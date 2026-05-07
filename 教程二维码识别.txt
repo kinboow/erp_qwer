@@ -1,0 +1,123 @@
+学习笔记_在Python中使用微信扫码功能（OpenCV WeChatQRCode）
+合集 - Some studies in YOLO(3)
+1.
+笔记_OpenCV4.5.1新增微信QRCode解码功能
+2025-09-24
+2.
+学习笔记_在Python中使用微信扫码功能（OpenCV WeChatQRCode）
+2025-09-24
+3.
+安装pyautogui时与setuptool时冲突报错-module 'setuptools.dist' has no attribute 'check_test_suite'
+2025-09-24
+收起
+原文链接：http://www.juzicode.com/opencv-note-wechat-qrcode-detect-decode
+
+微信开发团队在今年年初的时候将其二维码扫描功能贡献给了OpenCV社区，在OpenCV-Python中也可以使用微信扫码功能了。
+
+使用前需要安装opencv-contrib-python包，注意安装的包不能低于4.5.2版本。
+
+使用起来也非常简单，近乎一行流的风格，首先是用wechat_qrcode_WeChatQRCode()创建检测实例，再用detectAndDecode()检测和识别：
+
+复制代码
+import cv2  
+print('cv2.__version__:',cv2.__version__)
+detect_obj = cv2.wechat_qrcode_WeChatQRCode()
+img = cv2.imread('pic/qr.jpg')
+res,points = detect_obj.detectAndDecode(img)
+print('res:',res)
+print('points:',points)
+复制代码
+image
+
+ 
+
+但是这个时候看到检测到的二维码位置是错误的，那是因为在创建检测实例的时候没有传入模型文件导致的，为了更好的检测精度和检测效果，应该在创建实例的时候传入模型文件，模型文件可以在https://github.com/WeChatCV/opencv_3rdparty/tree/wechat_qrcode 下载到，该链接包含了4个模型文件。
+
+image
+
+ 下面的例子是在wechat_qrcode_WeChatQRCode()创建实例的时候传入4个模型文件，注意根据入参名称确定4个模型文件的顺序:
+cv2.wechat_qrcode_WeChatQRCode( [, detector_prototxt_path[, detector_caffe_model_path[, super_resolution_prototxt_path[, super_resolution_caffe_model_path]]]] )
+
+复制代码
+import cv2  
+print('cv2.__version__:',cv2.__version__)
+detect_obj = cv2.wechat_qrcode_WeChatQRCode('detect.prototxt','detect.caffemodel','sr.prototxt','sr.caffemodel')
+img = cv2.imread('pic/qr.jpg')
+res,points = detect_obj.detectAndDecode(img)
+print('res:',res)
+print('points:',points)
+for pos in points:
+    color=(0,0,255)
+    thick=3
+    for p in [(0,1),(1,2),(2,3),(3,0)]:
+        start = int(pos[p[0]][0]),int(pos[p[0]][1])
+        end = int(pos[p[1]][0]),int(pos[p[1]][1])
+        cv2.line(img,start,end,color,thick)
+cv2.imshow('img',img)
+cv2.imwrite('wechat-qrcode-detect.jpg',img)
+cv2.waitKey()
+cv2.destroyAllWindows()
+复制代码
+image
+
+ 下面是一张图片中包含多个二维码的情况：
+
+复制代码
+import cv2  
+detect_obj = cv2.wechat_qrcode_WeChatQRCode('detect.prototxt','detect.caffemodel','sr.prototxt','sr.caffemodel')
+img = cv2.imread('pic/qr-multi.jpg')
+res,points = detect_obj.detectAndDecode(img)
+print('res:',res)
+print('points:',points)
+for pos in points:
+    color=(0,0,255)
+    thick=3
+    for p in [(0,1),(1,2),(2,3),(3,0)]:
+        start = int(pos[p[0]][0]),int(pos[p[0]][1])
+        end = int(pos[p[1]][0]),int(pos[p[1]][1])
+        cv2.line(img,start,end,color,thick)
+cv2.imshow('img',img)
+cv2.imwrite('wechat-qrcode-detect-multi.jpg',img)
+cv2.waitKey()
+cv2.destroyAllWindows()
+复制代码
+image
+
+ 
+
+image
+
+ 下面我们来看一下现实场景中的识别效果，从摄像头获取图像并进行解析：
+
+复制代码
+#VX公众号: 桔子code / juzicode.com 
+import cv2  
+print('cv2.__version__:',cv2.__version__)
+
+detect_obj = cv2.wechat_qrcode_WeChatQRCode('detect.prototxt','detect.caffemodel','sr.prototxt','sr.caffemodel')
+cap = cv2.VideoCapture(0)
+while cap.isOpened():
+    ret, img = cap.read()
+    if ret is not True:
+        print("读取失败退出")
+        break      
+
+    res,points = detect_obj.detectAndDecode(img)
+    print('res:',res)
+    print('points:',points)
+    for pos in points:
+        color=(0,0,255)
+        thick=3
+        for p in [(0,1),(1,2),(2,3),(3,0)]:
+            start = int(pos[p[0]][0]),int(pos[p[0]][1])
+            end = int(pos[p[1]][0]),int(pos[p[1]][1])
+            cv2.line(img,start,end,color,thick)
+    cv2.imshow('img',img)
+    
+    #检查按键
+    key = cv2.waitKey(200) & 0xff
+    if  key == ord('q') or key == ord('Q') :
+        break
+        
+cap.release()
+cv2.destroyAllWindows()

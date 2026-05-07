@@ -16,8 +16,8 @@ export const syncOrders = (daysBack = 360) => {
   return request({ url: '/api/erp/sync/trigger-orders', method: 'post', params: { days_back: daysBack }, timeout: 300000 })
 }
 
-export const printPicking = (orderNo) => {
-  return request({ url: `/api/sales-orders/${encodeURIComponent(orderNo)}/print-picking`, method: 'post', timeout: 120000 })
+export const printPicking = (orderNo, printMode = 'local') => {
+  return request({ url: `/api/sales-orders/${encodeURIComponent(orderNo)}/print-picking`, method: 'post', data: { print_mode: printMode }, timeout: 120000 })
 }
 
 export const getPickingPrintHistory = (orderNo) => {

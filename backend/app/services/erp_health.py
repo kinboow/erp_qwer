@@ -135,6 +135,11 @@ async def refresh_erp_health_status() -> dict[str, Any]:
                 await ws_notify.broadcast("erp_online")
             except Exception:
                 pass
+            try:
+                from app.services.notify_group import send_to_notification_groups
+                await send_to_notification_groups(None, "✅ ERP 连接已恢复\nERP 服务已恢复正常，可继续同步和下单。")
+            except Exception:
+                pass
 
         _prev_online = current_online
         return get_erp_health_status()

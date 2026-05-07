@@ -167,6 +167,7 @@ def api_get_unshipped_detail(
 class PrintUnshippedRequest(BaseModel):
     ids: list[int]
     customer_name: str = ""
+    print_mode: str = "local"  # local=本地打印, remote=远程打印
 
 
 @router.post("/print", summary="生成待发货单 PDF")
@@ -178,6 +179,14 @@ def api_print_unshipped(
     from app.services.unshipped_print import generate_unshipped_pdf
     try:
         result = generate_unshipped_pdf(db, req.ids, req.customer_name)
+        if req.print_mode == "remote":
+            from app.services.printer_service import enqueue_existing_pdf
+            oss_url = result.get("oss_url", "")
+            # 从 oss_url 提取 object_name: /api/sales-orders/oss-file/unshipped/xxx.pdf?t=...
+            object_name = oss_url.split("/oss-file/")[-1].split("?")[0] if "/oss-file/" in oss_url else ""
+            first_order = req.ids[0] if req.ids else 0
+            enqueue_existing_pdf(db, str(first_order), doc_type="unshipped", pdf_object=object_name)
+            result["remote_queued"] = True
         return json_response(data=result)
     except ValueError as e:
         return json_response(code=404, message=str(e))

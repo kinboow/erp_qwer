@@ -17,6 +17,8 @@ from app.routers import shipping_scans as shipping_scans_router
 from app.services.wechat_runtime_compat import ingest_runtime_message
 from app.services.wechat_ws_service import wechat_ws_service
 from app.services.erp_health import start_erp_health_checker, stop_erp_health_checker
+from app.services.ai_health import start_ai_health_checker, stop_ai_health_checker
+from app.services.printer_health import start_printer_health_checker, stop_printer_health_checker
 from app.services.wechat_health import start_wechat_health_checker, stop_wechat_health_checker
 from app.services.wechat_room_cache import start_room_cache_refresher, stop_room_cache_refresher
 from app.services import ws_notify
@@ -76,12 +78,24 @@ async def lifespan(application: FastAPI):
 
     # 启动时立即检测一次连接状态
     from app.services.erp_health import refresh_erp_health_status
+    from app.services.ai_health import refresh_ai_health_status
+    from app.services.printer_health import refresh_printer_health_status
     from app.services.wechat_health import refresh_wechat_health_status, _try_auto_restart
     try:
         erp_st = await refresh_erp_health_status()
         logger.info("[Startup] ERP 初始状态: online=%s error=%s", erp_st.get("online"), erp_st.get("last_error"))
     except Exception as e:
         logger.warning("[Startup] ERP 初始检测失败: %s", e)
+    try:
+        ai_st = await refresh_ai_health_status()
+        logger.info("[Startup] AI 初始状态: online=%s error=%s", ai_st.get("online"), ai_st.get("last_error"))
+    except Exception as e:
+        logger.warning("[Startup] AI 初始检测失败: %s", e)
+    try:
+        printer_st = await refresh_printer_health_status()
+        logger.info("[Startup] 打印端初始状态: online=%s error=%s", printer_st.get("online"), printer_st.get("last_error"))
+    except Exception as e:
+        logger.warning("[Startup] 打印端初始检测失败: %s", e)
     try:
         wx_st = await refresh_wechat_health_status()
         logger.info("[Startup] 企微初始状态: online=%s error=%s", wx_st.get("online"), wx_st.get("last_error"))
@@ -96,6 +110,8 @@ async def lifespan(application: FastAPI):
         logger.warning("[Startup] 企微初始检测/启动失败: %s", e)
 
     start_erp_health_checker(interval_seconds=20)
+    start_ai_health_checker(interval_seconds=30)
+    start_printer_health_checker(interval_seconds=10)
     start_wechat_health_checker(interval_seconds=3)
     start_room_cache_refresher(interval_seconds=300)
 
@@ -120,6 +136,8 @@ async def lifespan(application: FastAPI):
 
     # ---- shutdown ----
     stop_erp_health_checker()
+    stop_ai_health_checker()
+    stop_printer_health_checker()
     stop_wechat_health_checker()
     stop_room_cache_refresher()
 

@@ -14,7 +14,8 @@
         </el-button>
         <template #dropdown>
           <el-dropdown-menu>
-            <el-dropdown-item command="picking">打印拣货单</el-dropdown-item>
+            <el-dropdown-item command="picking_local">本地打印拣货单</el-dropdown-item>
+            <el-dropdown-item command="picking_remote">远程打印拣货单</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -186,19 +187,25 @@ function summaryMethod({ columns }) {
 }
 
 async function handlePrintCommand(command) {
-  if (command === 'picking') {
-    await handlePrintPicking()
+  if (command === 'picking_local') {
+    await handlePrintPicking('local')
+  } else if (command === 'picking_remote') {
+    await handlePrintPicking('remote')
   }
 }
 
-async function doPrint() {
+async function doPrint(mode = 'local') {
   const orderNo = order.value.order_no
   printing.value = true
   try {
-    const res = await printPicking(orderNo)
-    if (res.code === 200 && res.data?.oss_url) {
-      window.open(res.data.oss_url, '_blank')
-      ElMessage.success(`拣货单已生成（${res.data.page_count} 页${res.data.is_cached ? '，使用缓存' : ''}）`)
+    const res = await printPicking(orderNo, mode)
+    if (res.code === 200) {
+      if (mode === 'remote' && res.data?.remote_queued) {
+        ElMessage.success(`拣货单已发送到远程打印机`)
+      } else if (res.data?.oss_url) {
+        window.open(res.data.oss_url, '_blank')
+        ElMessage.success(`拣货单已生成（${res.data.page_count} 页${res.data.is_cached ? '，使用缓存' : ''}）`)
+      }
       await fetchPrintHistory()
     } else {
       ElMessage.error(res.message || '生成拣货单失败')
@@ -211,7 +218,7 @@ async function doPrint() {
   }
 }
 
-async function handlePrintPicking() {
+async function handlePrintPicking(mode = 'local') {
   const orderNo = order.value.order_no
   if (!orderNo) {
     ElMessage.warning('订单信息未加载')
@@ -236,11 +243,11 @@ async function handlePrintPicking() {
       type: 'warning',
       showCancelButton: true,
     }).then(() => {
-      doPrint()
+      doPrint(mode)
     }).catch(() => {})
     return
   }
-  await doPrint()
+  await doPrint(mode)
 }
 
 function showPrintHistory() {

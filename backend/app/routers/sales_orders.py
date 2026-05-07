@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -218,14 +219,24 @@ def api_order_items(
     return {"code": 200, "data": items}
 
 
+class PrintPickingRequest(BaseModel):
+    print_mode: str = "local"  # local=本地打印, remote=远程打印
+
+
 @router.post("/{order_no}/print-picking", summary="生成拣货单 PDF（幂等）")
 def api_print_picking(
     order_no: str,
+    req: PrintPickingRequest = None,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     """生成拣货单 PDF 并上传 OSS，重复调用返回相同结果"""
     try:
         result = generate_picking_pdf(db, order_no)
+        print_mode = (req.print_mode if req else "local") or "local"
+        if print_mode == "remote":
+            from app.services.printer_service import enqueue_existing_pdf
+            enqueue_existing_pdf(db, order_no, doc_type="picking", pdf_object=f"picking/{order_no}.pdf")
+            result["remote_queued"] = True
         return {"code": 200, "data": result}
     except ValueError as e:
         return {"code": 404, "message": str(e)}

@@ -4,7 +4,18 @@
       <el-button @click="goBack" :icon="ArrowLeft" class="back-btn">返回列表</el-button>
       <h2 class="detail-title">待发货详情 - {{ detail.order_no || '' }}</h2>
       <div style="flex:1"></div>
-      <el-button type="primary" :icon="Printer" @click="handlePrint" :loading="printing">打印本单</el-button>
+      <el-dropdown trigger="click" @command="handlePrintCommand">
+        <el-button type="primary" :loading="printing">
+          <el-icon style="margin-right: 4px"><Printer /></el-icon>
+          打印本单 <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="local">本地打印</el-dropdown-item>
+            <el-dropdown-item command="remote">远程打印</el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
     </div>
 
     <div class="detail-body" v-loading="loading">
@@ -103,7 +114,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Printer } from '@element-plus/icons-vue'
+import { ArrowLeft, ArrowDown, Printer } from '@element-plus/icons-vue'
 import { getUnshippedDetail, printUnshipped, getUnshippedPrintHistory } from '@/api/unshippedReport'
 import { getCustomerList } from '@/api/customer'
 import { ElMessage } from 'element-plus'
@@ -132,15 +143,23 @@ function goBack() {
   router.push('/unshipped-report')
 }
 
-async function handlePrint() {
+function handlePrintCommand(command) {
+  handlePrint(command)
+}
+
+async function handlePrint(mode = 'local') {
   const d = detail.value
   if (!d.id) return
   printing.value = true
   try {
-    const res = await printUnshipped([d.id], customerName.value || '')
-    if (res.code === 200 && res.data?.oss_url) {
-      window.open(res.data.oss_url, '_blank')
-      ElMessage.success('待发货单已生成')
+    const res = await printUnshipped([d.id], customerName.value || '', mode)
+    if (res.code === 200) {
+      if (mode === 'remote' && res.data?.remote_queued) {
+        ElMessage.success('待发货单已发送到远程打印机')
+      } else if (res.data?.oss_url) {
+        window.open(res.data.oss_url, '_blank')
+        ElMessage.success('待发货单已生成')
+      }
       await fetchPrintHistory()
     } else {
       ElMessage.error(res.message || '生成失败')

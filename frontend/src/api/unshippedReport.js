@@ -20,8 +20,8 @@ export const getUnshippedDetail = (id) => {
   return request({ url: `/api/unshipped-report/${id}`, method: 'get' })
 }
 
-export const printUnshipped = (ids, customerName = '') => {
-  return request({ url: '/api/unshipped-report/print', method: 'post', data: { ids, customer_name: customerName }, timeout: 120000 })
+export const printUnshipped = (ids, customerName = '', printMode = 'local') => {
+  return request({ url: '/api/unshipped-report/print', method: 'post', data: { ids, customer_name: customerName, print_mode: printMode }, timeout: 120000 })
 }
 
 export const getUnshippedPrintHistory = (orderNo) => {

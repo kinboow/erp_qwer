@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import secrets
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,13 +44,13 @@ def _find_first(sources: dict[str, Any] | Any, keys: list[str]) -> str:
     return ""
 
 
-def _extract_cdn_params_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
+def _extract_cdn_params_from_payload(payload: dict[str, Any], message_type: str = "") -> dict[str, Any]:
     """从消息 payload 中提取 CDN 下载参数（返回首选方式）"""
-    candidates = _extract_all_cdn_candidates(payload)
+    candidates = _extract_all_cdn_candidates(payload, message_type)
     return candidates[0] if candidates else {}
 
 
-def _extract_all_cdn_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
+def _extract_all_cdn_candidates(payload: dict[str, Any], message_type: str = "") -> list[dict[str, Any]]:
     """从消息 payload 中提取所有可用的 CDN 下载候选参数（按优先级排列）。"""
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     data = message.get("data") if isinstance(message.get("data"), dict) else {}
@@ -67,17 +68,49 @@ def _extract_all_cdn_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]
 
     candidates: list[dict[str, Any]] = []
 
-    if url and auth_key and aes_key and size:
-        candidates.append({"mode": "wx_download", "url": url, "auth_key": auth_key, "aes_key": aes_key, "size": size})
-
     file_id = c2c.get("file_id") or data.get("file_id") or ""
     if file_id and aes_key:
-        candidates.append({"mode": "c2c_download", "file_id": file_id, "aes_key": aes_key, "file_size": size, "file_type": 5})
+        candidates.append({
+            "mode": "c2c_download",
+            "file_id": file_id,
+            "aes_key": aes_key,
+            "file_size": size,
+            "file_type": 1 if message_type in ("image", "img", "picture") else 5,
+        })
+
+    url_options: list[tuple[int, str]] = []
+    for url_key, size_key in (("url", "size"), ("md_url", "md_size"), ("ld_url", "ld_size")):
+        raw_url = cdn.get(url_key) or ""
+        raw_size = cdn.get(size_key) or 0
+        try:
+            raw_size = int(raw_size)
+        except (ValueError, TypeError):
+            raw_size = 0
+        if raw_url and raw_size:
+            url_options.append((raw_size, str(raw_url)))
+
+    if url and size:
+        url_options.append((size, str(url)))
+
+    url_options.sort(key=lambda item: item[0], reverse=True)
+    seen_urls: set[str] = set()
+    for candidate_size, candidate_url in url_options:
+        if candidate_url in seen_urls:
+            continue
+        seen_urls.add(candidate_url)
+        if auth_key and aes_key:
+            candidates.append({
+                "mode": "wx_download",
+                "url": candidate_url,
+                "auth_key": auth_key,
+                "aes_key": aes_key,
+                "size": candidate_size,
+            })
 
     return candidates
 
 
-def _resolve_runtime(db: Session, instance_id: str) -> dict[str, Any]:
+def _resolve_runtime(db: Session, instance_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     """解析企微运行时配置"""
     if instance_id:
         try:
@@ -99,6 +132,7 @@ def _resolve_runtime(db: Session, instance_id: str) -> dict[str, Any]:
         )).mappings().first()
     except Exception:
         row = None
+    payload_wxid = _safe_text((payload or {}).get("wxid") or _find_first(payload or {}, ["wxid", "robot_id", "robotId"]))
     if row:
         host = (row.get("host") or "").strip()
         port = (row.get("port") or "").strip()
@@ -108,9 +142,44 @@ def _resolve_runtime(db: Session, instance_id: str) -> dict[str, Any]:
         return {
             "api_base_url": base.rstrip("/"),
             "api_key": row.get("api_key") or "",
-            "wxid": row.get("selected_wxid") or instance_id,
+            "wxid": payload_wxid or row.get("selected_wxid") or instance_id,
         }
-    return {"api_base_url": "", "api_key": "", "wxid": instance_id}
+    return {"api_base_url": "", "api_key": "", "wxid": payload_wxid or instance_id}
+
+
+async def _cdn_download_once(runtime: dict[str, Any], cdn_params: dict[str, Any], save_path: Path) -> Path:
+    mode = cdn_params.get("mode", "wx_download")
+    api_route = f"cdn/{mode}"
+    request_body = {k: v for k, v in cdn_params.items() if k != "mode"}
+    request_body["save_path"] = str(save_path)
+
+    headers: dict[str, str] = {}
+    if runtime.get("api_key"):
+        headers["X-API-Key"] = runtime["api_key"]
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
+            json=request_body,
+            headers=headers,
+        )
+        resp.raise_for_status()
+        resp_data = resp.json()
+
+    if isinstance(resp_data, dict) and resp_data.get("code") not in (0, None):
+        raise RuntimeError(resp_data.get("msg") or "CDN API 返回错误")
+
+    actual_path = save_path
+    if not actual_path.is_file():
+        data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
+        for key in ("save_path", "path", "file_path"):
+            possible = str(data_body.get(key) or "").strip()
+            if possible and Path(possible).is_file():
+                actual_path = Path(possible)
+                break
+    if not actual_path.is_file():
+        raise RuntimeError("下载后文件不存在")
+    return actual_path
 
 
 def _guess_extension(file_name: str, message_type: str) -> str:
@@ -152,82 +221,56 @@ async def download_and_archive(
     if row and row.get("oss_key"):
         return row["oss_key"]
 
-    cdn_params = _extract_cdn_params_from_payload(payload)
-    if not cdn_params:
+    candidates = _extract_all_cdn_candidates(payload, message_type)
+    if not candidates:
         logger.debug("[媒体归档] msg_log_id=%s 无CDN参数，跳过", msg_log_id)
         return None
-
-    runtime = _resolve_runtime(db, instance_id)
+ 
+    runtime = _resolve_runtime(db, instance_id, payload)
     if not runtime.get("api_base_url") or not runtime.get("wxid"):
         logger.warning("[媒体归档] msg_log_id=%s 缺少运行时配置", msg_log_id)
         return None
-
-    # 下载到临时目录
+ 
     ext = _guess_extension(file_name, message_type)
     download_dir = Path(__file__).resolve().parents[2] / "temp" / "media_archive"
     download_dir.mkdir(parents=True, exist_ok=True)
-    save_path = download_dir / f"msg_{msg_log_id}{ext}"
+    attempts: list[tuple[str, dict[str, Any]]] = [(f"首选({candidates[0].get('mode')})", candidates[0])]
+    if candidates:
+        attempts.append((f"重试({candidates[0].get('mode')})", candidates[0]))
+    for idx, candidate in enumerate(candidates[1:], start=1):
+        attempts.append((f"备用{idx}({candidate.get('mode')})", candidate))
 
-    mode = cdn_params.pop("mode")
-    api_route = f"cdn/{mode}"
-    cdn_params["save_path"] = str(save_path)
-
-    headers: dict[str, str] = {}
-    if runtime.get("api_key"):
-        headers["X-API-Key"] = runtime["api_key"]
-
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{runtime['api_base_url']}/api/{runtime['wxid']}/{api_route}",
-                json=cdn_params,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            resp_data = resp.json()
-
-        if isinstance(resp_data, dict) and resp_data.get("code") not in (0, None):
-            logger.warning("[媒体归档] CDN API 返回错误 msg_log_id=%s: %s", msg_log_id, resp_data.get("msg"))
-            return None
-
-        # 检查文件是否存在
-        if not save_path.is_file():
-            data_body = resp_data.get("data") if isinstance(resp_data.get("data"), dict) else {}
-            for key in ("save_path", "path", "file_path"):
-                possible = str(data_body.get(key) or "").strip()
-                if possible and Path(possible).is_file():
-                    save_path = Path(possible)
-                    break
-        if not save_path.is_file():
-            logger.warning("[媒体归档] 下载后文件不存在 msg_log_id=%s", msg_log_id)
-            return None
-
-        # 上传到 OSS
-        file_bytes = save_path.read_bytes()
-        now = datetime.now()
-        oss_key = f"wechat_media/{now.strftime('%Y/%m/%d')}/msg_{msg_log_id}{ext}"
-        content_type = _guess_content_type(file_name or save_path.name, message_type)
-
-        oss_client.upload_file(oss_key, file_bytes, content_type=content_type)
-        logger.info("[媒体归档] 已上传到OSS msg_log_id=%s oss_key=%s size=%d", msg_log_id, oss_key, len(file_bytes))
-
-        # 更新 message_logs
-        db.execute(text(
-            "UPDATE message_logs SET oss_key = :oss_key WHERE id = :id"
-        ), {"oss_key": oss_key, "id": msg_log_id})
-        db.commit()
-
-        # 清理临时文件
+    last_err = ""
+    for label, cdn_params in attempts:
+        save_path = download_dir / f"msg_{msg_log_id}_{secrets.token_hex(4)}{ext}"
+        actual_path: Path | None = None
         try:
-            save_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+            actual_path = await _cdn_download_once(runtime, cdn_params, save_path)
+            file_bytes = actual_path.read_bytes()
+            now = datetime.now()
+            oss_key = f"wechat_media/{now.strftime('%Y/%m/%d')}/msg_{msg_log_id}{ext}"
+            content_type = _guess_content_type(file_name or actual_path.name, message_type)
+            oss_client.upload_file(oss_key, file_bytes, content_type=content_type)
+            logger.info("[媒体归档] 已上传到OSS msg_log_id=%s oss_key=%s size=%d via=%s", msg_log_id, oss_key, len(file_bytes), label)
+            db.execute(text(
+                "UPDATE message_logs SET oss_key = :oss_key WHERE id = :id"
+            ), {"oss_key": oss_key, "id": msg_log_id})
+            db.commit()
+            return oss_key
+        except Exception as exc:
+            last_err = str(exc)
+            logger.warning("[媒体归档] 下载失败 msg_log_id=%s via=%s: %s", msg_log_id, label, exc)
+        finally:
+            try:
+                if actual_path and actual_path.is_file():
+                    actual_path.unlink(missing_ok=True)
+                elif save_path.is_file():
+                    save_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
-        return oss_key
-
-    except Exception as exc:
-        logger.warning("[媒体归档] 下载/上传失败 msg_log_id=%s: %s", msg_log_id, exc)
-        return None
+    logger.warning("[媒体归档] 下载/上传失败 msg_log_id=%s: %s", msg_log_id, last_err or "未知错误")
+    return None
 
 
 async def ensure_oss_and_read(

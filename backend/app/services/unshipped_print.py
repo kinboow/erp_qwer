@@ -1,5 +1,5 @@
 """
-待发货报表打印服务 — 生成 PDF（含二维码），与拣货单格式一致
+待发货报表打印服务 — 生成 PDF（含 Code128 条形码），与拣货单格式一致
 """
 
 from __future__ import annotations
@@ -15,7 +15,8 @@ from base64 import b64encode
 from datetime import datetime
 from typing import Any
 
-import qrcode
+import barcode
+from barcode.writer import ImageWriter
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -74,20 +75,21 @@ def ensure_print_tables(db: Session) -> None:
     _unshipped_print_tables_ensured = True
 
 # ---------------------------------------------------------------------------
-# 二维码生成
+# 条形码生成（Code128，抗褶皱能力远强于 QR 码）
 # ---------------------------------------------------------------------------
-def _generate_qr_image(content: str, box_size: int = 4, border: int = 1) -> io.BytesIO:
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=box_size,
-        border=border,
-    )
-    qr.add_data(content)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+def _generate_barcode_image(content: str, module_height: float = 35.0, module_width: float = 0.40) -> io.BytesIO:
+    """生成 Code128 条形码 PNG 图片（含底部文字），返回 BytesIO"""
+    writer = ImageWriter()
+    code = barcode.get("code128", content, writer=writer)
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    code.write(buf, options={
+        "module_height": module_height,
+        "module_width": module_width,
+        "font_size": 25,
+        "text_distance": 13,
+        "quiet_zone": 3,
+        "write_text": True,
+    })
     buf.seek(0)
     return buf
 
@@ -315,17 +317,17 @@ def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str 
                 {"no": order_no, "idx": i, "pid": page_id, "bc": bc_content},
             )
 
-        # 生成 QR 二维码
+        # 生成 GridCode 方块码
+        from app.services.erp_gridcode import gridcode_to_data_url
         payload_pages = []
         for page_idx, page_blocks in enumerate(block_pages):
             pr = page_records[page_idx]
-            qr_buf = _generate_qr_image(pr["barcode_content"], box_size=4, border=1)
             payload_pages.append({
                 "page_index": page_idx,
                 "page_id": pr["page_id"],
                 "barcode_content": pr["barcode_content"],
                 "show_info": page_idx == 0,
-                "qr_data_url": _image_buf_to_data_url(qr_buf),
+                "gridcode_data_url": gridcode_to_data_url(pr["barcode_content"]),
                 "blocks": page_blocks,
             })
 

@@ -35,7 +35,17 @@
           <el-button type="primary" :icon="Search" @click="handleSearch">查询</el-button>
           <el-switch v-model="mergeByOrder" active-text="合并同单" inactive-text="" style="margin-left: 8px" />
           <template v-if="selectedRows.length > 0">
-            <el-button type="primary" size="default" :loading="printing" @click="handlePrint(selectedRows)">批量打印 ({{ selectedRows.length }})</el-button>
+            <el-dropdown trigger="click" @command="handleBatchPrintCommand">
+              <el-button type="primary" size="default" :loading="printing">
+                批量打印 ({{ selectedRows.length }}) <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="local">本地打印</el-dropdown-item>
+                  <el-dropdown-item command="remote">远程打印</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </template>
         </div>
         <div class="toolbar-right">
@@ -220,7 +230,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Search, Download, Refresh, Printer, View } from '@element-plus/icons-vue'
+import { Search, Download, Refresh, Printer, View, ArrowDown } from '@element-plus/icons-vue'
 import { getUnshippedReport, cancelUnshipped, restoreUnshipped, syncUnshippedReport, printUnshipped } from '@/api/unshippedReport'
 import { getCustomerList } from '@/api/customer'
 import { useSyncStatus } from '@/composables/useSyncStatus'
@@ -366,17 +376,25 @@ function handleView(row) {
   router.push(`/unshipped-report/${row.id}`)
 }
 
-async function handlePrint(printRows) {
+function handleBatchPrintCommand(command) {
+  handlePrint(selectedRows.value, command)
+}
+
+async function handlePrint(printRows, mode = 'local') {
   if (!printRows || printRows.length === 0) return
   const ids = printRows.map(r => r.id).filter(Boolean)
   if (ids.length === 0) { ElMessage.warning('没有可打印的记录'); return }
   const cName = printRows[0]?.customer_name || ''
   printing.value = true
   try {
-    const res = await printUnshipped(ids, cName)
-    if (res.code === 200 && res.data?.oss_url) {
-      window.open(res.data.oss_url, '_blank')
-      ElMessage.success(`待发货单已生成（${res.data.item_count} 条）`)
+    const res = await printUnshipped(ids, cName, mode)
+    if (res.code === 200) {
+      if (mode === 'remote' && res.data?.remote_queued) {
+        ElMessage.success(`待发货单已发送到远程打印机`)
+      } else if (res.data?.oss_url) {
+        window.open(res.data.oss_url, '_blank')
+        ElMessage.success(`待发货单已生成（${res.data.item_count} 条）`)
+      }
     } else {
       ElMessage.error(res.message || '生成待发货单失败')
     }

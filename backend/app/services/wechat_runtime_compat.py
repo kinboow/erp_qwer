@@ -386,6 +386,8 @@ async def ingest_runtime_message(
         _sender_name = str((log_result or {}).get("sender_name") or _extracted.get("sender_name") or "").strip()
         _attachment_base64 = _extracted.get("attachment_base64") or ""
         _file_name = _extracted.get("attachment_name") or ""
+        from app.services.ai_chat_service import _remaining_wechat_reconnect_backlog_seconds
+        is_history_backlog = _remaining_wechat_reconnect_backlog_seconds() > 0
 
         # ---- 立即异步送 AI ----
         asyncio.create_task(_send_msg_to_ai(
@@ -401,6 +403,7 @@ async def ingest_runtime_message(
             bot_wxid=bot_wxid or "",
             payload=normalized_payload,
             log_id=(log_result or {}).get("id"),
+            is_history_backlog=is_history_backlog,
         ))
 
         return {
@@ -444,6 +447,7 @@ async def _send_msg_to_ai(
     bot_wxid: str,
     payload: dict[str, Any] | None,
     log_id: int | None,
+    is_history_backlog: bool,
 ) -> None:
     """立即将一条消息送入 AI 对话（受并发控制）。"""
     room_lock = _get_room_lock(room_id)
@@ -464,6 +468,7 @@ async def _send_msg_to_ai(
                     instance_id=instance_id,
                     bot_wxid=bot_wxid,
                     payload=payload,
+                    is_history_backlog=is_history_backlog,
                 )
                 logger.info("客户群 AI 对话: room=%s result=%s", room_id, ai_result)
 

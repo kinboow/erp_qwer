@@ -28,7 +28,7 @@ _status: dict[str, Any] = {
 _prev_online: bool | None = None
 _recovering: bool = False          # True = 正在尝试自动重启，不显示离线
 _recovery_task: asyncio.Task | None = None
-
+_recovery_suspended: bool = False
 
 def _load_wechat_config() -> dict[str, Any]:
     """从数据库读取企微全局配置"""
@@ -55,6 +55,80 @@ def _is_truthy(val) -> bool:
     return bool(val)
 
 
+def _build_base_url(host: str, port: str) -> str:
+    if host.startswith(("http://", "https://")):
+        base_url = host.rstrip("/")
+    else:
+        base_url = f"http://{host}"
+    if port:
+        base_url = f"{base_url}:{port}"
+    return base_url
+
+
+def _build_headers(api_key: str) -> dict[str, str]:
+    headers: dict[str, str] = {}
+    if api_key:
+        headers["X-API-Key"] = api_key
+    return headers
+
+
+async def _fetch_overview_instances(base_url: str, api_key: str) -> tuple[list[dict[str, Any]], str]:
+    headers = _build_headers(api_key)
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, trust_env=False) as client:
+            resp = await client.post(
+                f"{base_url}/api/wechat/overview",
+                json={"only_attached": False},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            if result.get("code") != 0:
+                return [], f"获取实例概览失败：{result.get('msg', '')}"
+            raw_data = result.get("data", {})
+            instances = raw_data.get("instances", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
+            return instances, ""
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        return [], f"API 服务不可达：{exc}"
+    except Exception as exc:
+        return [], f"检查实例状态失败：{exc}"
+
+
+def _pick_logged_in_instance(instances: list[dict[str, Any]], preferred_wxid: str = "") -> dict[str, Any] | None:
+    if preferred_wxid:
+        matched = [i for i in instances if (i.get("wxid") or "") == preferred_wxid]
+        preferred = next((i for i in matched if _is_truthy(i.get("login_status"))), None)
+        if preferred:
+            return preferred
+    return next((i for i in instances if _is_truthy(i.get("login_status"))), None)
+
+
+async def _update_selected_wxid(old_wxid: str, new_wxid: str) -> None:
+    if not new_wxid or new_wxid == old_wxid:
+        return
+    updated = False
+    try:
+        db = SessionLocal()
+        try:
+            db.execute(
+                text("UPDATE wechat_config SET selected_wxid = :wxid WHERE id = 1"),
+                {"wxid": new_wxid},
+            )
+            db.commit()
+            updated = True
+            logger.info("[WeChat Health] 已自动切换 selected_wxid: %s -> %s", old_wxid, new_wxid)
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.warning("[WeChat Health] 更新 selected_wxid 失败: %s", exc)
+    if updated:
+        try:
+            from app.services.wechat_ws_service import wechat_ws_service
+            await wechat_ws_service.auto_connect_from_saved_config()
+        except Exception as exc:
+            logger.warning("[WeChat Health] 自动重连企微 WS 失败: %s", exc)
+
+
 async def _check_instance_status(base_url: str, api_key: str, selected_wxid: str) -> tuple[bool, str]:
     """通过 live API 检查选中实例是否已登录且运行中"""
     headers = {}
@@ -66,37 +140,24 @@ async def _check_instance_status(base_url: str, api_key: str, selected_wxid: str
             resp = await client.post(
                 f"{base_url}/api/wechat/overview",
                 json={"only_attached": False},
-                headers=headers
+                headers=headers,
             )
             resp.raise_for_status()
             result = resp.json()
             if result.get("code") != 0:
                 return False, f"获取实例概览失败：{result.get('msg', '')}"
-
             raw_data = result.get("data", {})
             instances = raw_data.get("instances", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
-
-            # 按 wxid 匹配，可能有多个实例（多开），优先选 login_status=true 的
-            matched = [i for i in instances if i.get("wxid") == selected_wxid]
+            matched = [i for i in instances if (i.get("wxid") or "") == selected_wxid]
             if not matched:
                 wxids = [i.get("wxid", "?") for i in instances]
                 return False, f"实例 {selected_wxid} 不在运行列表中（现有: {wxids}）"
-
-            # 优先取已登录的实例，否则取第一个
-            inst = next((i for i in matched if _is_truthy(i.get("login_status"))), matched[0])
-
-            nickname = inst.get('nickname') or selected_wxid
-            raw_status = inst.get("status")
-            raw_attached = inst.get("attached")
-            raw_login = inst.get("login_status")
-
+            inst = matched[0]
+            nickname = inst.get("nickname") or selected_wxid
             logger.info("[WeChat Health] 实例 %s 原始字段: status=%r, attached=%r, login_status=%r, pid=%r",
-                        nickname, raw_status, raw_attached, raw_login, inst.get("pid"))
-
-            # 判断已登录：仅以 login_status 为准（nickname 可能是历史缓存，不可靠）
-            if not _is_truthy(raw_login):
-                return False, f"实例 {nickname} 未登录（login_status={raw_login}）"
-
+                        nickname, inst.get("status"), inst.get("attached"), inst.get("login_status"), inst.get("pid"))
+            if not _is_truthy(inst.get("login_status")):
+                return False, f"实例 {nickname} 未登录（login_status={inst.get('login_status')})"
             return True, ""
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         return False, f"API 服务不可达：{exc}"
@@ -117,27 +178,11 @@ async def _check_once() -> None:
         })
         return
 
-    # 构建 API base URL
-    if host.startswith(("http://", "https://")):
-        base_url = host.rstrip("/")
-    else:
-        base_url = f"http://{host}"
-    if port:
-        base_url = f"{base_url}:{port}"
-
+    base_url = _build_base_url(host, port)
     api_key = (config.get("api_key") or "").strip()
     selected_wxid = (config.get("selected_wxid") or "").strip()
-    if not selected_wxid:
-        _status.update({
-            "online": False,
-            "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "last_error": "未选择企微实例（selected_wxid 为空）",
-        })
-        return
-
-    # 统一通过 overview 接口判断：API 可达性 + 实例登录状态
-    ok, reason = await _check_instance_status(base_url, api_key, selected_wxid)
-    if not ok:
+    instances, reason = await _fetch_overview_instances(base_url, api_key)
+    if reason:
         _status.update({
             "online": False,
             "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -145,16 +190,54 @@ async def _check_once() -> None:
         })
         return
 
+    matched = [i for i in instances if (i.get("wxid") or "") == selected_wxid] if selected_wxid else []
+    selected_inst = next((i for i in matched if _is_truthy(i.get("login_status"))), None)
+    if selected_inst:
+        nickname = selected_inst.get("nickname") or selected_wxid
+        logger.info("[WeChat Health] 实例 %s 原始字段: status=%r, attached=%r, login_status=%r, pid=%r",
+                    nickname, selected_inst.get("status"), selected_inst.get("attached"), selected_inst.get("login_status"), selected_inst.get("pid"))
+        _status.update({
+            "online": True,
+            "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_error": None,
+        })
+        return
+
+    logged_in_inst = _pick_logged_in_instance(instances)
+    if logged_in_inst:
+        new_wxid = (logged_in_inst.get("wxid") or "").strip()
+        if new_wxid and new_wxid != selected_wxid:
+            logger.info("[WeChat Health] 检测到实例重新上线，自动绑定实例: %s -> %s", selected_wxid, new_wxid)
+            await _update_selected_wxid(selected_wxid, new_wxid)
+        _status.update({
+            "online": True,
+            "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "last_error": None,
+        })
+        return
+
+    if not selected_wxid:
+        reason = "未选择企微实例（selected_wxid 为空）"
+    elif not matched:
+        wxids = [i.get("wxid", "?") for i in instances]
+        reason = f"实例 {selected_wxid} 不在运行列表中（现有: {wxids}）"
+    else:
+        inst = matched[0]
+        nickname = inst.get("nickname") or selected_wxid
+        logger.info("[WeChat Health] 实例 %s 原始字段: status=%r, attached=%r, login_status=%r, pid=%r",
+                    nickname, inst.get("status"), inst.get("attached"), inst.get("login_status"), inst.get("pid"))
+        reason = f"实例 {nickname} 未登录（login_status={inst.get('login_status')})"
+
     _status.update({
-        "online": True,
+        "online": False,
         "last_checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "last_error": None,
+        "last_error": reason,
     })
 
 
 async def _try_auto_restart() -> None:
     """尝试自动重启微信实例，最多重试 2 次，每次等待 10 秒后检查"""
-    global _recovering, _prev_online
+    global _recovering, _prev_online, _recovery_suspended
     _recovering = True
     config = _load_wechat_config()
 
@@ -162,16 +245,8 @@ async def _try_auto_restart() -> None:
     port = (config.get("port") or "").strip()
     api_key = (config.get("api_key") or "").strip()
 
-    if host.startswith(("http://", "https://")):
-        base_url = host.rstrip("/")
-    else:
-        base_url = f"http://{host}"
-    if port:
-        base_url = f"{base_url}:{port}"
-
-    headers = {}
-    if api_key:
-        headers["X-API-Key"] = api_key
+    base_url = _build_base_url(host, port)
+    headers = _build_headers(api_key)
 
     max_attempts = 2
     logged_in_inst = None
@@ -195,28 +270,11 @@ async def _try_auto_restart() -> None:
         # 等待 10 秒
         await asyncio.sleep(10)
 
-        # 通过 overview 查找已登录的实例
-        try:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True, trust_env=False) as client:
-                resp = await client.post(
-                    f"{base_url}/api/wechat/overview",
-                    json={"only_attached": False},
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                result = resp.json()
-                if result.get("code") == 0:
-                    raw_data = result.get("data", {})
-                    instances = raw_data.get("instances", []) if isinstance(raw_data, dict) else (raw_data if isinstance(raw_data, list) else [])
-                    for inst in instances:
-                        if _is_truthy(inst.get("login_status")):
-                            if inst.get("wxid") == config.get("selected_wxid", "").strip():
-                                logged_in_inst = inst
-                                break
-                            if not logged_in_inst:
-                                logged_in_inst = inst
-        except Exception as exc:
-            logger.warning("[WeChat Health] 第 %d 次恢复后查询 overview 失败: %s", attempt, exc)
+        instances, reason = await _fetch_overview_instances(base_url, api_key)
+        if reason:
+            logger.warning("[WeChat Health] 第 %d 次恢复后查询 overview 失败: %s", attempt, reason)
+        else:
+            logged_in_inst = _pick_logged_in_instance(instances, (config.get("selected_wxid") or "").strip())
 
         if logged_in_inst:
             logger.info("[WeChat Health] 第 %d 次尝试恢复成功", attempt)
@@ -227,26 +285,14 @@ async def _try_auto_restart() -> None:
     _recovering = False
 
     if logged_in_inst:
+        _recovery_suspended = False
         new_wxid = logged_in_inst.get("wxid", "")
         nickname = logged_in_inst.get("nickname", new_wxid)
         logger.info("[WeChat Health] 自动恢复成功，已登录实例: wxid=%s nickname=%s", new_wxid, nickname)
 
-        # 自动选择已登录的实例
         old_wxid = (config.get("selected_wxid") or "").strip()
         if new_wxid and new_wxid != old_wxid:
-            try:
-                db = SessionLocal()
-                try:
-                    db.execute(
-                        text("UPDATE wechat_config SET selected_wxid = :wxid WHERE id = 1"),
-                        {"wxid": new_wxid},
-                    )
-                    db.commit()
-                    logger.info("[WeChat Health] 已自动切换 selected_wxid: %s -> %s", old_wxid, new_wxid)
-                finally:
-                    db.close()
-            except Exception as exc:
-                logger.warning("[WeChat Health] 更新 selected_wxid 失败: %s", exc)
+            await _update_selected_wxid(old_wxid, new_wxid)
 
         _status.update({
             "online": True,
@@ -269,13 +315,13 @@ async def _try_auto_restart() -> None:
             )
         except Exception:
             pass
-        # 同时重连 WS
         try:
-            from app.services.wechat_ws_service import wechat_ws_service
-            await wechat_ws_service.auto_connect_from_saved_config()
-        except Exception:
-            pass
+            from app.services.ai_chat_service import mark_wechat_reconnect_backlog_window
+            mark_wechat_reconnect_backlog_window()
+        except Exception as exc:
+            logger.warning("[WeChat Health] 开启客户群历史补推窗口失败: %s", exc)
     else:
+        _recovery_suspended = True
         await _check_once()
         _prev_online = _status.get("online", False)
         logger.warning("[WeChat Health] 自动恢复失败，仍然离线: %s", _status.get("last_error"))
@@ -289,7 +335,7 @@ async def _try_auto_restart() -> None:
             from app.services.system_messages import create_system_message_background
             create_system_message_background(
                 title="企业微信自动恢复失败",
-                content=f"企业微信自动重启 {max_attempts} 次均失败，请手动处理。原因：{_status.get('last_error') or '未知'}",
+                content=f"企业微信自动重启 {max_attempts} 次均失败，已暂停后续自动恢复，待实例重新上线后再恢复自动巡检重连。原因：{_status.get('last_error') or '未知'}",
                 level="error",
                 source="wechat_health",
             )
@@ -305,19 +351,19 @@ async def _try_auto_restart() -> None:
 
 async def refresh_wechat_health_status() -> dict[str, Any]:
     """立即执行一次微信状态检查并返回最新状态"""
-    global _prev_online, _recovery_task
+    global _prev_online, _recovery_task, _recovery_suspended
     async with _check_lock:
         await _check_once()
         current_online = _status.get("online", False)
 
-        # 状态由在线变为离线时：写入紧急系统动态 + 系统消息 + 发起自动重启
         if _prev_online is not None and _prev_online and not current_online:
             error_msg = _status.get("last_error") or "未知原因"
+            recovery_message = "已暂停自动恢复，等待实例重新上线" if _recovery_suspended else "已发起自动重启"
             try:
                 from app.services.system_activities import create_activity_background
                 create_activity_background(
                     title="微信连接服务离线",
-                    content=f"微信连接检测失败：{error_msg}，已发起自动重启",
+                    content=f"微信连接检测失败：{error_msg}，{recovery_message}",
                     type="urgent",
                     source="wechat_health",
                 )
@@ -327,35 +373,46 @@ async def refresh_wechat_health_status() -> dict[str, Any]:
                 from app.services.system_messages import create_system_message_background
                 create_system_message_background(
                     title="企业微信连接离线",
-                    content=f"企业微信连接检测失败：{error_msg}，系统已发起自动重启",
+                    content=f"企业微信连接检测失败：{error_msg}，系统{recovery_message}",
                     level="error",
                     source="wechat_health",
                 )
             except Exception:
                 pass
 
-            # 发起自动重启（后台任务，不阻塞）
-            if not _recovery_task or _recovery_task.done():
+            if not _recovery_suspended and (not _recovery_task or _recovery_task.done()):
                 _recovery_task = asyncio.create_task(_try_auto_restart())
                 logger.info("[WeChat Health] 已发起自动重启任务")
+            elif _recovery_suspended:
+                logger.info("[WeChat Health] 自动恢复已暂停，本轮不再调用智能启动接口")
 
-        # 状态由离线变为在线时，通知前端 + 写系统消息
         if _prev_online is not None and not _prev_online and current_online:
+            _recovery_suspended = False
             try:
                 from app.services import ws_notify
                 await ws_notify.broadcast("wechat_online")
             except Exception:
                 pass
             try:
+                cfg = _load_wechat_config()
+                current_wxid = (cfg.get("selected_wxid") or "").strip()
                 from app.services.system_messages import create_system_message_background
                 create_system_message_background(
                     title="企业微信连接已恢复",
-                    content="企业微信连接已恢复正常",
+                    content=f"企业微信连接已恢复正常，当前绑定实例: {current_wxid or '未选择'}",
                     level="info",
                     source="wechat_health",
                 )
             except Exception:
                 pass
+            try:
+                from app.services.ai_chat_service import mark_wechat_reconnect_backlog_window
+                mark_wechat_reconnect_backlog_window()
+            except Exception as exc:
+                logger.warning("[WeChat Health] 开启客户群历史补推窗口失败: %s", exc)
+
+        if current_online:
+            _recovery_suspended = False
 
         _prev_online = current_online
         return get_wechat_health_status()
@@ -386,6 +443,7 @@ def get_wechat_health_status() -> dict[str, Any]:
     return {
         "online": bool(_status.get("online", False)),
         "recovering": _recovering,
+        "recovery_suspended": _recovery_suspended,
         "last_checked_at": _status.get("last_checked_at"),
         "last_error": _status.get("last_error"),
         "polling": _poll_task is not None and not _poll_task.done() if _poll_task else False,

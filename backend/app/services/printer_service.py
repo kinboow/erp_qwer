@@ -56,6 +56,26 @@ def get_client_status() -> dict[str, Any]:
         return {"online": False, "hostname": "", "printer_name": "", "last_seen": None, "seconds_ago": None}
     return rows[0]
 
+
+def get_client_status_by_hostname(hostname: str) -> dict[str, Any]:
+    """查询指定 hostname 的心跳状态。"""
+    if not hostname:
+        return {"online": False, "hostname": "", "printer_name": "", "last_seen": None, "seconds_ago": None}
+    item = _client_heartbeats.get(hostname)
+    if not item:
+        return {"online": False, "hostname": hostname, "printer_name": "", "last_seen": None, "seconds_ago": None}
+    now = time.time()
+    last_seen = float(item.get("last_seen") or 0)
+    elapsed = now - last_seen if last_seen else 999999
+    return {
+        "hostname": hostname,
+        "printer_name": item.get("printer_name", ""),
+        "printers": item.get("printers", []) or [],
+        "last_seen": last_seen if last_seen else None,
+        "seconds_ago": round(elapsed, 1),
+        "online": elapsed < _CLIENT_TTL_SECONDS,
+    }
+
 # ---------------------------------------------------------------------------
 # DDL
 # ---------------------------------------------------------------------------
@@ -161,6 +181,24 @@ def enqueue_print_job(db: Session, order_no: str, doc_type: str = "picking") -> 
     )
     db.commit()
     logger.info("打印任务已入队: order=%s doc_type=%s", order_no, doc_type)
+    return {"queued": True, "order_no": order_no, "doc_type": doc_type}
+
+
+def enqueue_existing_pdf(db: Session, order_no: str, doc_type: str = "picking", pdf_object: str = "") -> dict[str, Any]:
+    """将已生成的 PDF 入队（不重复生成），由打印客户端取走打印"""
+    ensure_printer_tables(db)
+    cfg = get_printer_config(db)
+    target_client = cfg.get("printer_target_client", "")
+    target_printer = cfg.get("printer_target_printer", "")
+    db.execute(
+        text(
+            "INSERT INTO print_queue (order_no, doc_type, pdf_object, target_client, target_printer, status) "
+            "VALUES (:no, :dt, :obj, :tc, :tp, 'pending')"
+        ),
+        {"no": order_no, "dt": doc_type, "obj": pdf_object, "tc": target_client, "tp": target_printer},
+    )
+    db.commit()
+    logger.info("打印任务已入队(existing): order=%s doc_type=%s obj=%s", order_no, doc_type, pdf_object)
     return {"queued": True, "order_no": order_no, "doc_type": doc_type}
 
 

@@ -70,27 +70,15 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 
 你需要完成以下步骤来处理每条可能的报货消息：
 
-### 步骤1：判断消息是否包含报货数据（核心逻辑，必须严格执行）
-判断当前消息是否属于报货信息，分三种情况：
+### 步骤1：判断消息是否包含可提取的报货数据（核心逻辑）
+判断当前消息（文字/图片/表格）中是否包含可以解析为标准报货格式的数据（货号/款号、颜色、尺码、数量），分两种情况：
 
-- 【确定是报货 → 继续步骤2】消息中明确包含报货数据：具体的货号/款号、产品名称/别名、颜色+尺码+数量
-- 【确定不是报货 → 不处理】日常闲聊、打招呼、问候、表情包、闲聊图片、讨论非订单话题
-- 【不确定 → 等待后续消息】以下情况你无法确定是否是报货，应先保持沉默（不回复、不调用工具），等待后续消息提供更多上下文：
-  - 仅有下单意图词但无具体数据（如"下单""报货""我要下单"）
-  - 模糊的产品描述，无法确认是闲聊还是报单
-  - 提到了某个款号或产品名称但上下文不清晰是否在下单
-  - **客户单独发了一张包含货号/数量的图片，但没有明确说"下单""报货"等**：此时图片可能是报货，也可能只是询问能不能发货、有没有货等。必须等后续消息再判断。
-    如果后续消息是"这些今天能送过来吧""有没有货""能发吗"等咨询类问题，说明客户只是在问物流/库存，**整体不是报货，忽略不处理**。
-    如果后续消息是"下单""报货""就这些"等确认下单的意思，才按报货处理。
+- 【包含报货数据 → 继续步骤2】消息中包含可以提取的报货数据（具体的货号/款号、产品名称/别名、颜色+尺码+数量等）。
+  **不管客户是否明确说了"下单""报货"**，只要消息里有可识别的报货格式信息，就必须继续步骤2解析。
+  后续由 check_existing_reviews 工具和上下文一起判断是否最终创建订单。
+- 【不包含报货数据 → 不处理】日常闲聊、打招呼、问候、表情包、闲聊图片、讨论非订单话题、纯文字询问（没有具体款号/数量信息）
 
-**不确定时的处理规则（极其重要）：**
-1. 第一次遇到不确定的消息：保持沉默，不回复、不调用任何工具，等待后续消息
-2. 后续消息到达时，结合之前的不确定消息一起重新判断：
-   - 如果现在能确定是报货 → 直接继续步骤2解析
-   - 如果现在能确定不是报货 → 忽略
-   - 如果仍然不确定 → 继续保持沉默
-3. **当同一个客户连续 3 条消息都无法判断时**，才用 send_group_message @客户主动询问，例如：“亲 是要报单吗？发一下货号和数量哈~”
-4. 不要对每一条模糊消息都主动询问，这样会骚扰客户
+**关键原则：只要能提取出报货数据，就先提取，不要犹豫。后面的查重步骤会负责判断是否真的需要下单。**
 
 ### 步骤2：款号匹配（极其重要）
 识别客户提到的产品，并匹配到本年产品目录中的标准货号：
@@ -116,8 +104,23 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 - 全部齐全 → 步骤5
 - 缺少任意字段 → 用 send_group_message @客户，明确告知缺少什么（如"请问需要什么颜色和尺码？"）
 
-### 步骤5：创建订单
-信息完整后，调用 create_order_review 创建待审核订单，然后用 send_group_message 通知客户"收到"。
+### 步骤5：查重（极其重要，必须在创建订单前执行）
+信息完整后，**必须先调用 check_existing_reviews 工具**，把解析好的标准报货数据传入，检查审核列表中是否已存在完全一致的报货记录。
+
+#### 情况A：check_existing_reviews 返回 match=false（不一致 / 没找到重复）
+说明这是一条全新的报货信息。结合上下文判断客户是否在下单：
+- **确定是要报单** → 直接调用 create_order_review 创建订单，然后 send_group_message 回复"收到"
+- **模棱两可，不太确定是不是要报单**（比如客户只发了图片/表格，但没说"下单""报货"） → **也默认去报单**，调用 create_order_review 创建订单，让人工审核去判断
+- **明确不是报单**（如客户在问有没有货、能不能发、纯粹询价） → 不报单，忽略
+
+#### 情况B：check_existing_reviews 返回 match=true（一致 / 已存在完全相同的报货）
+说明审核列表中已有完全一样的报货记录（款号+颜色+尺码+数量全部一致）。此时结合上下文判断客户真实意图：
+- **客户是在催发货/问物流**（如"这些什么时候发""能今天送吗""帮我催一下"） → **不报单、不调用创建订单工具**，用 send_group_message 回复客户，如"亲 这单已经在处理了哈~"
+- **客户不是催发货，无法确定意图** → 用 send_group_message @客户 询问："亲 这一单和之前报的一样哦，是要再下一单还是在问之前那单呀？"
+- **客户明确说要再下一单**（如"再来一单""这个再报一次"） → 调用 create_order_review 创建订单
+
+### 步骤6：创建订单
+只有经过步骤5判断后确认需要报单时，才调用 create_order_review 创建待审核订单，然后用 send_group_message 通知客户"收到"。
 - **数据结构**：每个 item = 一个"款号+颜色"组合，sizes 数组包含该颜色下所有尺码和数量
 - **合并规则**：同一款号同一颜色的不同尺码必须合并到同一个 item 的 sizes 数组中
   - 例："82761 白色 M 10件 L 5件" → 一个 item，sizes=[{size:"M", qty:10}, {size:"L", qty:5}]
@@ -393,6 +396,48 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_existing_reviews",
+            "description": (
+                "查询当前群的审核列表中，是否已经存在与传入报货信息完全一致的待审核/已审核订单。"
+                "完全一致指：每一个款号+颜色+尺码+数量都一模一样。"
+                "你必须在调用 create_order_review 之前，先调用此工具检查是否重复。"
+                "根据返回结果决定后续动作（见系统提示词中的报货查重流程）。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "items": {
+                        "type": "array",
+                        "description": "要检查的报货信息列表，格式与 create_order_review 的 items 完全一致",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "product_no": {"type": "string", "description": "货号/款号"},
+                                "color": {"type": "string", "description": "颜色"},
+                                "sizes": {
+                                    "type": "array",
+                                    "description": "该颜色下所有尺码和数量",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "size": {"type": "string", "description": "尺码"},
+                                            "qty": {"type": "integer", "description": "数量"},
+                                        },
+                                        "required": ["size", "qty"],
+                                    },
+                                },
+                            },
+                            "required": ["product_no", "color", "sizes"],
+                        },
+                    },
+                },
+                "required": ["items"],
+            },
+        },
+    },
 ]
 
 
@@ -611,6 +656,78 @@ def _tool_create_modify_review(
         "review_uid": review_uid,
         "type": "modify",
         "modify_description": modify_desc,
+    }, ensure_ascii=False)
+
+
+def _tool_check_existing_reviews(
+    db: Session,
+    room_id: str,
+    args: dict[str, Any],
+) -> str:
+    """工具: 查询审核列表中是否存在与当前报货完全一致的记录。
+
+    硬代码精确比对：款号、颜色、尺码、数量每一项都一模一样才算"一致"。
+    """
+    check_items = args.get("items") or []
+    if not check_items:
+        return json.dumps({"ok": False, "error": "items 为空"}, ensure_ascii=False)
+
+    # 将输入的 items 标准化为可比较的 fingerprint
+    def _fingerprint(items_list: list[dict[str, Any]]) -> set[tuple]:
+        fp: set[tuple] = set()
+        for it in items_list:
+            pno = str(it.get("product_no") or "").strip()
+            color = str(it.get("color") or "").strip()
+            for s in (it.get("sizes") or []):
+                size = str(s.get("size") or "").strip()
+                qty = int(s.get("qty") or 0)
+                if pno and color and size and qty > 0:
+                    fp.add((pno, color, size, qty))
+        return fp
+
+    input_fp = _fingerprint(check_items)
+    if not input_fp:
+        return json.dumps({"ok": False, "error": "无有效的报货数据"}, ensure_ascii=False)
+
+    # 查同群最近 30 天内 pending / approved 的审核单
+    rows = db.execute(
+        text(
+            "SELECT id, review_uid, review_status, parsed_order_json, sender_name, created_at "
+            "FROM downstream_order_reviews "
+            "WHERE room_id = :room_id "
+            "  AND review_status IN ('pending', 'approved') "
+            "  AND review_type = 'normal' "
+            "  AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY) "
+            "ORDER BY id DESC LIMIT 50"
+        ),
+        {"room_id": room_id},
+    ).mappings().all()
+
+    for row in rows:
+        try:
+            parsed = json.loads(row["parsed_order_json"] or "{}")
+        except Exception:
+            continue
+        existing_items = parsed.get("items") or []
+        if not existing_items:
+            continue
+        existing_fp = _fingerprint(existing_items)
+        if existing_fp == input_fp:
+            return json.dumps({
+                "ok": True,
+                "match": True,
+                "matched_review_id": row["id"],
+                "matched_review_uid": row["review_uid"],
+                "matched_review_status": row["review_status"],
+                "matched_sender_name": row.get("sender_name") or "",
+                "matched_created_at": str(row.get("created_at") or ""),
+                "message": "审核列表中已存在完全一致的报货记录",
+            }, ensure_ascii=False)
+
+    return json.dumps({
+        "ok": True,
+        "match": False,
+        "message": "审核列表中未找到完全一致的报货记录",
     }, ensure_ascii=False)
 
 
@@ -977,30 +1094,60 @@ def _excel_to_markdown(attachment_base64: str) -> str:
 import asyncio as _asyncio
 
 BATCH_WINDOW_SECONDS = 22  # 批次等待窗口
+BACKLOG_WINDOW_SECONDS = 90
 
 # room_id → {"task": asyncio.Task, "trigger_ts": float, "count": int,
 #             "customer": dict|None, "instance_id": str, "senders": dict}
 _room_batches: dict[str, dict[str, Any]] = {}
+_wechat_reconnect_backlog_until: float = 0.0
+
+
+def mark_wechat_reconnect_backlog_window(seconds: int = BACKLOG_WINDOW_SECONDS) -> None:
+    global _wechat_reconnect_backlog_until
+    _wechat_reconnect_backlog_until = max(_wechat_reconnect_backlog_until, time.time() + max(1, seconds))
+    logger.info("客户群 AI 已开启企微恢复历史消息窗口: %ss", seconds)
+
+
+def _remaining_wechat_reconnect_backlog_seconds() -> int:
+    remaining = int(_wechat_reconnect_backlog_until - time.time())
+    return remaining if remaining > 0 else 0
+
 
 # ---------------------------------------------------------------------------
 # 动态 System Prompt（注入员工名单）
 # ---------------------------------------------------------------------------
-_employee_cache: dict[str, Any] = {"names": [], "ts": 0.0}
+_employee_cache: dict[str, Any] = {"names": [], "pairs": [], "ts": 0.0}
+
+
+def _get_employee_identities(db: Session) -> list[dict[str, str]]:
+    import time as _t
+    now = _t.time()
+    if now - _employee_cache["ts"] > 300 or not _employee_cache["pairs"]:
+        try:
+            rows = db.execute(
+                text("SELECT wxid, nickname FROM wechat_employee_accounts ORDER BY id")
+            ).mappings().all()
+            pairs: list[dict[str, str]] = []
+            names: list[str] = []
+            for row in rows:
+                wxid = str(row.get("wxid") or "").strip()
+                nickname = str(row.get("nickname") or "").strip()
+                if wxid or nickname:
+                    pairs.append({"wxid": wxid, "nickname": nickname})
+                if nickname:
+                    names.append(nickname)
+            _employee_cache["pairs"] = pairs
+            _employee_cache["names"] = names
+        except Exception:
+            _employee_cache["pairs"] = []
+            _employee_cache["names"] = []
+        _employee_cache["ts"] = now
+    return list(_employee_cache["pairs"])
+
 
 def _build_system_prompt(db: Session) -> str:
     """在静态 prompt 基础上追加本公司员工名单，缓存 5 分钟。"""
-    import time as _t
-    now = _t.time()
-    if now - _employee_cache["ts"] > 300 or not _employee_cache["names"]:
-        try:
-            rows = db.execute(
-                text("SELECT nickname FROM wechat_employee_accounts WHERE nickname != '' ORDER BY id")
-            ).fetchall()
-            _employee_cache["names"] = [r[0] for r in rows if r[0]]
-        except Exception:
-            _employee_cache["names"] = []
-        _employee_cache["ts"] = now
-
+    _get_employee_identities(db)
     names = _employee_cache["names"]
     if not names:
         return CUSTOMER_GROUP_SYSTEM_PROMPT
@@ -1008,6 +1155,64 @@ def _build_system_prompt(db: Session) -> str:
     employee_section = "\n\n## 附录：本公司员工名单\n以下是本公司员工在群里的昵称，这些人发的消息不是报货，仅作为上下文参考：\n"
     employee_section += "、".join(names)
     return CUSTOMER_GROUP_SYSTEM_PROMPT + employee_section
+
+
+def _build_batch_runtime_context(
+    db: Session,
+    room_id: str,
+    *,
+    batch_started_at: float,
+    is_history_backlog: bool,
+) -> dict[str, Any]:
+    employee_identities = _get_employee_identities(db)
+    employee_names = {item.get("nickname") or "" for item in employee_identities if item.get("nickname")}
+    employee_wxids = {item.get("wxid") or "" for item in employee_identities if item.get("wxid")}
+    rows = db.execute(
+        text(
+            "SELECT sender_id, sender_name, content_preview "
+            "FROM message_logs WHERE room_id = :room_id AND created_at >= :started_at ORDER BY id ASC LIMIT 200"
+        ),
+        {"room_id": room_id, "started_at": datetime.fromtimestamp(batch_started_at)},
+    ).mappings().all()
+    employee_names_seen: set[str] = set()
+    employee_messages: list[str] = []
+    employee_replied = False
+    for row in rows:
+        sender_id = str(row.get("sender_id") or "").strip()
+        sender_name = str(row.get("sender_name") or "").strip()
+        if sender_id not in employee_wxids and sender_name not in employee_names:
+            continue
+        employee_replied = True
+        if sender_name:
+            employee_names_seen.add(sender_name)
+        preview = str(row.get("content_preview") or "").strip()
+        if preview:
+            employee_messages.append(f"- [{sender_name or sender_id}] {preview[:120]}")
+    return {
+        "is_history_backlog": is_history_backlog,
+        "employee_replied": employee_replied,
+        "employee_names_seen": sorted(employee_names_seen),
+        "employee_messages": employee_messages[:8],
+    }
+
+
+def _build_runtime_instruction(context: dict[str, Any]) -> str:
+    lines: list[str] = []
+    if context.get("is_history_backlog"):
+        lines.append("## 当前批次说明")
+        lines.append("本次输入的是企业微信掉线恢复后补推的历史消息，不是实时新消息。")
+        lines.append("你必须优先判断这批历史消息里，是否已经有本公司员工在群里接手、答复或处理客户需求。")
+        lines.append("如果员工已经接手处理，则你必须保持静默：不要回复，不要调用工具，不要重复创建订单。")
+    employee_names_seen = context.get("employee_names_seen") or []
+    if employee_names_seen:
+        lines.append(f"本批次中检测到的员工发送者：{'、'.join(employee_names_seen)}")
+    employee_messages = context.get("employee_messages") or []
+    if employee_messages:
+        lines.append("员工在本批次中的消息摘要：")
+        lines.extend(employee_messages)
+    if context.get("employee_replied"):
+        lines.append("系统检测到本批次历史消息中已有员工发言。你必须优先判断员工是否已经接手处理；若已接手，则保持静默，不要继续自动处理。")
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1232,7 @@ async def process_customer_group_message(
     instance_id: str = "",
     bot_wxid: str = "",
     payload: Optional[dict[str, Any]] = None,
+    is_history_backlog: bool = False,
 ) -> dict[str, Any]:
     """处理来自客户群的一条消息：先保存到对话历史，再通过 35 秒批次窗口统一送 AI。
 
@@ -1085,22 +1291,28 @@ async def process_customer_group_message(
         # 批次已在进行中 — 追加计数，刷新发送者信息，跳过 AI
         batch["count"] += 1
         batch["senders"][sender_id] = sender_name
+        batch["is_history_backlog"] = batch.get("is_history_backlog", False) or is_history_backlog
         if customer:
             batch["customer"] = customer
         if instance_id:
             batch["instance_id"] = instance_id
+        if is_history_backlog:
+            batch["window_seconds"] = max(batch.get("window_seconds", BATCH_WINDOW_SECONDS), BACKLOG_WINDOW_SECONDS)
         logger.info("消息加入批次窗口: room=%s count=%d 剩余 %.0fs",
                     room_id, batch["count"],
-                    max(0, batch["trigger_ts"] + BATCH_WINDOW_SECONDS - time.time()))
+                    max(0, batch["trigger_ts"] + batch.get("window_seconds", BATCH_WINDOW_SECONDS) - time.time()))
         return {"ok": True, "batched": True, "batch_count": batch["count"]}
 
     # 无活跃批次 — 此消息为触发消息，创建新批次
+    effective_window_seconds = BACKLOG_WINDOW_SECONDS if is_history_backlog else BATCH_WINDOW_SECONDS
     batch_info: dict[str, Any] = {
         "trigger_ts": time.time(),
         "count": 1,
         "customer": dict(customer) if customer else None,
         "instance_id": instance_id or "",
         "senders": {sender_id: sender_name},
+        "is_history_backlog": is_history_backlog,
+        "window_seconds": effective_window_seconds,
         "task": None,
     }
     _room_batches[room_id] = batch_info
@@ -1109,14 +1321,14 @@ async def process_customer_group_message(
     task = _asyncio.create_task(_batch_delayed_ai_call(room_id, batch_info))
     batch_info["task"] = task
 
-    logger.info("批次窗口开启: room=%s 等待 %ds", room_id, BATCH_WINDOW_SECONDS)
+    logger.info("批次窗口开启: room=%s 等待 %ds history_backlog=%s", room_id, effective_window_seconds, is_history_backlog)
     return {"ok": True, "batched": True, "batch_trigger": True}
 
 
 async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> None:
     """等待批次窗口结束后，加载完整历史并统一调用 AI。"""
     try:
-        await _asyncio.sleep(BATCH_WINDOW_SECONDS)
+        await _asyncio.sleep(batch_info.get("window_seconds", BATCH_WINDOW_SECONDS))
     except _asyncio.CancelledError:
         logger.info("批次任务被取消: room=%s", room_id)
         return
@@ -1127,11 +1339,13 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
     customer = batch_info.get("customer")
     instance_id = batch_info.get("instance_id", "")
     senders = batch_info.get("senders", {})
+    is_history_backlog = bool(batch_info.get("is_history_backlog", False))
+    batch_started_at = float(batch_info.get("trigger_ts") or time.time())
     # 取最后一个发送者作为 sender_id / sender_name（工具调用可能需要）
     last_sender_id = list(senders.keys())[-1] if senders else ""
     last_sender_name = senders.get(last_sender_id, "")
 
-    logger.info("批次窗口到期，开始 AI 处理: room=%s 共 %d 条消息", room_id, msg_count)
+    logger.info("批次窗口到期，开始 AI 处理: room=%s 共 %d 条消息 history_backlog=%s", room_id, msg_count, is_history_backlog)
 
     # 熔断检查：如果 AI 已暂停，缓冲消息而不调用
     from app.services.ai_circuit_breaker import is_tripped, buffer_message
@@ -1161,11 +1375,15 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
                     sender_name=last_sender_name,
                     customer=customer,
                     instance_id=instance_id,
+                    is_history_backlog=is_history_backlog,
+                    batch_started_at=batch_started_at,
                 )
             except Exception as exc:
                 logger.error("批次 AI 处理异常: room=%s err=%s", room_id, exc, exc_info=True)
             finally:
                 db.close()
+
+    return {"ok": True, "ai_responded": True}
 
 
 async def _run_ai_on_history(
@@ -1176,17 +1394,29 @@ async def _run_ai_on_history(
     sender_name: str,
     customer: Optional[dict[str, Any]],
     instance_id: str,
+    is_history_backlog: bool = False,
+    batch_started_at: float | None = None,
 ) -> dict[str, Any]:
     """加载对话历史并调用 AI（多轮 tool-call），用于批次窗口到期后的统一处理。"""
 
     # ---- 1. 加载对话历史 ----
     history = _load_history(db, room_id)
+    runtime_context = _build_batch_runtime_context(
+        db,
+        room_id,
+        batch_started_at=batch_started_at or time.time(),
+        is_history_backlog=is_history_backlog,
+    )
+    runtime_instruction = _build_runtime_instruction(runtime_context)
+    suppress_actions = bool(runtime_context.get("is_history_backlog") and runtime_context.get("employee_replied"))
 
     # ---- 2. 组装 API messages (system + history) ----
     system_prompt = _build_system_prompt(db)
     api_messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
     ]
+    if runtime_instruction:
+        api_messages.append({"role": "system", "content": runtime_instruction})
     for i, msg in enumerate(history):
         if isinstance(msg.get("content"), list) and i < len(history) - 5:
             text_parts = [p.get("text", "") for p in msg["content"] if p.get("type") == "text"]
@@ -1252,6 +1482,7 @@ async def _run_ai_on_history(
                 db=db, room_id=room_id, sender_id=sender_id,
                 sender_name=sender_name, customer=customer,
                 instance_id=instance_id,
+                suppress_actions=suppress_actions,
             )
 
             _save_message(db, room_id, "tool", content=tool_result, name=func_name, tool_call_id=call_id)
@@ -1268,115 +1499,6 @@ async def _run_ai_on_history(
     return {"ok": True, "ai_responded": ai_responded}
 
 
-# ---------------------------------------------------------------------------
-# AI API 调用
-# ---------------------------------------------------------------------------
-def _load_ai_config(db: Optional[Session] = None) -> dict[str, Any]:
-    """加载 AI 配置（复用 ai_config 服务）"""
-    if db is not None:
-        try:
-            from app.services.ai_config import get_ai_config_for_parser
-            return get_ai_config_for_parser(db)
-        except Exception as exc:
-            logger.warning("加载 AI 配置失败: %s", exc)
-    return {
-        "provider": "qwen",
-        "base_url": settings.OPENAI_BASE_URL.rstrip("/"),
-        "api_key": settings.OPENAI_API_KEY,
-        "model": settings.OPENAI_MODEL,
-        "vision_model": settings.OPENAI_VISION_MODEL,
-        "temperature": 0.1,
-        "enabled": True,
-    }
-
-
-def _messages_contain_image(messages: list[dict[str, Any]]) -> bool:
-    """检测 messages 中是否包含图片内容"""
-    for msg in messages:
-        content = msg.get("content")
-        if isinstance(content, list):
-            for part in content:
-                if part.get("type") == "image_url":
-                    return True
-    return False
-
-
-async def _call_chat_api(cfg: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """调用 AI Chat Completions API (含 tools)"""
-    base_url = cfg["base_url"].rstrip("/")
-    api_key = cfg["api_key"]
-    provider = cfg.get("provider", "qwen")
-
-    # 有图片时用 vision 模型
-    model = cfg["vision_model"] if _messages_contain_image(messages) else cfg["model"]
-
-    request_body: dict[str, Any] = {
-        "model": model,
-        "temperature": cfg.get("temperature", 0.1),
-        "messages": messages,
-        "tools": TOOL_DEFINITIONS,
-        "tool_choice": "auto",
-        "max_tokens": 16384,
-    }
-    # 按供应商开启深度思考
-    if provider == "qwen":
-        request_body["enable_thinking"] = True
-    elif provider == "bytedance":
-        request_body["thinking"] = {"type": "enabled"}
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    # 深度思考需要更长超时
-    timeout = CHAT_API_TIMEOUT if provider != "bytedance" else max(CHAT_API_TIMEOUT, 300)
-    t0 = time.time()
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{base_url}/chat/completions",
-            headers=headers,
-            json=request_body,
-        )
-    duration_ms = int((time.time() - t0) * 1000)
-
-    if response.status_code >= 400:
-        logger.error("AI Chat API 错误: status=%d body=%s", response.status_code, response.text[:1000])
-    response.raise_for_status()
-
-    payload = response.json()
-    usage = payload.get("usage") or {}
-    logger.info("AI Chat API: model=%s tokens=%s/%s/%s duration=%dms",
-                model,
-                usage.get("prompt_tokens"), usage.get("completion_tokens"), usage.get("total_tokens"),
-                duration_ms)
-
-    # 记录日志
-    try:
-        db = SessionLocal()
-        try:
-            from app.services.ai_config import log_ai_call
-            choice = (payload.get("choices") or [{}])[0]
-            msg = choice.get("message") or {}
-            log_ai_call(
-                db,
-                model=model,
-                caller="ai_chat_service",
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                total_tokens=usage.get("total_tokens", 0),
-                duration_ms=duration_ms,
-                status="success",
-                response_summary=(msg.get("content") or "")[:4000],
-            )
-        finally:
-            db.close()
-    except Exception:
-        pass
-
-    return payload
-
-
 async def _execute_tool(
     name: str,
     args: dict[str, Any],
@@ -1387,9 +1509,16 @@ async def _execute_tool(
     sender_name: str,
     customer: Optional[dict[str, Any]],
     instance_id: str,
+    suppress_actions: bool = False,
 ) -> str:
     """分发并执行工具调用，返回结果字符串"""
     try:
+        if suppress_actions and name in {"create_order_review", "create_modify_review", "void_recent_review", "send_group_message"}:
+            return json.dumps({
+                "ok": False,
+                "suppressed": True,
+                "reason": "历史补推消息中检测到员工已接手处理，已阻止机器人重复操作",
+            }, ensure_ascii=False)
         if name == "create_order_review":
             return _tool_create_order_review(
                 db, room_id, sender_id, sender_name, customer, instance_id, args,
@@ -1406,6 +1535,8 @@ async def _execute_tool(
             return _tool_query_product_details(db, args)
         elif name == "send_group_message":
             return await _tool_send_group_message(room_id, sender_id, instance_id, args)
+        elif name == "check_existing_reviews":
+            return _tool_check_existing_reviews(db, room_id, args)
         else:
             return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
     except Exception as exc:

@@ -292,14 +292,14 @@ def increment_rescan_count(db: Session, msg_log_id: int) -> int:
 
 
 def get_unrecognized_media_messages(db: Session, limit: int = 15) -> list[dict[str, Any]]:
-    """获取最近 N 条未被 AI 识别的图片/文件消息，用于启动时补扫。"""
+    """获取最近 N 条未被 AI 识别且从未补扫过的图片/文件消息，用于启动时补扫。"""
     ensure_message_logs_table(db)
     rows = db.execute(
         text(
             "SELECT id, msg_uid, source, instance_id, room_id, room_name, sender_id, sender_name, "
-            "message_type, content_preview, payload_json, ai_recognized, created_at "
+            "message_type, content_preview, payload_json, ai_recognized, rescan_count, created_at "
             "FROM message_logs "
-            "WHERE message_type IN ('image', 'file') AND ai_recognized = 0 AND is_recalled = 0 "
+            "WHERE message_type IN ('image', 'file') AND ai_recognized = 0 AND is_recalled = 0 AND rescan_count = 0 "
             "ORDER BY id DESC LIMIT :limit"
         ),
         {"limit": limit},
