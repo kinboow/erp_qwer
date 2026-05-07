@@ -128,6 +128,9 @@ async def lifespan(application: FastAPI):
     from app.services.log_cleanup import start_log_cleanup
     start_log_cleanup()
 
+    from app.services.printer_service import start_unshipped_schedule_task
+    start_unshipped_schedule_task()
+
     from app.services.at_order_handler import rescan_unrecognized_messages
     asyncio.create_task(rescan_unrecognized_messages())
     logger.info("[Startup] 未识别消息补扫任务已启动")
@@ -143,6 +146,9 @@ async def lifespan(application: FastAPI):
 
     from app.services.log_cleanup import stop_log_cleanup
     stop_log_cleanup()
+
+    from app.services.printer_service import stop_unshipped_schedule_task
+    stop_unshipped_schedule_task()
 
     if http_client:
         try:

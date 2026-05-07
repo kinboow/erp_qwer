@@ -3,12 +3,15 @@ import json
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
 from app.models import User
+from app.services.downstream_support import ensure_downstream_support_tables
+from app.services.shipping_scan_handler import approve_shipping_scan_record, void_shipping_scan_record
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +25,10 @@ def json_response(code=200, message="success", data=None):
     return resp
 
 
+class ShippingScanReviewPayload(BaseModel):
+    review_note: Optional[str] = ""
+
+
 @router.get("/scan-records", summary="获取发货扫码识别记录列表")
 def list_scan_records(
     page: int = Query(1, ge=1),
@@ -32,6 +39,7 @@ def list_scan_records(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    ensure_downstream_support_tables(db)
     where_parts = ["1=1"]
     params: dict[str, Any] = {}
 
@@ -57,10 +65,10 @@ def list_scan_records(
     offset = (page - 1) * pageSize
     rows = db.execute(
         text(
-            f"SELECT s.id, s.order_no, s.paper_id, s.qr_content, "
+            f"SELECT s.id, s.order_no, s.paper_id, s.qr_content, s.code_source, "
             f"s.room_id, s.room_name, s.instance_id, s.sender_id, s.msg_log_id, "
             f"s.scan_status, s.ai_parsed_json, s.shipment_no, s.shipment_result, "
-            f"s.notification_sent, s.error_message, s.created_at, s.updated_at, "
+            f"s.notification_sent, s.error_message, s.review_note, s.reviewed_by, s.reviewed_at, s.fallback_ocr_json, s.created_at, s.updated_at, "
             f"m.oss_key AS image_oss_key, m.sender_name AS scanner_name "
             f"FROM shipping_scan_records s "
             f"LEFT JOIN message_logs m ON s.msg_log_id = m.id "
@@ -92,8 +100,16 @@ def list_scan_records(
         item["shipment_result_detail"] = shipment_result
         item.pop("shipment_result", None)
 
+        fallback_ocr = None
+        try:
+            fallback_ocr = json.loads(item.get("fallback_ocr_json") or "null")
+        except Exception:
+            pass
+        item["fallback_ocr"] = fallback_ocr
+        item.pop("fallback_ocr_json", None)
+
         # 时间格式化
-        for k in ("created_at", "updated_at"):
+        for k in ("created_at", "updated_at", "reviewed_at"):
             if item.get(k):
                 item[k] = str(item[k])
 
@@ -112,12 +128,49 @@ def scan_records_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    ensure_downstream_support_tables(db)
     row = db.execute(text(
         "SELECT "
         "COUNT(*) AS total, "
         "SUM(scan_status = 'success') AS success_count, "
         "SUM(scan_status = 'failed') AS failed_count, "
-        "SUM(scan_status = 'pending') AS pending_count "
+        "SUM(scan_status IN ('pending', 'parsing')) AS pending_count, "
+        "SUM(scan_status = 'review_pending') AS review_pending_count, "
+        "SUM(scan_status = 'voided') AS voided_count "
         "FROM shipping_scan_records"
     )).mappings().first()
     return json_response(data=dict(row) if row else {})
+
+
+@router.post("/scan-records/{record_id}/approve", summary="审核通过发货识别记录并下发货单")
+async def approve_scan_record_api(
+    record_id: int,
+    payload: ShippingScanReviewPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_downstream_support_tables(db)
+    try:
+        data = await approve_shipping_scan_record(db, record_id, current_user, payload.review_note or "")
+        return json_response(message="审核下发货单成功", data=data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/scan-records/{record_id}/void", summary="作废发货识别记录")
+def void_scan_record_api(
+    record_id: int,
+    payload: ShippingScanReviewPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_downstream_support_tables(db)
+    try:
+        data = void_shipping_scan_record(db, record_id, current_user, payload.review_note or "")
+        return json_response(message="已作废发货识别记录", data=data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

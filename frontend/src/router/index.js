@@ -93,6 +93,12 @@ const routes = [
         meta: { title: '外部服务配置', tab: 'printer' }
       },
       {
+        path: 'config-schedule',
+        name: 'ConfigSchedule',
+        component: () => import('@/views/system/ExternalConfig.vue'),
+        meta: { title: '外部服务配置', tab: 'schedule' }
+      },
+      {
         path: 'downstream-order-reviews',
         name: 'DownstreamOrderReviews',
         component: () => import('@/views/business/DownstreamOrderReviews.vue'),
@@ -151,6 +157,12 @@ const routes = [
         name: 'ShippingScanRecords',
         component: () => import('@/views/business/ShippingScanRecords.vue'),
         meta: { title: '发货单识别' }
+      },
+      {
+        path: 'shipping-scan-reviews',
+        name: 'ShippingScanReviews',
+        component: () => import('@/views/business/ShippingScanReviews.vue'),
+        meta: { title: '发货单审核' }
       },
       {
         path: 'unshipped-report',

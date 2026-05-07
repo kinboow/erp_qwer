@@ -78,6 +78,10 @@
               <el-icon><Stamp /></el-icon>
               <template #title>发货单识别</template>
             </el-menu-item>
+            <el-menu-item index="/shipping-scan-reviews">
+              <el-icon><DocumentChecked /></el-icon>
+              <template #title>发货单审核</template>
+            </el-menu-item>
           </el-sub-menu>
 
           <el-sub-menu index="system">

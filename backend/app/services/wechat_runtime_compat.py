@@ -94,12 +94,30 @@ def _handle_recall(db: Session, normalized_payload: dict, resolved_instance_id: 
     recalled_msg_id = mark_recalled(db, recalled_server_id, recall_room_id)
     if recalled_msg_id:
         logger.info("撤回消息: 已标记 msg_log_id=%d server_id=%s", recalled_msg_id, recalled_server_id)
+        try:
+            from app.services.ai_chat_service import void_reviews_for_recalled_message
+            auto_void_result = void_reviews_for_recalled_message(
+                db,
+                recall_room_id or str((original_msg or {}).get("room_id") or "").strip(),
+                recalled_msg_id,
+                f"客户撤回了触发下单的消息（msg_log_id={recalled_msg_id}）",
+            )
+            if auto_void_result.get("count"):
+                logger.info(
+                    "撤回消息: 已自动作废 %d 条审核单 msg_log_id=%d review_ids=%s",
+                    auto_void_result.get("count", 0),
+                    recalled_msg_id,
+                    auto_void_result.get("review_ids") or [],
+                )
+        except Exception as exc:
+            logger.warning("撤回消息: 自动作废关联审核单失败 msg_log_id=%d err=%s", recalled_msg_id, exc)
     else:
         logger.info("撤回消息: 未找到对应原始消息 server_id=%s", recalled_server_id)
 
     return {
         "is_recall": True,
         "recalled_server_id": recalled_server_id,
+        "recalled_msg_id": recalled_msg_id,
         "recall_room_id": recall_room_id or (original_msg or {}).get("room_id", ""),
         "original_msg": original_msg,
     }
@@ -468,6 +486,7 @@ async def _send_msg_to_ai(
                     instance_id=instance_id,
                     bot_wxid=bot_wxid,
                     payload=payload,
+                    log_id=log_id,
                     is_history_backlog=is_history_backlog,
                 )
                 logger.info("客户群 AI 对话: room=%s result=%s", room_id, ai_result)

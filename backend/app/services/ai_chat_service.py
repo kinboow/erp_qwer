@@ -178,9 +178,10 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 3. 如果报货信息不完整（缺少货号、颜色、尺码或数量），主动@客户询问缺失信息
 4. 确认信息完整后，调用工具创建待审核订单
 5. 判断订单意图（新下单 / 替换旧单 / 追加补充）
+6. 处理系统已经发出的“未发货确认”追问：客户自然回复后，你需要判断他是在说继续发货还是取消订单，并调用对应工具
 
 ## 二、消息格式
-- 每条消息前面标注了发送者姓名，格式为 "[发送者姓名] 消息内容"
+- 每条消息前面会标注消息ID和发送者姓名，格式为 "[消息ID:123][发送者姓名] 消息内容"
 - 你能看到群里所有客户消息（不含机器人自身的消息、非图片/Excel的文件）
 - 消息是实时推送给你的，每收到一条你就会处理一次
 - 图片会以 base64 格式提供，表格文件会转为 Markdown 表格
@@ -204,7 +205,8 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 
 ### 步骤2：款号匹配（极其重要）
 识别客户提到的产品，并匹配到本年产品目录中的标准货号：
-- **必须先调用 query_product_catalog 或 query_product_details 查询**，确认客户提到的款号/名称在本年目录中存在
+- **优先调用 query_product_catalog 查询本年产品目录**，可直接不传 keyword，让工具返回完整的本年产品库列表，再从中匹配标准货号
+- 如已基本确认款号，可再调用 query_product_details 核对颜色、尺码和别名信息
 - 客户可能用货号、产品名称、别名/俗称来指代产品，你需要智能匹配
 - **尾号简写匹配**：客户经常只说货号的后几位（尾号），你需要匹配到目录中尾号一致的完整款号。
   例如：目录中有"95862"，客户说"862"就是指它；目录中有"82842"，客户说"842"就是指它。
@@ -247,6 +249,8 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 - **合并规则**：同一款号同一颜色的不同尺码必须合并到同一个 item 的 sizes 数组中
   - 例："82761 白色 M 10件 L 5件" → 一个 item，sizes=[{size:"M", qty:10}, {size:"L", qty:5}]
   - 例："82761 白色 M 10件, 82761 黑色 L 5件" → 两个 item（不同颜色）
+- **必须传 trigger_msg_log_id**：它必须是你真正据此识别并决定创建订单的那一条客户消息的消息ID。
+  如果报货信息分散在多条消息里，传“最后那条让你确认可以下单/补齐关键信息”的消息ID，不要乱填。
 - **数量必须是具体数字**，qty 必须大于 0，不能为空或为 0
 - **"1"的歧义判断（重要）**：客户单独回复"1"或"好的""嗯"等，在上下文中往往是对上一条消息的确认/肯定，
   而不是下单1件。你必须结合上下文判断：如果前一条是疑问句（如"要不要XXX？""确定吗？"），
@@ -258,7 +262,7 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 ## 四、名称映射与别名系统（重要）
 - 产品目录中每个款号可能有**别名**（alias），客户可能用别名而非款号来指代产品
 - 例如：客户说"弯刀裤"，实际对应货号"82761"；说"云朵裤"，对应"95890"
-- **你必须通过查询工具来确认映射关系，不能靠猜测**
+- 当客户表述模糊、使用俗称或你不确定时，优先调用 query_product_catalog，必要时可不传 keyword 直接拿完整目录和别名映射再匹配
 - query_product_catalog 支持按别名搜索，query_product_details 也会返回别名信息
 - 如果同一个名称可能匹配多个款号，必须先询问客户确认
 
@@ -307,8 +311,8 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 当你收到“[系统通知] XXX 撤回了一条消息”时，需要判断：
 1. 查看被撤回的原始内容是否是报单/报货消息
 2. 如果是报单消息，并且你之前已经为这条消息创建了待审核订单：
-   - 调用 void_recent_review 作废该客户最近的待审核订单
-   - **不要在群里发送任何回复**，静默处理即可
+   - 系统会根据该消息对应的消息ID自动作废绑定的待审核订单
+   - 你**不要**再调用 void_recent_review，也**不要**在群里发送任何回复，静默忽略即可
 3. 如果被撤回的不是报单消息，或者你还没来得及处理该消息，直接忽略不处理
 
 ## 七、回复规范（极其重要）
@@ -316,9 +320,13 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
   1. 识别到新的报货需求 → 查询产品目录/详情 → 创建订单
   2. 报货信息不完整，需要询问缺失字段 → send_group_message 询问
   3. 订单创建成功 → send_group_message 回复确认
-  4. 客户撤回了报单消息，且已创建过订单 → void_recent_review 静默作废（不回复）
+  4. 客户撤回了报单消息 → 系统会按消息ID自动作废已绑定的待审核订单，你保持静默，不回复、不调用工具
   5. 客户要修改之前报过的单的部分内容 → create_modify_review 创建待修改审核单 → send_group_message 回复确认
   6. 不确定客户是要替换旧单还是修改旧单 → send_group_message 询问确认
+  7. **客户是在回复“这张未发部分是继续还是取消”这类系统追问**：
+     - 明确表示**继续发货** → 调用 `mark_followup_continue`，**不要调用 send_group_message，不要回复任何文本**
+     - 明确表示**取消这张单/不要了/未发部分取消** → 调用 `create_cancel_unshipped_review`，**不要调用 send_group_message，不要回复任何文本**
+     - 如果当前群里同时有多张待确认订单，而客户回复又无法判断对应哪一张 → 才允许调用 `send_group_message` 追问具体订单号
 - **不需要回复的情况（直接忽略，不调用任何工具，不输出任何内容）：**
   - 日常闲聊、问候、表情包、与报货无关的对话
   - 客户询问有没有货、库存够不够、什么时候到货、能不能发货等咨询类问题 — 你不是客服，不负责回答这些问题，完全忽略
@@ -389,8 +397,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "enum": ["new", "replace", "append"],
                         "description": "订单意图: new=新下单, replace=替换旧单, append=追加补充。默认 new。",
                     },
+                    "trigger_msg_log_id": {
+                        "type": "integer",
+                        "description": "真正触发本次下单识别的客户消息ID。必须填写当前对话里那条实际报货/补齐关键信息的消息ID。",
+                    },
                 },
-                "required": ["items"],
+                "required": ["items", "trigger_msg_log_id"],
             },
         },
     },
@@ -402,7 +414,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "查询本年款产品目录（仅包含本年度在售产品），获取可用的货号、产品名称、别名映射。"
                 "客户提到的货号、产品名、别名/俗称都可以作为关键词搜索。"
                 "只有本年目录中存在的款号才能创建订单，不在目录中的款号不能下单。"
-                "可传入关键词搜索，也可留空获取全部产品。"
+                "当客户使用模糊叫法、俗称、尾号或你暂时无法确认具体款号时，应优先直接调用本工具且不传 keyword，"
+                "先获取完整的本年产品库列表及别名映射，再进行匹配。可传入关键词搜索，也可留空获取全部产品。"
             ),
             "parameters": {
                 "type": "object",
@@ -521,6 +534,52 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "mark_followup_continue",
+            "description": (
+                "当客户是在回答系统之前发出的未发货确认追问，并明确表示这张订单未发部分要继续发货时调用。"
+                "调用后系统会把该订单标记为继续发货，并在后续第5天若仍未发完时再次追问。"
+                "调用此工具后不要再发送群消息。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_no": {
+                        "type": "string",
+                        "description": "客户确认继续发货的订单号。必须是当前群待确认列表中的订单号。"
+                    }
+                },
+                "required": ["order_no"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_cancel_unshipped_review",
+            "description": (
+                "当客户是在回答系统之前发出的未发货确认追问，并明确表示这张订单未发部分要取消时调用。"
+                "调用后系统会创建一条人工审核单，审核员点击审核即取消该订单未发货部分。"
+                "调用此工具后不要再发送群消息。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_no": {
+                        "type": "string",
+                        "description": "客户要求取消未发部分的订单号。必须填写。"
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "客户取消原因或你对客户原话的简要总结，可选。"
+                    }
+                },
+                "required": ["order_no"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "check_existing_reviews",
             "description": (
                 "查询当前群的审核列表中，是否已经存在与传入报货信息完全一致的待审核/已审核订单。"
@@ -582,6 +641,25 @@ def _tool_create_order_review(
     raw_items = args.get("items") or []
     if not raw_items:
         return json.dumps({"ok": False, "error": "items 为空，无法创建订单"}, ensure_ascii=False)
+    trigger_msg_log_id_raw = args.get("trigger_msg_log_id")
+    try:
+        trigger_msg_log_id = int(trigger_msg_log_id_raw or 0)
+    except Exception:
+        trigger_msg_log_id = 0
+    if trigger_msg_log_id <= 0:
+        return json.dumps({"ok": False, "error": "trigger_msg_log_id 缺失或无效，必须标注真正触发下单的消息ID"}, ensure_ascii=False)
+
+    trigger_msg = db.execute(
+        text(
+            "SELECT id, room_id, sender_id, sender_name, message_type, message_server_id "
+            "FROM message_logs WHERE id = :id LIMIT 1"
+        ),
+        {"id": trigger_msg_log_id},
+    ).mappings().first()
+    if not trigger_msg:
+        return json.dumps({"ok": False, "error": f"trigger_msg_log_id={trigger_msg_log_id} 对应的消息不存在"}, ensure_ascii=False)
+    if str(trigger_msg.get("room_id") or "").strip() != str(room_id or "").strip():
+        return json.dumps({"ok": False, "error": f"trigger_msg_log_id={trigger_msg_log_id} 不属于当前群，不能用于本次下单"}, ensure_ascii=False)
 
     # 校验并规范化 items：过滤掉 qty<=0 的 size，过滤掉 sizes 为空的 item
     items: list[dict[str, Any]] = []
@@ -620,24 +698,25 @@ def _tool_create_order_review(
             "INSERT INTO downstream_order_reviews ("
             "review_uid, source_type, instance_id, room_id, sender_id, sender_name, "
             "message_type, content_text, parse_status, review_status, "
-            "customer_id, customer_name, parsed_order_json, order_intent, operator_name"
+            "customer_id, customer_name, parsed_order_json, order_intent, operator_name, msg_log_id"
             ") VALUES ("
             ":review_uid, 'ai_conversation', :instance_id, :room_id, :sender_id, :sender_name, "
             "'text', :content_text, 'success', 'pending', "
-            ":customer_id, :customer_name, :parsed_order_json, :order_intent, '机器人'"
+            ":customer_id, :customer_name, :parsed_order_json, :order_intent, '机器人', :msg_log_id"
             ")"
         ),
         {
             "review_uid": review_uid,
             "instance_id": instance_id or None,
             "room_id": room_id,
-            "sender_id": sender_id,
-            "sender_name": sender_name,
+            "sender_id": str(trigger_msg.get("sender_id") or sender_id or "").strip(),
+            "sender_name": str(trigger_msg.get("sender_name") or sender_name or "").strip(),
             "content_text": content_summary,
             "customer_id": customer["id"] if customer else None,
             "customer_name": customer.get("customer_name", "") if customer else "",
             "parsed_order_json": parsed_order_json,
             "order_intent": order_intent,
+            "msg_log_id": trigger_msg_log_id,
         },
     )
     review_id = result.lastrowid
@@ -656,7 +735,46 @@ def _tool_create_order_review(
         "review_uid": review_uid,
         "items_count": len(items),
         "order_intent": order_intent,
+        "trigger_msg_log_id": trigger_msg_log_id,
+        "trigger_message_server_id": str(trigger_msg.get("message_server_id") or ""),
     }, ensure_ascii=False)
+
+
+def void_reviews_for_recalled_message(db: Session, room_id: str, msg_log_id: int, reason: str) -> dict[str, Any]:
+    from app.services.downstream_support import ensure_downstream_support_tables
+    ensure_downstream_support_tables(db)
+
+    if msg_log_id <= 0:
+        return {"ok": False, "count": 0, "review_ids": []}
+
+    rows = db.execute(
+        text(
+            "SELECT id, review_uid FROM downstream_order_reviews "
+            "WHERE room_id = :room_id AND msg_log_id = :msg_log_id AND review_status = 'pending'"
+        ),
+        {"room_id": room_id, "msg_log_id": msg_log_id},
+    ).mappings().all()
+    if not rows:
+        return {"ok": True, "count": 0, "review_ids": []}
+
+    review_ids = [int(row["id"]) for row in rows if row.get("id") is not None]
+    db.execute(
+        text(
+            "UPDATE downstream_order_reviews SET review_status = 'voided', review_note = :note, "
+            "operator_name = '机器人', updated_at = NOW() "
+            "WHERE room_id = :room_id AND msg_log_id = :msg_log_id AND review_status = 'pending'"
+        ),
+        {"note": reason, "room_id": room_id, "msg_log_id": msg_log_id},
+    )
+    db.commit()
+
+    try:
+        from app.services.review_events import notify_review_change
+        for review_id in review_ids:
+            notify_review_change("new_review", {"review_id": review_id})
+    except Exception:
+        pass
+    return {"ok": True, "count": len(review_ids), "review_ids": review_ids}
 
 
 def _tool_void_recent_review(
@@ -781,6 +899,103 @@ def _tool_create_modify_review(
     }, ensure_ascii=False)
 
 
+def _tool_mark_followup_continue(
+    db: Session,
+    room_id: str,
+    args: dict[str, Any],
+) -> str:
+    from app.services.printer_service import mark_followup_continue_decision
+
+    order_no = str(args.get("order_no") or "").strip()
+    if not order_no:
+        return json.dumps({"ok": False, "error": "order_no 不能为空"}, ensure_ascii=False)
+    try:
+        result = mark_followup_continue_decision(db, room_id, order_no)
+    except Exception as exc:
+        return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
+def _tool_create_cancel_unshipped_review(
+    db: Session,
+    room_id: str,
+    sender_id: str,
+    sender_name: str,
+    customer: Optional[dict[str, Any]],
+    instance_id: str,
+    args: dict[str, Any],
+) -> str:
+    from app.services.printer_service import get_room_pending_followups, mark_followup_cancel_review_created
+
+    order_no = str(args.get("order_no") or "").strip()
+    reason = str(args.get("reason") or "").strip()
+    if not order_no:
+        return json.dumps({"ok": False, "error": "order_no 不能为空"}, ensure_ascii=False)
+
+    pending_followups = get_room_pending_followups(db, room_id)
+    matched = next((item for item in pending_followups if str(item.get("order_no") or "").strip() == order_no), None)
+    if not matched:
+        return json.dumps({"ok": False, "error": f"当前群未找到订单 {order_no} 的待确认记录"}, ensure_ascii=False)
+
+    review_uid = f"RV{datetime.now().strftime('%y%m%d')}{secrets.token_hex(2).upper()}"
+    item_summary = matched.get("item_summary") or []
+    order_json = {
+        "cancel_order_no": order_no,
+        "decision": "cancel_unshipped",
+        "followup_stage": matched.get("current_stage") or "third_day",
+        "item_summary": item_summary,
+        "reason": reason,
+    }
+    parsed_order_json = json.dumps(order_json, ensure_ascii=False)
+    content_text = f"[取消未发货] 订单 {order_no} 客户确认取消未发部分"
+    if reason:
+        content_text = f"{content_text}：{reason}"
+
+    result = db.execute(
+        text(
+            "INSERT INTO downstream_order_reviews ("
+            "review_uid, source_type, instance_id, room_id, sender_id, sender_name, "
+            "message_type, content_text, parse_status, review_status, review_type, "
+            "customer_id, customer_name, parsed_order_json, order_intent, operator_name, replaced_order_no"
+            ") VALUES ("
+            ":review_uid, 'ai_conversation', :instance_id, :room_id, :sender_id, :sender_name, "
+            "'text', :content_text, 'success', 'pending', 'cancel_unshipped', "
+            ":customer_id, :customer_name, :parsed_order_json, 'replace', '机器人', :replaced_order_no"
+            ")"
+        ),
+        {
+            "review_uid": review_uid,
+            "instance_id": instance_id or None,
+            "room_id": room_id,
+            "sender_id": sender_id,
+            "sender_name": sender_name,
+            "content_text": content_text,
+            "customer_id": customer["id"] if customer else None,
+            "customer_name": customer.get("customer_name", "") if customer else "",
+            "parsed_order_json": parsed_order_json,
+            "replaced_order_no": order_no,
+        },
+    )
+    review_id = int(result.lastrowid or 0)
+    db.commit()
+    if review_id:
+        mark_followup_cancel_review_created(db, room_id, order_no, review_id)
+
+    try:
+        from app.services.review_events import notify_review_change
+        notify_review_change("new_review", {"review_id": review_id})
+    except Exception:
+        pass
+
+    return json.dumps({
+        "ok": True,
+        "review_id": review_id,
+        "review_uid": review_uid,
+        "review_type": "cancel_unshipped",
+        "order_no": order_no,
+    }, ensure_ascii=False)
+
+
 def _tool_check_existing_reviews(
     db: Session,
     room_id: str,
@@ -860,12 +1075,24 @@ def _tool_query_product_catalog(db: Session, args: dict[str, Any]) -> str:
 
     keyword = (args.get("keyword") or "").strip().lower()
     if keyword:
+        raw_tokens = [t.strip().lower() for t in keyword.replace("，", " ").replace(",", " ").split() if t.strip()]
+        tokens = raw_tokens or [keyword]
         filtered = []
         for item in catalog:
             pno = (item.get("product_no") or "").lower()
             pname = (item.get("product_name") or "").lower()
             aliases = [a.lower() for a in (item.get("aliases") or [])]
-            if keyword in pno or keyword in pname or any(keyword in a for a in aliases):
+            haystacks = [pno, pname, *aliases]
+            matched = False
+            for token in tokens:
+                if token in pno or token in pname or any(token in a for a in aliases):
+                    matched = True
+                    break
+                if token.isdigit() and len(token) >= 3:
+                    if pno.endswith(token) or any(a.endswith(token) for a in aliases):
+                        matched = True
+                        break
+            if matched or any(token == h for token in tokens for h in haystacks if h):
                 filtered.append(item)
         catalog = filtered
 
@@ -892,10 +1119,11 @@ def _tool_query_product_details(db: Session, args: dict[str, Any]) -> str:
     target_pno = (args.get("product_no") or "").strip()
     if not target_pno:
         return json.dumps({"ok": False, "error": "未指定货号"}, ensure_ascii=False)
+    normalized_target = target_pno.lower()
 
     # 精确匹配
     for item in catalog:
-        if item["product_no"] == target_pno:
+        if str(item["product_no"] or "").strip().lower() == normalized_target:
             colors = [c.strip() for c in (item.get("color") or "").split(",") if c.strip()]
             sizes = [s.strip() for s in (item.get("spec") or "").split(",") if s.strip()]
             return json.dumps({
@@ -909,17 +1137,52 @@ def _tool_query_product_details(db: Session, args: dict[str, Any]) -> str:
 
     # 别名匹配
     for item in catalog:
-        if target_pno in (item.get("aliases") or []):
+        aliases = [str(a).strip() for a in (item.get("aliases") or []) if str(a).strip()]
+        aliases_lower = [a.lower() for a in aliases]
+        if normalized_target in aliases_lower:
             colors = [c.strip() for c in (item.get("color") or "").split(",") if c.strip()]
             sizes = [s.strip() for s in (item.get("spec") or "").split(",") if s.strip()]
             return json.dumps({
                 "ok": True,
                 "product_no": item["product_no"],
                 "product_name": item.get("product_name", ""),
-                "aliases": item.get("aliases", []),
+                "aliases": aliases,
                 "matched_via_alias": target_pno,
                 "available_colors": colors,
                 "available_sizes": sizes,
+            }, ensure_ascii=False)
+
+    # 尾号匹配
+    if normalized_target.isdigit() and len(normalized_target) >= 3:
+        candidates: list[dict[str, Any]] = []
+        for item in catalog:
+            pno = str(item.get("product_no") or "").strip()
+            aliases = [str(a).strip() for a in (item.get("aliases") or []) if str(a).strip()]
+            if pno.endswith(normalized_target) or any(a.lower().endswith(normalized_target) for a in aliases):
+                candidates.append({
+                    "product_no": pno,
+                    "product_name": item.get("product_name", ""),
+                    "aliases": aliases,
+                })
+        if len(candidates) == 1:
+            item = candidates[0]
+            full = next((c for c in catalog if str(c.get("product_no") or "").strip() == item["product_no"]), None)
+            colors = [c.strip() for c in ((full or {}).get("color") or "").split(",") if c.strip()]
+            sizes = [s.strip() for s in ((full or {}).get("spec") or "").split(",") if s.strip()]
+            return json.dumps({
+                "ok": True,
+                "product_no": item["product_no"],
+                "product_name": item.get("product_name", ""),
+                "aliases": item.get("aliases", []),
+                "matched_via_tail": target_pno,
+                "available_colors": colors,
+                "available_sizes": sizes,
+            }, ensure_ascii=False)
+        if len(candidates) > 1:
+            return json.dumps({
+                "ok": False,
+                "error": f"尾号 {target_pno} 匹配到多个款号，请让客户确认",
+                "candidates": candidates,
             }, ensure_ascii=False)
 
     return json.dumps({"ok": False, "error": f"未找到货号 {target_pno}"}, ensure_ascii=False)
@@ -1380,6 +1643,8 @@ def _build_batch_runtime_context(
     batch_started_at: float,
     is_history_backlog: bool,
 ) -> dict[str, Any]:
+    from app.services.printer_service import get_room_pending_followups
+
     employee_identities = _get_employee_identities(db)
     employee_names = {item.get("nickname") or "" for item in employee_identities if item.get("nickname")}
     employee_wxids = {item.get("wxid") or "" for item in employee_identities if item.get("wxid")}
@@ -1409,6 +1674,7 @@ def _build_batch_runtime_context(
         "employee_replied": employee_replied,
         "employee_names_seen": sorted(employee_names_seen),
         "employee_messages": employee_messages[:8],
+        "pending_followups": get_room_pending_followups(db, room_id),
     }
 
 
@@ -1428,6 +1694,18 @@ def _build_runtime_instruction(context: dict[str, Any]) -> str:
         lines.extend(employee_messages)
     if context.get("employee_replied"):
         lines.append("系统检测到本批次历史消息中已有员工发言。你必须优先判断员工是否已经接手处理；若已接手，则保持静默，不要继续自动处理。")
+    pending_followups = context.get("pending_followups") or []
+    if pending_followups:
+        lines.append("## 当前群待确认的未发货订单")
+        lines.append("以下订单是系统之前已经发过追问、正在等待客户确认‘继续发货 / 取消’的订单。")
+        lines.append("如果客户当前消息是在回答这些追问，你必须优先处理这些跟进，不要把它误判成新的报货。")
+        for item in pending_followups[:10]:
+            summary = item.get("item_summary") or []
+            summary_text = "；".join(str(x) for x in summary[:3]) if summary else "-"
+            lines.append(
+                f"- 订单号：{item.get('order_no') or '-'}；阶段：{item.get('current_stage') or '-'}；已追问次数：{item.get('ask_count') or 0}；最近追问日期：{item.get('last_asked_date') or '-'}；未发摘要：{summary_text}"
+            )
+        lines.append("处理规则：若客户明确说继续，就调用 mark_followup_continue；若明确说取消，就调用 create_cancel_unshipped_review；这两种情况都不要回复群消息。")
     return "\n".join(lines).strip()
 
 
@@ -1448,6 +1726,7 @@ async def process_customer_group_message(
     instance_id: str = "",
     bot_wxid: str = "",
     payload: Optional[dict[str, Any]] = None,
+    log_id: Optional[int] = None,
     is_history_backlog: bool = False,
 ) -> dict[str, Any]:
     """处理来自客户群的一条消息：先保存到对话历史，再通过 35 秒批次窗口统一送 AI。
@@ -1477,7 +1756,7 @@ async def process_customer_group_message(
             logger.info("客户群图片已自动转正: room=%s sender=%s angle=%d", room_id, sender_name or sender_id, rotated_angle)
 
     # ---- 1. 构建 user message content ----
-    prefix = f"[{sender_name or sender_id}] "
+    prefix = f"[消息ID:{int(log_id)}][{sender_name or sender_id}] " if log_id else f"[{sender_name or sender_id}] "
     user_content: Any  # str 或 list (multimodal)
 
     if message_type in ("image", "img", "picture") and attachment_base64:
@@ -1740,7 +2019,7 @@ async def _execute_tool(
 ) -> str:
     """分发并执行工具调用，返回结果字符串"""
     try:
-        if suppress_actions and name in {"create_order_review", "create_modify_review", "void_recent_review", "send_group_message"}:
+        if suppress_actions and name in {"create_order_review", "create_modify_review", "void_recent_review", "send_group_message", "mark_followup_continue", "create_cancel_unshipped_review"}:
             return json.dumps({
                 "ok": False,
                 "suppressed": True,
@@ -1762,6 +2041,12 @@ async def _execute_tool(
             return _tool_query_product_details(db, args)
         elif name == "send_group_message":
             return await _tool_send_group_message(room_id, sender_id, instance_id, args)
+        elif name == "mark_followup_continue":
+            return _tool_mark_followup_continue(db, room_id, args)
+        elif name == "create_cancel_unshipped_review":
+            return _tool_create_cancel_unshipped_review(
+                db, room_id, sender_id, sender_name, customer, instance_id, args,
+            )
         elif name == "check_existing_reviews":
             return _tool_check_existing_reviews(db, room_id, args)
         else:

@@ -14,11 +14,14 @@
             <el-option label="成功" value="success" />
             <el-option label="失败" value="failed" />
             <el-option label="处理中" value="pending" />
+            <el-option label="待审核" value="review_pending" />
+            <el-option label="已作废" value="voided" />
           </el-select>
           <el-button type="primary" @click="handleSearch">查询</el-button>
           <el-button @click="resetFilters">重置</el-button>
         </div>
         <div class="toolbar-right">
+          <el-button type="warning" plain @click="goToReviewPage">待审核页面</el-button>
           <el-button @click="fetchStats">刷新统计</el-button>
         </div>
       </div>
@@ -28,6 +31,7 @@
         <span class="summary-item">成功 <strong>{{ stats.success_count || 0 }}</strong> 条</span>
         <span class="summary-item">失败 <strong>{{ stats.failed_count || 0 }}</strong> 条</span>
         <span class="summary-item">处理中 <strong>{{ stats.pending_count || 0 }}</strong> 条</span>
+        <span class="summary-item">待审核 <strong>{{ stats.review_pending_count || 0 }}</strong> 条</span>
       </div>
 
       <el-table :data="tableData" v-loading="loading" stripe class="lark-table" highlight-current-row @row-click="onRowClick">
@@ -48,6 +52,11 @@
         <el-table-column label="状态" width="90" align="center">
           <template #default="{ row }">
             <el-tag :type="statusTagType(row.scan_status)" size="small">{{ statusText(row.scan_status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="识别来源" width="100" align="center">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain">{{ sourceText(row.code_source) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="发货单号" prop="shipment_no" min-width="130">
@@ -112,6 +121,10 @@
             <el-tag :type="statusTagType(selectedRecord.scan_status)" size="small">{{ statusText(selectedRecord.scan_status) }}</el-tag>
           </div>
           <div class="detail-row">
+            <span class="detail-label">识别来源</span>
+            <span class="detail-value">{{ sourceText(selectedRecord.code_source) }}</span>
+          </div>
+          <div class="detail-row">
             <span class="detail-label">发货单号</span>
             <span class="detail-value">{{ selectedRecord.shipment_no || '-' }}</span>
           </div>
@@ -146,6 +159,11 @@
         <el-divider v-if="selectedRecord.ai_parsed">AI 识别结果</el-divider>
         <div v-if="selectedRecord.ai_parsed" class="ai-result-block">
           <pre class="ai-json">{{ JSON.stringify(selectedRecord.ai_parsed, null, 2) }}</pre>
+        </div>
+
+        <el-divider v-if="selectedRecord.fallback_ocr">码下文字兜底识别</el-divider>
+        <div v-if="selectedRecord.fallback_ocr" class="ai-result-block">
+          <pre class="ai-json">{{ JSON.stringify(selectedRecord.fallback_ocr, null, 2) }}</pre>
         </div>
 
         <el-divider v-if="selectedRecord.qr_content">二维码内容</el-divider>
@@ -216,6 +234,10 @@ const fetchStats = async () => {
   } catch (e) { /* ignore */ }
 }
 
+const goToReviewPage = () => {
+  router.push('/shipping-scan-reviews')
+}
+
 const resetFilters = () => {
   filters.order_no = ''
   filters.scan_status = ''
@@ -224,13 +246,18 @@ const resetFilters = () => {
 }
 
 const statusText = (s) => {
-  const map = { success: '成功', failed: '失败', pending: '处理中' }
+  const map = { success: '成功', failed: '失败', pending: '处理中', parsing: '处理中', review_pending: '待审核', voided: '已作废' }
   return map[s] || s || '-'
 }
 
 const statusTagType = (s) => {
-  const map = { success: 'success', failed: 'danger', pending: 'warning' }
+  const map = { success: 'success', failed: 'danger', pending: 'warning', parsing: 'warning', review_pending: 'info', voided: 'info' }
   return map[s] || 'info'
+}
+
+const sourceText = (v) => {
+  const map = { gridcode: '方块码', ai_text: '右上角识别智能体', ai_agent: '右上角识别智能体' }
+  return map[v] || (v || '-')
 }
 
 const formatDate = (v) => {

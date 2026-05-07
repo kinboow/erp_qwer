@@ -124,6 +124,7 @@ def ensure_downstream_support_tables(db: Session):
         "order_no VARCHAR(100) NOT NULL DEFAULT '', "
         "paper_id VARCHAR(200) NOT NULL, "
         "qr_content TEXT NULL, "
+        "code_source VARCHAR(30) NOT NULL DEFAULT '' COMMENT 'gridcode/barcode/ai_text', "
         "room_id VARCHAR(100) NOT NULL DEFAULT '', "
         "room_name VARCHAR(200) DEFAULT '', "
         "instance_id VARCHAR(100) DEFAULT '', "
@@ -131,9 +132,13 @@ def ensure_downstream_support_tables(db: Session):
         "msg_log_id BIGINT UNSIGNED NULL, "
         "scan_status VARCHAR(50) NOT NULL DEFAULT 'pending', "
         "ai_parsed_json LONGTEXT NULL, "
+        "fallback_ocr_json LONGTEXT NULL, "
         "shipment_no VARCHAR(100) DEFAULT '', "
         "shipment_result TEXT NULL, "
         "notification_sent TINYINT NOT NULL DEFAULT 0, "
+        "review_note VARCHAR(500) DEFAULT '', "
+        "reviewed_by VARCHAR(100) DEFAULT '', "
+        "reviewed_at DATETIME NULL, "
         "error_message TEXT NULL, "
         "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
         "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
@@ -238,13 +243,18 @@ def ensure_downstream_support_tables(db: Session):
     except Exception as e:
         logger.debug("shipping_scan_records UNIQUE KEY 迁移跳过: %s", e)
 
-    # ---------- 挂起报货会话表（信息不完整时等待补全） ----------
+    _add_column_if_not_exists(db, "shipping_scan_records", "code_source", "VARCHAR(30) NOT NULL DEFAULT '' COMMENT 'gridcode/barcode/ai_text'")
+    _add_column_if_not_exists(db, "shipping_scan_records", "fallback_ocr_json", "LONGTEXT NULL")
+    _add_column_if_not_exists(db, "shipping_scan_records", "review_note", "VARCHAR(500) DEFAULT ''")
+    _add_column_if_not_exists(db, "shipping_scan_records", "reviewed_by", "VARCHAR(100) DEFAULT ''")
+    _add_column_if_not_exists(db, "shipping_scan_records", "reviewed_at", "DATETIME NULL")
+
     db.execute(text(
         "CREATE TABLE IF NOT EXISTS pending_order_sessions ("
         "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
-        "session_key VARCHAR(250) NOT NULL COMMENT 'room_id:sender_id 唯一标识', "
+        "session_key VARCHAR(100) NOT NULL, "
         "room_id VARCHAR(100) NOT NULL, "
-        "sender_id VARCHAR(100) NOT NULL, "
+        "sender_id VARCHAR(100) DEFAULT '', "
         "instance_id VARCHAR(100) DEFAULT '', "
         "customer_id INT UNSIGNED NULL, "
         "customer_name VARCHAR(255) DEFAULT '', "
@@ -261,6 +271,34 @@ def ensure_downstream_support_tables(db: Session):
         "INDEX idx_room_id (room_id), "
         "INDEX idx_status (status), "
         "INDEX idx_expires_at (expires_at)"
+        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+    ))
+
+    db.execute(text(
+        "CREATE TABLE IF NOT EXISTS customer_order_followups ("
+        "id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, "
+        "order_no VARCHAR(100) NOT NULL, "
+        "room_id VARCHAR(100) NOT NULL DEFAULT '', "
+        "instance_id INT UNSIGNED NULL, "
+        "customer_id INT UNSIGNED NULL, "
+        "customer_name VARCHAR(255) DEFAULT '', "
+        "erp_customer_id VARCHAR(100) DEFAULT '', "
+        "order_date VARCHAR(20) DEFAULT '', "
+        "current_stage VARCHAR(30) NOT NULL DEFAULT 'third_day', "
+        "followup_status VARCHAR(30) NOT NULL DEFAULT 'pending_customer', "
+        "ask_count INT NOT NULL DEFAULT 0, "
+        "last_asked_date VARCHAR(20) DEFAULT '', "
+        "last_decision VARCHAR(30) DEFAULT '', "
+        "last_decision_at DATETIME NULL, "
+        "next_followup_date VARCHAR(20) DEFAULT '', "
+        "last_review_id BIGINT UNSIGNED NULL, "
+        "item_summary_json LONGTEXT NULL, "
+        "created_at DATETIME DEFAULT CURRENT_TIMESTAMP, "
+        "updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+        "UNIQUE KEY uk_order_room (order_no, room_id), "
+        "INDEX idx_room_status (room_id, followup_status), "
+        "INDEX idx_order_no (order_no), "
+        "INDEX idx_next_followup (followup_status, next_followup_date)"
         ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
     ))
 

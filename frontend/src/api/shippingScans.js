@@ -14,3 +14,19 @@ export const getScanStats = () => {
     method: 'get'
   })
 }
+
+export const approveScanRecord = (recordId, data) => {
+  return request({
+    url: `/api/shipping/scan-records/${recordId}/approve`,
+    method: 'post',
+    data
+  })
+}
+
+export const voidScanRecord = (recordId, data) => {
+  return request({
+    url: `/api/shipping/scan-records/${recordId}/void`,
+    method: 'post',
+    data
+  })
+}

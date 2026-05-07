@@ -1759,6 +1759,85 @@ async def replace_old_order(db: Session, review_id: int, customer_id: int, curre
     return resp
 
 
+async def cancel_unshipped_order_review(db: Session, review_id: int, customer_id: int, current_user: User, review_note: str = "") -> dict[str, Any]:
+    import time as _t; _t0 = _t.time(); _logs = []
+    def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])
+    _log("取消未发货订单 开始")
+
+    row = db.execute(text("SELECT * FROM downstream_order_reviews WHERE id = :id"), {"id": review_id}).mappings().first()
+    if not row:
+        raise ValueError("待审核记录不存在")
+    if str(row.get("review_type") or "") != "cancel_unshipped":
+        raise ValueError("当前记录不是取消未发货类型")
+    if str(row.get("review_status") or "") != "pending":
+        raise ValueError("只有待审核状态的取消单才能处理")
+
+    customer = _load_customer(db, customer_id)
+    erp_customer_id = customer.get("erp_customer_id") or ""
+    if not erp_customer_id:
+        raise ValueError("所选客户缺少 ERP 客户编号，无法取消未发货订单")
+
+    parsed = _json_loads(row.get("parsed_order_json"), {}) or {}
+    target_order_no = str(parsed.get("cancel_order_no") or row.get("replaced_order_no") or "").strip()
+    if not target_order_no:
+        raise ValueError("取消审核单缺少目标订单号")
+
+    begin_date = (datetime.now() - timedelta(days=1825)).strftime("%Y-%m-%d")
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    _log(f"查询客户未发货报表，目标订单={target_order_no}")
+    unshipped_rows = await erp_bridge.query_unshipped(erp_customer_id, product_nos=None, dates=begin_date, datee=end_date)
+    target_rows = [item for item in unshipped_rows if str(item.get("order_no") or "").strip() == target_order_no]
+    if not target_rows:
+        raise ValueError(f"订单 {target_order_no} 当前没有可取消的未发货明细")
+
+    _log(f"命中 {len(target_rows)} 条未发货行，准备取消")
+    cancel_result = await erp_bridge.cancel_unshipped([str(item.get("id") or "") for item in target_rows if str(item.get("id") or "").strip()])
+    pnos = sorted({str(item.get("product_no") or "").strip() for item in target_rows if str(item.get("product_no") or "").strip()})
+
+    db.execute(
+        text(
+            "UPDATE downstream_order_reviews SET customer_id = :customer_id, customer_name = :customer_name, "
+            "review_status = 'replaced', replaced_order_no = :replaced_order_no, replace_source_ids = :replace_source_ids, "
+            "review_note = :review_note, reviewer_id = :reviewer_id, reviewer_name = :reviewer_name, operator_name = :operator_name, reviewed_at = NOW(), updated_at = NOW() "
+            "WHERE id = :id"
+        ),
+        {
+            "id": review_id,
+            "customer_id": customer_id,
+            "customer_name": customer.get("customer_name") or "",
+            "replaced_order_no": target_order_no,
+            "replace_source_ids": _json_dumps(target_rows),
+            "review_note": review_note or f"已取消订单 {target_order_no} 的未发货部分",
+            "reviewer_id": current_user.id,
+            "reviewer_name": current_user.real_name,
+            "operator_name": current_user.real_name or current_user.username,
+        },
+    )
+    db.execute(
+        text(
+            "UPDATE customer_order_followups SET followup_status = 'completed', last_review_id = :review_id, updated_at = NOW() "
+            "WHERE order_no = :order_no AND room_id = :room_id"
+        ),
+        {
+            "review_id": review_id,
+            "order_no": target_order_no,
+            "room_id": str(row.get("room_id") or ""),
+        },
+    )
+    db.commit()
+    _log("审核单与跟进状态已更新")
+
+    _trigger_incremental_sync(order_no="", product_nos=pnos)
+    _log("库存同步已触发")
+    return {
+        **cancel_result,
+        "review_status": "replaced",
+        "order_no": target_order_no,
+        "cancelled_rows": len(target_rows),
+        "_debug_logs": _logs,
+    }
+
+
 async def manual_order(db: Session, review_id: int, customer_id: int, order_data: dict[str, Any], current_user: User, review_note: str = "") -> dict[str, Any]:
     import time as _t; _t0 = _t.time(); _logs = []
     def _log(msg): elapsed = round(_t.time() - _t0, 2); _logs.append(f"[{elapsed}s] {msg}"); _logger.info("[FLOW] %s", _logs[-1])

@@ -52,7 +52,7 @@
 <script setup>
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Monitor, Refresh, Printer, Check } from '@element-plus/icons-vue'
+import { Monitor, Printer, Check } from '@element-plus/icons-vue'
 import { getPrinterClients, getPrinterConfig, savePrinterConfig, sendTestPrint } from '@/api/printer'
 
 const loadingClients = ref(false)

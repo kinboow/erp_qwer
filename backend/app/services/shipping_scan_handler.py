@@ -89,6 +89,28 @@ _SHIPPING_TABLE_PARSE_PROMPT = """\
 }
 """
 
+_SHIPPING_CODE_FALLBACK_PROMPT = """\
+你是发货单右上角识别智能体。
+
+任务：识别图片右上角方块码下方印刷的那一行内容。
+这行文字通常就是：订单号|纸张ID。
+
+要求：
+1. 只关注右上角图像码下方那一行文字
+2. 忽略表格、备注、客户信息和其他区域
+3. 如果无法确认，返回空字符串，不要猜
+4. 严格只返回 JSON
+
+输出格式：
+{
+  "combined_text": "20260506-033|8d9a3a83cc034f12",
+  "order_no": "20260506-033",
+  "paper_id": "8d9a3a83cc034f12",
+  "confidence": "high|medium|low",
+  "reason": "简短说明"
+}
+"""
+
 
 # ---------------------------------------------------------------------------
 # 码识别 — pyzbar 为主引擎（同时支持 Code128 条形码 + QR 码），微信 WeChatQRCode 兆底（仅QR）
@@ -393,13 +415,14 @@ def create_scan_record(db: Session, **kwargs) -> int:
     result = db.execute(
         text(
             "INSERT INTO shipping_scan_records "
-            "(order_no, paper_id, qr_content, room_id, room_name, instance_id, sender_id, msg_log_id, scan_status) "
-            "VALUES (:order_no, :paper_id, :qr_content, :room_id, :room_name, :instance_id, :sender_id, :msg_log_id, :scan_status)"
+            "(order_no, paper_id, qr_content, code_source, room_id, room_name, instance_id, sender_id, msg_log_id, scan_status) "
+            "VALUES (:order_no, :paper_id, :qr_content, :code_source, :room_id, :room_name, :instance_id, :sender_id, :msg_log_id, :scan_status)"
         ),
         {
             "order_no": kwargs.get("order_no", ""),
             "paper_id": kwargs.get("paper_id", ""),
             "qr_content": kwargs.get("qr_content", ""),
+            "code_source": kwargs.get("code_source", ""),
             "room_id": kwargs.get("room_id", ""),
             "room_name": kwargs.get("room_name", ""),
             "instance_id": kwargs.get("instance_id", ""),
@@ -581,6 +604,66 @@ async def ai_parse_shipping_table(image_bytes: bytes, db: Session) -> dict[str, 
         raise AIOrderParserError("AI视觉模型未返回有效内容")
 
     return parsed
+
+
+def _crop_top_right_for_code_text(image_bytes: bytes) -> bytes:
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    w, h = img.size
+    crop = img.crop((max(0, int(w * 0.52)), 0, w, max(1, int(h * 0.38))))
+    crop = crop.resize((max(crop.size[0] * 2, 1), max(crop.size[1] * 2, 1)))
+    buf = io.BytesIO()
+    crop.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+async def ai_identify_shipping_code_by_agent(image_bytes: bytes, db: Session) -> dict[str, Any]:
+    img_bytes = _crop_top_right_for_code_text(image_bytes)
+    img_b64 = base64.b64encode(img_bytes).decode("ascii")
+    cfg = ai_order_parser._load_config(db)
+    vision_model = cfg.get("vision_model") or cfg.get("model") or "qwen-vl-max"
+
+    image_content: dict[str, Any]
+    if ai_order_parser.supports_oss_upload(db):
+        try:
+            fname = f"shipping_code_agent_{int(time.time())}.png"
+            oss_url = await ai_order_parser.upload_file(img_bytes, fname, vision_model, db=db)
+            image_content = {"type": "image_url", "image_url": {"url": oss_url}}
+        except Exception:
+            image_content = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+    else:
+        image_content = {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}}
+
+    parsed = await ai_order_parser._chat(
+        vision_model,
+        [
+            {"role": "system", "content": _SHIPPING_CODE_FALLBACK_PROMPT},
+            {"role": "user", "content": [
+                image_content,
+                {"type": "text", "text": "请只识别右上角图像码下方那一行印刷文字。"},
+            ]},
+        ],
+        db=db,
+        caller="shipping_code_agent",
+    )
+    if not isinstance(parsed, dict):
+        return {}
+
+    combined_text = _normalize_qr_text(str(parsed.get("combined_text") or ""))
+    order_no = str(parsed.get("order_no") or "").strip()
+    paper_id = str(parsed.get("paper_id") or "").strip()
+    if combined_text and (not order_no or not paper_id):
+        qr_info = parse_qr_content(combined_text)
+        order_no = order_no or qr_info.get("order_no", "")
+        paper_id = paper_id or qr_info.get("paper_id", "")
+    return {
+        "combined_text": combined_text,
+        "order_no": order_no,
+        "paper_id": paper_id,
+        "confidence": str(parsed.get("confidence") or ""),
+        "reason": str(parsed.get("reason") or ""),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +864,91 @@ async def send_notification_to_groups(
             logger.warning("[发货扫码] 通知群推送失败 room=%s: %s", room_id, exc)
 
 
+def _reviewer_name(user: Any) -> str:
+    return (
+        getattr(user, "real_name", None)
+        or getattr(user, "nickname", None)
+        or getattr(user, "username", None)
+        or getattr(user, "name", None)
+        or ""
+    )
+
+
+async def approve_shipping_scan_record(db: Session, record_id: int, current_user: Any, review_note: str = "") -> dict[str, Any]:
+    ensure_downstream_support_tables(db)
+    row = db.execute(
+        text("SELECT * FROM shipping_scan_records WHERE id = :id LIMIT 1"),
+        {"id": record_id},
+    ).mappings().first()
+    if not row:
+        raise ValueError("发货识别记录不存在")
+    if row.get("scan_status") != "review_pending":
+        raise ValueError("当前记录不是待审核状态")
+
+    order_no = row.get("order_no") or ""
+    parsed = json.loads(row.get("ai_parsed_json") or "{}")
+    parsed_items = (parsed or {}).get("items") or []
+    if not order_no:
+        raise ValueError("待审核记录缺少订单号")
+    if not parsed_items:
+        raise ValueError("待审核记录缺少 AI 解析明细")
+
+    order_detail = await get_erp_order_detail(order_no)
+    if order_detail.get("main", {}).get("state") == 2:
+        raise ValueError(f"订单 {order_no} 已作废，不能审核下发货单")
+
+    shipment_result = await create_erp_shipment(order_detail, parsed_items)
+    shipment_no = shipment_result.get("shipment_no", "")
+    if shipment_no:
+        try:
+            from app.services.erp_sync import sync_single_shipment
+            await sync_single_shipment(shipment_no)
+        except Exception as exc:
+            logger.warning("[发货审核] 即时同步发货单 %s 失败: %s", shipment_no, exc)
+
+    shipping_status = calc_shipping_status(order_detail, parsed_items)
+    update_scan_record(
+        db,
+        record_id,
+        scan_status="success",
+        shipment_no=shipment_no,
+        shipment_result=json.dumps(shipping_status, ensure_ascii=False),
+        review_note=(review_note or "").strip(),
+        reviewed_by=_reviewer_name(current_user),
+        reviewed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        error_message="",
+    )
+    await send_notification_to_groups(db, order_no, shipment_no, True, shipping_status)
+    update_scan_record(db, record_id, notification_sent=1)
+    return {
+        "record_id": record_id,
+        "order_no": order_no,
+        "shipment_no": shipment_no,
+        "shipping_status": shipping_status,
+    }
+
+
+def void_shipping_scan_record(db: Session, record_id: int, current_user: Any, review_note: str = "") -> dict[str, Any]:
+    ensure_downstream_support_tables(db)
+    row = db.execute(
+        text("SELECT id, scan_status, order_no FROM shipping_scan_records WHERE id = :id LIMIT 1"),
+        {"id": record_id},
+    ).mappings().first()
+    if not row:
+        raise ValueError("发货识别记录不存在")
+    if row.get("scan_status") not in {"review_pending", "pending", "parsing", "failed"}:
+        raise ValueError("当前状态不允许作废")
+    update_scan_record(
+        db,
+        record_id,
+        scan_status="voided",
+        review_note=(review_note or "").strip(),
+        reviewed_by=_reviewer_name(current_user),
+        reviewed_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    return {"record_id": record_id, "order_no": row.get("order_no") or "", "scan_status": "voided"}
+
+
 # ---------------------------------------------------------------------------
 # 判断群是否为发货群
 # ---------------------------------------------------------------------------
@@ -854,6 +1022,19 @@ async def _notify_scan_failure(
         db.close()
 
 
+async def _notify_scan_success(
+    room_id: str,
+    source: str | int | None = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        await send_room_at(db, room_id, "✅ 发货成功", source=source)
+    except Exception as exc:
+        logger.warning("[发货扫码] 发货群成功通知失败: %s", exc)
+    finally:
+        db.close()
+
+
 # ---------------------------------------------------------------------------
 # 主入口：处理发货群图片消息
 # ---------------------------------------------------------------------------
@@ -906,6 +1087,8 @@ async def handle_shipping_scan(
         order_no = ""
         paper_id = ""
         qr_text = ""
+        code_source = ""
+        ai_agent_result: dict[str, Any] | None = None
 
         # 2a. GridCode 方块码检测（自定义图案，内容直接编码，最鲁棒）
         from app.services.erp_gridcode import decode_gridcode_from_bytes
@@ -920,34 +1103,46 @@ async def handle_shipping_scan(
             order_no = qr_info.get("order_no", "")
             paper_id = qr_info.get("paper_id", "")
             if order_no and paper_id:
+                code_source = "gridcode"
                 logger.info("[发货扫码] GridCode识别成功 order=%s paper=%s", order_no, paper_id)
 
-        # 2b. 条形码/二维码兜底（旧版打印无 GridCode 时）
-        if not order_no:
-            qr_texts = decode_qr_from_bytes(image_bytes)
-            if qr_texts:
-                qr_text = qr_texts[0]
-                qr_info = parse_qr_content(qr_text)
-                order_no = qr_info.get("order_no", "")
-                paper_id = qr_info.get("paper_id", "")
-                if order_no and paper_id:
-                    logger.info("[发货扫码] 条码识别成功 order=%s paper=%s", order_no, paper_id)
-
-        # 2c. 全部失败
         if not order_no or not paper_id:
-            # 尝试获取原始文本做提示
-            raw_texts = decode_qr_from_bytes_raw(image_bytes)
-            if raw_texts:
-                logger.info("[发货扫码] 识别到非发货单条码 log_id=%d raw=%s", msg_log_id, raw_texts[:3])
-                await _notify_scan_failure(
-                    room_id, sender_id, msg_log_id,
-                    "该条码不是拣货单/配货单，请扫描正确的发货单",
-                    instance_id, source=source_msg_id,
+            logger.info("[发货扫码] GridCode未命中，开始调用右上角识别智能体 log_id=%d", msg_log_id)
+            db = SessionLocal()
+            try:
+                ai_agent_result = await ai_identify_shipping_code_by_agent(image_bytes, db)
+            except Exception as exc:
+                logger.warning("[发货扫码] 右上角识别智能体失败 log_id=%d: %s", msg_log_id, exc)
+                ai_agent_result = None
+            finally:
+                db.close()
+
+            if ai_agent_result:
+                logger.info(
+                    "[发货扫码] 右上角识别智能体已返回 log_id=%d combined_text=%s confidence=%s",
+                    msg_log_id,
+                    ai_agent_result.get("combined_text") or "",
+                    ai_agent_result.get("confidence") or "",
                 )
-                _mark_msg_recognized(msg_log_id)
+                order_no = ai_agent_result.get("order_no") or ""
+                paper_id = ai_agent_result.get("paper_id") or ""
+                qr_text = ai_agent_result.get("combined_text") or qr_text
+                if order_no and paper_id:
+                    code_source = "ai_agent"
+                    logger.info("[发货扫码] 右上角识别智能体成功 order=%s paper=%s confidence=%s", order_no, paper_id, ai_agent_result.get("confidence") or "")
+                else:
+                    logger.info(
+                        "[发货扫码] 右上角识别智能体返回了结果，但未提取到完整订单号/纸张ID log_id=%d order=%s paper=%s",
+                        msg_log_id,
+                        order_no,
+                        paper_id,
+                    )
             else:
-                logger.info("[发货扫码] 未识别到任何标记 log_id=%d", msg_log_id)
-                await _notify_scan_failure(room_id, sender_id, msg_log_id, "识别失败，请拍清晰", instance_id, source=source_msg_id)
+                logger.info("[发货扫码] 右上角识别智能体返回空结果 log_id=%d", msg_log_id)
+
+        if not order_no or not paper_id:
+            logger.info("[发货扫码] 方块码和码下文字均未识别成功 log_id=%d", msg_log_id)
+            await _notify_scan_failure(room_id, sender_id, msg_log_id, "识别失败，请拍清晰", instance_id, source=source_msg_id)
             return
 
         # 3. 检查纸张ID去重
@@ -970,12 +1165,15 @@ async def handle_shipping_scan(
                 order_no=order_no,
                 paper_id=paper_id,
                 qr_content=qr_text,
+                code_source=code_source,
                 room_id=room_id,
                 room_name=room_info.get("room_name", ""),
                 instance_id=instance_id,
                 sender_id=sender_id,
                 msg_log_id=msg_log_id,
             )
+            if ai_agent_result:
+                update_scan_record(db, record_id, fallback_ocr_json=json.dumps(ai_agent_result, ensure_ascii=False))
         finally:
             db.close()
 
@@ -1034,7 +1232,21 @@ async def handle_shipping_scan(
 
         logger.info("[发货扫码] AI解析成功 record=%d items=%d", record_id, len(parsed_items))
 
-        # 5. 获取ERP销售订单详情
+        if code_source in ("ai_text", "ai_agent"):
+            db = SessionLocal()
+            try:
+                update_scan_record(
+                    db,
+                    record_id,
+                    scan_status="review_pending",
+                    error_message="图像码未直接识别，已由 AI 读取码下文字，需人工审核后下发货单",
+                )
+            finally:
+                db.close()
+            _mark_msg_recognized(msg_log_id)
+            logger.info("[发货扫码] 进入人工审核 record=%d order=%s paper=%s", record_id, order_no, paper_id)
+            return
+
         try:
             order_detail = await get_erp_order_detail(order_no)
         except Exception as exc:
@@ -1098,6 +1310,7 @@ async def handle_shipping_scan(
                 shipment_no=shipment_no,
                 shipment_result=json.dumps(shipping_status, ensure_ascii=False),
             )
+            await _notify_scan_success(room_id, source=source_msg_id)
             await send_notification_to_groups(db, order_no, shipment_no, True, shipping_status)
             update_scan_record(db, record_id, notification_sent=1)
         finally:
@@ -1138,6 +1351,9 @@ async def retry_shipping_scan_record(record_id: int) -> dict[str, Any]:
 
     if not row:
         return {"ok": False, "error": f"扫码记录 {record_id} 不存在"}
+
+    if row.get("scan_status") == "review_pending":
+        return {"ok": False, "error": "该记录为待审核状态，请到发货单审核页面人工确认"}
 
     order_no = row["order_no"] or ""
     paper_id = row["paper_id"] or ""

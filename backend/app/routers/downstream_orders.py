@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from app.services.downstream_orders import (
     approve_review,
+    cancel_unshipped_order_review,
     check_duplicate_order,
     create_review_from_callback,
     get_review_attachment_debug,
@@ -280,6 +281,22 @@ async def replace_review_api(
     try:
         data = await replace_old_order(db, review_id, payload.customer_id, current_user, payload.review_note or "", include_ai_remark=payload.include_ai_remark)
         return json_response(message="替换旧单成功", data=data)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reviews/{review_id}/cancel-unshipped", summary="审核取消订单未发货部分")
+async def cancel_unshipped_review_api(
+    review_id: int,
+    payload: ReviewApprovePayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    try:
+        data = await cancel_unshipped_order_review(db, review_id, payload.customer_id, current_user, payload.review_note or "")
+        return json_response(message="取消未发货成功", data=data)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

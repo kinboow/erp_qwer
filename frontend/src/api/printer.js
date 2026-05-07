@@ -23,3 +23,11 @@ export const sendTestPrint = (targetClient, targetPrinter) => {
     data: { target_client: targetClient || '', target_printer: targetPrinter || '' },
   })
 }
+
+export const runScheduledTaskTest = () => {
+  return request({ url: '/api/printer/schedule/test-run', method: 'post' })
+}
+
+export const getScheduledTaskLogs = (limit = 50) => {
+  return request({ url: '/api/printer/schedule/logs', method: 'get', params: { limit } })
+}

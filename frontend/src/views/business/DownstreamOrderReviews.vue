@@ -15,6 +15,7 @@
               <span v-if="selectedReview.sender_name" class="detail-sender">/ {{ selectedReview.sender_name }}</span>
               <el-tag size="small" :type="statusTagType(selectedReview.review_status)" style="margin-left:8px">{{ statusText(selectedReview.review_status) }}</el-tag>
               <el-tag v-if="selectedReview.review_type === 'modify'" size="small" type="warning" style="margin-left:4px">待修改</el-tag>
+              <el-tag v-else-if="selectedReview.review_type === 'cancel_unshipped'" size="small" type="danger" style="margin-left:4px">取消未发货</el-tag>
               <el-tag v-if="selectedReview.order_intent === 'replace'" size="small" type="danger" style="margin-left:4px">替换旧单</el-tag>
               <el-tag v-else-if="selectedReview.order_intent === 'append'" size="small" type="primary" style="margin-left:4px">追加补充</el-tag>
               <span v-if="selectedReview.review_uid" class="detail-uid">{{ selectedReview.review_uid }}</span>
@@ -142,7 +143,7 @@
               />
 
               <div class="compare-right">
-                <div class="panel-label">{{ selectedReview.review_type === 'modify' ? (selectedOriginalReviewId ? '修改说明 + 新订单内容' : '修改说明') : '解析结果（下单内容）' }}</div>
+                <div class="panel-label">{{ selectedReview.review_type === 'modify' ? (selectedOriginalReviewId ? '修改说明 + 新订单内容' : '修改说明') : (selectedReview.review_type === 'cancel_unshipped' ? '取消未发货确认' : '解析结果（下单内容）') }}</div>
                 <!-- 待修改类型：显示修改说明 -->
                 <div v-if="selectedReview.review_type === 'modify'" class="modify-desc-area">
                   <el-alert type="warning" :closable="false" show-icon style="margin-bottom:8px">
@@ -201,8 +202,34 @@
                     </div>
                   </div>
                 </div>
+                <div v-else-if="selectedReview.review_type === 'cancel_unshipped'" class="modify-desc-area">
+                  <el-alert type="error" :closable="false" show-icon style="margin-bottom:8px">
+                    <template #title>客户确认取消该订单未发货部分</template>
+                  </el-alert>
+                  <div class="modify-desc-content">
+                    <div class="modify-label">订单号：</div>
+                    <div class="modify-text">{{ currentOrder?.cancel_order_no || selectedReview.replaced_order_no || '（未识别）' }}</div>
+                  </div>
+                  <div class="modify-desc-content" v-if="currentOrder?.followup_stage">
+                    <div class="modify-label">追问阶段：</div>
+                    <div class="modify-text">{{ currentOrder.followup_stage === 'fifth_day' ? '继续后第5天复问' : '第三天首次追问' }}</div>
+                  </div>
+                  <div class="modify-desc-content" v-if="currentOrder?.reason">
+                    <div class="modify-label">客户原意：</div>
+                    <div class="modify-text">{{ currentOrder.reason }}</div>
+                  </div>
+                  <div class="modify-desc-content">
+                    <div class="modify-label">未发摘要：</div>
+                    <div class="modify-text">
+                      <template v-if="currentOrder?.item_summary?.length">
+                        <div v-for="(line, idx) in currentOrder.item_summary" :key="idx">{{ idx + 1 }}. {{ line }}</div>
+                      </template>
+                      <template v-else>（无摘要）</template>
+                    </div>
+                  </div>
+                </div>
                 <!-- 编辑表格（正常单直接显示，修改单在选择原单后显示） -->
-                <div v-if="selectedReview.review_type !== 'modify' || selectedOriginalReviewId" class="edit-form-area">
+                <div v-if="selectedReview.review_type !== 'modify' && selectedReview.review_type !== 'cancel_unshipped' || (selectedReview.review_type === 'modify' && selectedOriginalReviewId)" class="edit-form-area">
                   <el-table :data="editForm.items" border size="small" class="order-table" @keydown="onTableKeydown">
                     <el-table-column type="index" label="序" width="40" align="center" />
                     <el-table-column label="款号" min-width="90" align="center" header-align="center" class-name="select-col">
@@ -271,6 +298,10 @@
             <div class="footer-actions">
               <template v-if="selectedReview.review_status === 'pending' && selectedReview.review_type === 'modify'">
                 <el-button type="primary" :loading="actionLoading" @click="handleProcessModify">修改</el-button>
+                <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">废单</el-button>
+              </template>
+              <template v-else-if="selectedReview.review_status === 'pending' && selectedReview.review_type === 'cancel_unshipped'">
+                <el-button type="danger" :loading="actionLoading" @click="handleCancelUnshipped">审核取消</el-button>
                 <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">废单</el-button>
               </template>
               <template v-else-if="selectedReview.review_status === 'pending'">
@@ -370,6 +401,7 @@ import { getCustomerList } from '@/api/customer'
 import { getProductOptions } from '@/api/products'
 import {
   approveReview,
+  cancelUnshippedReview,
   checkDuplicate,
   getContextMessages,
   getCustomerReviewHistory,
@@ -448,6 +480,30 @@ const goNext = async () => {
     await selectReview(reviewList.value[nextIdx])
   } else if (nextIdx >= reviewList.value.length - 2 && !noMoreReviews.value) {
     await loadMoreReviews()
+  }
+}
+
+const handleCancelUnshipped = async () => {
+  if (!selectedReview.value || !ensureCustomerSelected()) return
+  const orderNo = currentOrder.value?.cancel_order_no || selectedReview.value.replaced_order_no || ''
+  await ElMessageBox.confirm(`确认取消订单 ${orderNo || ''} 当前所有未发货部分吗？`, '审核取消', {
+    confirmButtonText: '确认取消',
+    cancelButtonText: '取消',
+    type: 'warning'
+  })
+  actionLoading.value = true
+  try {
+    const res = await cancelUnshippedReview(selectedReview.value.id, {
+      customer_id: selectedCustomerId.value,
+      review_note: reviewNote.value,
+      include_ai_remark: false
+    })
+    const d = res.data || {}
+    _printDebugLogs(d)
+    ElMessage.success(`取消未发货成功，订单号: ${d.order_no || orderNo || '-'}，共取消 ${d.cancelled_rows || 0} 行未发货`)
+    await fetchReviews()
+  } finally {
+    actionLoading.value = false
   }
 }
 

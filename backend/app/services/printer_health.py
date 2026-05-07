@@ -18,6 +18,7 @@ _status: dict[str, Any] = {
 }
 _prev_online: bool | None = None
 _prev_host: str = ""
+_offline_alert_active: bool = False
 
 
 def _get_target_client_hostname() -> str:
@@ -84,7 +85,7 @@ async def _check_once() -> None:
 
 
 async def refresh_printer_health_status() -> dict[str, Any]:
-    global _prev_online, _prev_host
+    global _prev_online, _prev_host, _offline_alert_active
     async with _check_lock:
         await _check_once()
         current_online = bool(_status.get("online", False))
@@ -113,8 +114,9 @@ async def refresh_printer_health_status() -> dict[str, Any]:
                 await ws_notify.broadcast("printer_offline", {"error": error_msg})
             except Exception:
                 pass
+            _offline_alert_active = True
 
-        if _prev_online is not None and not _prev_online and current_online:
+        if _prev_online is not None and not _prev_online and current_online and _offline_alert_active:
             detail = current_host or "未知主机"
             if current_printer:
                 detail = f"{detail} / {current_printer}"
@@ -138,6 +140,10 @@ async def refresh_printer_health_status() -> dict[str, Any]:
                 await ws_notify.broadcast("printer_online", {"hostname": current_host, "printer_name": current_printer})
             except Exception:
                 pass
+            _offline_alert_active = False
+
+        if current_online and not _offline_alert_active:
+            _offline_alert_active = False
 
         _prev_online = current_online
         _prev_host = current_host

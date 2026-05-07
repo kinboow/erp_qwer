@@ -41,6 +41,8 @@ class PrinterConfigPayload(BaseModel):
     printer_auto_print: str = "false"
     printer_target_client: str = ""
     printer_target_printer: str = ""
+    printer_unshipped_schedule_enabled: str = "false"
+    printer_unshipped_schedule_time: str = "09:00"
 
 
 @router.put("/config", summary="保存打印机配置")
@@ -50,7 +52,7 @@ def api_save_config(
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     from app.services.printer_service import save_printer_config
-    cfg = save_printer_config(db, payload.model_dump())
+    cfg = save_printer_config(db, payload.model_dump(exclude_unset=True))
     return json_response(data=cfg, message="打印机配置已保存")
 
 
@@ -99,6 +101,31 @@ def api_test_print(
     from app.services.printer_service import enqueue_test_print_job
     result = enqueue_test_print_job(db, payload.target_client, payload.target_printer)
     return json_response(data=result, message="测试打印任务已发送")
+
+
+@router.post("/schedule/test-run", summary="立即测试执行一次昨日未发货定时打印")
+def api_schedule_test_run(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.printer_service import trigger_unshipped_schedule_run
+    try:
+        result = trigger_unshipped_schedule_run(trigger_type="manual_test", mark_run_date=False)
+        return json_response(data=result, message="定时任务测试执行完成")
+    except ValueError as exc:
+        return json_response(code=400, message=str(exc))
+    except Exception as exc:
+        return json_response(code=500, message=f"定时任务测试执行失败: {exc}")
+
+
+@router.get("/schedule/logs", summary="查询定时任务日志")
+def api_schedule_logs(
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    from app.services.printer_service import list_scheduled_task_logs
+    return json_response(data=list_scheduled_task_logs(db, task_key="", limit=limit))
 
 
 # ---- 打印队列 — 客户端接口（无需登录） ----

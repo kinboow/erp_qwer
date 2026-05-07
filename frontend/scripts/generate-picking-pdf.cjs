@@ -274,7 +274,20 @@ function buildDocument(payload) {
           alignment: 'center',
         },
         page.gridcode_data_url
-          ? { width: GRIDCODE_SIZE, image: page.gridcode_data_url, fit: [GRIDCODE_SIZE, GRIDCODE_SIZE], alignment: 'right' }
+          ? {
+              width: GRIDCODE_SIZE,
+              stack: [
+                { image: page.gridcode_data_url, fit: [GRIDCODE_SIZE, GRIDCODE_SIZE], alignment: 'right' },
+                {
+                  text: page.barcode_content || '',
+                  width: GRIDCODE_SIZE,
+                  alignment: 'center',
+                  fontSize: 9.5,
+                  bold: true,
+                  margin: [0, mm(1.2), 0, 0],
+                },
+              ],
+            }
           : { width: GRIDCODE_SIZE, text: '' },
       ],
       margin: [0, pi > 0 ? 25 : 0, 0, mm(3)],

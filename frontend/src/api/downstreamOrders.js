@@ -50,6 +50,15 @@ export const replaceReview = (id, data) => {
   })
 }
 
+export const cancelUnshippedReview = (id, data) => {
+  return request({
+    url: `/api/downstream-orders/reviews/${id}/cancel-unshipped`,
+    method: 'post',
+    data,
+    timeout: 0
+  })
+}
+
 export const manualReview = (id, data) => {
   return request({
     url: `/api/downstream-orders/reviews/${id}/manual`,

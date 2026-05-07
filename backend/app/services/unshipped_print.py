@@ -394,6 +394,7 @@ def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str 
 
     return {
         "oss_url": proxy_url,
+        "object_name": object_name,
         "page_count": total_page_count,
         "item_count": total_item_count,
         "pages": all_page_records,
