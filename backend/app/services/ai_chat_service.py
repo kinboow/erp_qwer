@@ -45,6 +45,128 @@ def ensure_chat_table(db: Session) -> None:
     ensure_downstream_support_tables(db)
 
 
+def _load_ai_config(db: Session) -> dict[str, Any]:
+    from app.services.ai_config import get_ai_config_for_parser
+
+    try:
+        return get_ai_config_for_parser(db)
+    except Exception as exc:
+        logger.warning("加载 AI 配置失败，回退 .env: %s", exc)
+        return {
+            "provider": "qwen",
+            "base_url": settings.OPENAI_BASE_URL.rstrip("/"),
+            "api_key": settings.OPENAI_API_KEY,
+            "model": settings.OPENAI_MODEL,
+            "vision_model": settings.OPENAI_VISION_MODEL,
+            "temperature": 0.1,
+            "enabled": True,
+        }
+
+
+async def _call_chat_api(cfg: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
+    from app.services.ai_config import log_ai_call
+
+    if not cfg.get("enabled", True):
+        raise RuntimeError("AI 已关闭")
+    base_url = str(cfg.get("base_url") or "").rstrip("/")
+    api_key = str(cfg.get("api_key") or "")
+    model = str(cfg.get("model") or "")
+    if not base_url or not api_key or not model:
+        raise RuntimeError("AI 配置不完整")
+
+    provider = str(cfg.get("provider") or "qwen")
+    temperature = float(cfg.get("temperature") or 0.1)
+    request_body: dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "messages": messages,
+        "tools": TOOL_DEFINITIONS,
+        "tool_choice": "auto",
+        "max_tokens": 16384,
+    }
+    if provider == "bytedance":
+        request_body["thinking"] = {"type": "enabled"}
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    req_summary_parts: list[str] = []
+    for msg in messages[-20:]:
+        role = str(msg.get("role") or "")
+        content = msg.get("content")
+        if isinstance(content, str):
+            snippet = content[:300]
+        elif isinstance(content, list):
+            texts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+            suffix = " [+图片]" if any(isinstance(p, dict) and p.get("type") == "image_url" for p in content) else ""
+            snippet = (" ".join(texts)[:300] + suffix).strip()
+        else:
+            snippet = ""
+        req_summary_parts.append(f"[{role}] {snippet}"[:350])
+    req_summary = "\n".join(req_summary_parts)[:4000]
+
+    started = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=CHAT_API_TIMEOUT) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=request_body,
+            )
+        if response.status_code >= 400:
+            logger.error("客户群 AI API 请求失败 [%s %s]: status=%d body=%s", provider, model, response.status_code, response.text[:1000])
+        response.raise_for_status()
+        payload = response.json()
+        duration_ms = int((time.time() - started) * 1000)
+        usage = payload.get("usage") or {}
+        choice = (payload.get("choices") or [{}])[0]
+        message = choice.get("message") or {}
+        resp_summary = ((message.get("content") or "") if isinstance(message.get("content"), str) else "")[:16000]
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            try:
+                tc_names = ", ".join(str((tc.get("function") or {}).get("name") or "") for tc in tool_calls[:8])
+                resp_summary = (resp_summary + f"\n[tool_calls] {tc_names}").strip()[:16000]
+            except Exception:
+                pass
+
+        db = SessionLocal()
+        try:
+            log_ai_call(
+                db,
+                model=model,
+                caller="customer_group_chat",
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+                total_tokens=usage.get("total_tokens", 0),
+                duration_ms=duration_ms,
+                status="success",
+                request_summary=req_summary,
+                response_summary=resp_summary,
+            )
+        finally:
+            db.close()
+        return payload
+    except Exception as exc:
+        duration_ms = int((time.time() - started) * 1000)
+        db = SessionLocal()
+        try:
+            log_ai_call(
+                db,
+                model=model,
+                caller="customer_group_chat",
+                duration_ms=duration_ms,
+                status="error",
+                error_message=f"{type(exc).__name__}: {exc}"[:2000],
+                request_summary=req_summary,
+            )
+        finally:
+            db.close()
+        raise
+
+
 # ---------------------------------------------------------------------------
 # System Prompt
 # ---------------------------------------------------------------------------
@@ -1052,6 +1174,100 @@ async def _notify_download_failure(db: Session, message: str) -> None:
             logger.warning("通知群推送失败 room=%s: %s", row["room_id"], exc)
 
 
+async def _detect_image_rotation_angle(
+    db: Session,
+    attachment_base64: str,
+    *,
+    file_name: str = "",
+    content_text: str = "",
+) -> int:
+    from app.services.ai_order_parser import ai_order_parser
+
+    if not attachment_base64:
+        return 0
+
+    lower_name = (file_name or "").lower()
+    mime_type = "image/png" if lower_name.endswith(".png") else "image/jpeg"
+    prompt_text = (
+        "判断这张图片为了变成正向阅读，还需要旋转多少度。"
+        "正向阅读指中文、表格、订单内容应正常直立阅读。"
+        "只允许返回 JSON：{\"angle\": 0|90|180|-90, \"confidence\": \"high|medium|low\", \"reason\": \"...\"}。"
+        "其中 angle 的含义是：需要对当前图片进行顺时针旋转多少度；-90 表示逆时针 90 度；"
+        "如果图片本来就是正的或无法判断，请返回 0。"
+    )
+    if content_text:
+        prompt_text += f" 附加上下文：{content_text[:120]}"
+
+    try:
+        cfg = ai_order_parser._load_config(db)
+        ai_order_parser._ensure_enabled(cfg)
+        result = await ai_order_parser._chat(
+            cfg["vision_model"],
+            [
+                {"role": "system", "content": "你是图片方向判断助手，只能输出 JSON，不要输出任何额外文字。"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{attachment_base64}"}},
+                    ],
+                },
+            ],
+            db=db,
+            caller="image_orientation_detector",
+        )
+        raw_angle = result.get("angle", 0)
+        try:
+            angle = int(raw_angle)
+        except Exception:
+            angle = 0
+        if angle == 270:
+            angle = -90
+        elif angle == -270:
+            angle = 90
+        if angle not in {0, 90, 180, -90}:
+            angle = 0
+        logger.info(
+            "图片方向检测: angle=%s confidence=%s reason=%s file=%s",
+            angle,
+            result.get("confidence", ""),
+            str(result.get("reason", ""))[:200],
+            file_name or "",
+        )
+        return angle
+    except Exception as exc:
+        logger.warning("图片方向检测失败，回退原图: file=%s err=%s", file_name or "", exc)
+        return 0
+
+
+async def _normalize_image_orientation(
+    db: Session,
+    attachment_base64: str,
+    *,
+    file_name: str = "",
+    content_text: str = "",
+) -> tuple[str, int]:
+    from app.services.ai_order_parser import rotate_images_in_messages
+
+    angle = await _detect_image_rotation_angle(
+        db,
+        attachment_base64,
+        file_name=file_name,
+        content_text=content_text,
+    )
+    if angle == 0:
+        return attachment_base64, 0
+
+    lower_name = (file_name or "").lower()
+    mime_type = "image/png" if lower_name.endswith(".png") else "image/jpeg"
+    rotated = rotate_images_in_messages(
+        [{"type": "image", "base64": attachment_base64, "mime": mime_type}],
+        angle,
+    )
+    rotated_b64 = ((rotated[0] or {}).get("base64") if rotated else "") or attachment_base64
+    return rotated_b64, angle
+
+
 # ---------------------------------------------------------------------------
 # Excel → Markdown 转换 (复用)
 # ---------------------------------------------------------------------------
@@ -1250,6 +1466,16 @@ async def process_customer_group_message(
             room_id=room_id, room_name=room_name_display, file_name=file_name,
         )
 
+    if message_type in ("image", "img", "picture") and attachment_base64:
+        attachment_base64, rotated_angle = await _normalize_image_orientation(
+            db,
+            attachment_base64,
+            file_name=file_name,
+            content_text=content_text,
+        )
+        if rotated_angle:
+            logger.info("客户群图片已自动转正: room=%s sender=%s angle=%d", room_id, sender_name or sender_id, rotated_angle)
+
     # ---- 1. 构建 user message content ----
     prefix = f"[{sender_name or sender_id}] "
     user_content: Any  # str 或 list (multimodal)
@@ -1330,10 +1556,9 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
     try:
         await _asyncio.sleep(batch_info.get("window_seconds", BATCH_WINDOW_SECONDS))
     except _asyncio.CancelledError:
+        _room_batches.pop(room_id, None)
         logger.info("批次任务被取消: room=%s", room_id)
         return
-    finally:
-        _room_batches.pop(room_id, None)
 
     msg_count = batch_info.get("count", 0)
     customer = batch_info.get("customer")
@@ -1365,6 +1590,8 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
     from app.services.wechat_runtime_compat import _get_room_lock, _get_ai_semaphore
     room_lock = _get_room_lock(room_id)
     async with room_lock:
+        if _room_batches.get(room_id) is batch_info:
+            _room_batches.pop(room_id, None)
         async with _get_ai_semaphore():
             db = SessionLocal()
             try:
