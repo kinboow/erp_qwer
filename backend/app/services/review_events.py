@@ -56,8 +56,15 @@ async def _push_new_review_to_groups(review_id: int) -> None:
         if not row:
             return
         rtype = row.get("review_type") or "normal"
-        emoji = "📝" if rtype == "modify" else "📋"
-        type_label = "待修改" if rtype == "modify" else "新报货"
+        if rtype == "modify":
+            emoji = "�"
+            type_label = "待修改"
+        elif rtype == "cancel_unshipped":
+            emoji = "🚫"
+            type_label = "取消未发货"
+        else:
+            emoji = "📋"
+            type_label = "新报货"
         uid = row.get("review_uid") or f"#{review_id}"
         cname = row.get("customer_name") or "未知客户"
         sender = row.get("sender_name") or ""

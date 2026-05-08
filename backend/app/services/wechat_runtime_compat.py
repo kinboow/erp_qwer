@@ -363,17 +363,8 @@ async def ingest_runtime_message(
 
     if customer:
         bot_wxid = effective_wxid or _safe_text(normalized_payload.get("wxid"))
-
-        # ---- 过滤：机器人自身发送的消息不送 AI ----
         if log_sender_id and bot_wxid and log_sender_id == bot_wxid:
-            logger.info("客户群: 跳过机器人自身消息 sender=%s room=%s", log_sender_id, room_id)
-            return {
-                "instanceId": resolved_instance_id,
-                "wxid": bot_wxid,
-                "received": True, "log": log_result,
-                "ai_chat": None, "shipping_scan_triggered": False,
-                "skipped": "bot_self_message",
-            }
+            logger.info("客户群: 机器人自身消息也送入 AI 上下文 sender=%s room=%s", log_sender_id, room_id)
 
         # ---- 过滤：非图片且非 Excel 的文件不送 AI ----
         if log_msg_type == "file":

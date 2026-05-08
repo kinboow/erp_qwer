@@ -241,6 +241,7 @@ CREATE TABLE IF NOT EXISTS erp_unshipped_report (
     customer_order_no VARCHAR(200) DEFAULT '',
     brand           VARCHAR(200) DEFAULT '',
     product_no      VARCHAR(200) NOT NULL DEFAULT '',
+    main_product_no VARCHAR(200) DEFAULT '',
     product_name    VARCHAR(255) DEFAULT '',
     color           VARCHAR(200) DEFAULT '',
     unit            VARCHAR(50)  DEFAULT '',
@@ -313,6 +314,7 @@ def ensure_tables(db: Session) -> None:
         ("erp_sales_orders", "product_no", "VARCHAR(255) DEFAULT ''"),
         ("erp_sales_order_items", "erp_item_id", "VARCHAR(100) DEFAULT '' AFTER order_no"),
         ("erp_products", "is_current_year", "TINYINT NOT NULL DEFAULT 0 AFTER remark"),
+        ("erp_unshipped_report", "main_product_no", "VARCHAR(200) DEFAULT '' AFTER product_no"),
     ]
     for tbl, col, defn in _alter_cmds:
         try:
@@ -1346,6 +1348,7 @@ def _upsert_unshipped_row(db: Session, item: Any, synced_at: str) -> None:
         "customer_order_no": item.customer_order_no or "",
         "brand": item.brand or "",
         "product_no": item.product_no or "",
+        "main_product_no": item.main_product_no or "",
         "product_name": item.product_name or "",
         "color": item.color or "",
         "unit": item.unit or "",

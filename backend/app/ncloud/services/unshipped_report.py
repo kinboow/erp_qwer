@@ -85,6 +85,7 @@ async def query_unshipped_report(
                     customer_order_no=raw.ddh,
                     brand=raw.spbh,
                     product_no=raw.huohao,
+                    main_product_no=raw.bbreed_main,
                     product_name=raw.spname,
                     color=raw.color,
                     unit=raw.dw,

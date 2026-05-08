@@ -27,20 +27,12 @@
           highlight-current-row
           @current-change="handleCurrentChange"
         >
-          <el-table-column label="订单号" prop="order_no" min-width="130" show-overflow-tooltip />
+          <el-table-column label="订单号" prop="order_no" min-width="140" show-overflow-tooltip />
+          <el-table-column label="纸张ID" prop="paper_id" min-width="170" show-overflow-tooltip />
           <el-table-column label="状态" width="100" align="center">
             <template #default="{ row }">
               <el-tag :type="statusTagType(row.scan_status)" size="small">{{ statusText(row.scan_status) }}</el-tag>
             </template>
-          </el-table-column>
-          <el-table-column label="来源" width="100" align="center">
-            <template #default="{ row }">
-              <el-tag size="small" effect="plain">{{ sourceText(row.code_source) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="纸张ID" prop="paper_id" min-width="150" show-overflow-tooltip />
-          <el-table-column label="时间" width="170">
-            <template #default="{ row }">{{ formatDate(row.created_at) }}</template>
           </el-table-column>
         </el-table>
 
@@ -64,7 +56,7 @@
               <div class="detail-title">{{ selectedRecord.order_no || '未识别订单号' }}</div>
               <div class="detail-subtitle">
                 <el-tag :type="statusTagType(selectedRecord.scan_status)" size="small">{{ statusText(selectedRecord.scan_status) }}</el-tag>
-                <el-tag size="small" effect="plain" style="margin-left:8px">{{ sourceText(selectedRecord.code_source) }}</el-tag>
+                <el-tag size="small" effect="plain" style="margin-left:8px">纸张ID：{{ selectedRecord.paper_id || '-' }}</el-tag>
               </div>
             </div>
           </div>
@@ -72,10 +64,28 @@
           <div class="detail-grid">
             <div class="detail-block">
               <div class="block-title">基础信息</div>
-              <div class="info-row"><span>纸张ID</span><strong>{{ selectedRecord.paper_id || '-' }}</strong></div>
-              <div class="info-row"><span>扫码人</span><strong>{{ selectedRecord.scanner_name || selectedRecord.sender_id || '-' }}</strong></div>
-              <div class="info-row"><span>群名</span><strong>{{ selectedRecord.room_name || '-' }}</strong></div>
-              <div class="info-row"><span>时间</span><strong>{{ formatDate(selectedRecord.created_at) }}</strong></div>
+              <div class="summary-grid">
+                <div class="summary-item">
+                  <span class="summary-label">订单号</span>
+                  <strong class="summary-value">{{ selectedRecord.order_no || '-' }}</strong>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">纸张ID</span>
+                  <strong class="summary-value">{{ selectedRecord.paper_id || '-' }}</strong>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">审核状态</span>
+                  <strong class="summary-value">{{ statusText(selectedRecord.scan_status) }}</strong>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">识别来源</span>
+                  <strong class="summary-value">{{ sourceText(selectedRecord.code_source) }}</strong>
+                </div>
+                <div class="summary-item">
+                  <span class="summary-label">扫码时间</span>
+                  <strong class="summary-value">{{ formatDate(selectedRecord.created_at) }}</strong>
+                </div>
+              </div>
               <div class="info-row" v-if="selectedRecord.error_message"><span>提示</span><strong class="danger-text">{{ selectedRecord.error_message }}</strong></div>
             </div>
 
@@ -89,12 +99,42 @@
 
             <div class="detail-block" v-if="selectedRecord.fallback_ocr">
               <div class="block-title">码下文字兜底识别</div>
-              <pre class="json-block">{{ JSON.stringify(selectedRecord.fallback_ocr, null, 2) }}</pre>
+              <div class="summary-grid summary-grid-compact">
+                <div class="summary-item" v-if="selectedRecord.fallback_ocr.order_no">
+                  <span class="summary-label">识别订单号</span>
+                  <strong class="summary-value">{{ selectedRecord.fallback_ocr.order_no }}</strong>
+                </div>
+                <div class="summary-item" v-if="selectedRecord.fallback_ocr.paper_id">
+                  <span class="summary-label">识别纸张ID</span>
+                  <strong class="summary-value">{{ selectedRecord.fallback_ocr.paper_id }}</strong>
+                </div>
+                <div class="summary-item" v-if="selectedRecord.fallback_ocr.confidence !== undefined && selectedRecord.fallback_ocr.confidence !== null">
+                  <span class="summary-label">置信度</span>
+                  <strong class="summary-value">{{ selectedRecord.fallback_ocr.confidence }}</strong>
+                </div>
+              </div>
+              <pre v-if="selectedRecord.fallback_ocr.combined_text" class="json-block">{{ selectedRecord.fallback_ocr.combined_text }}</pre>
             </div>
 
             <div class="detail-block" v-if="selectedRecord.ai_parsed">
               <div class="block-title">表格 AI 解析结果</div>
-              <pre class="json-block">{{ JSON.stringify(selectedRecord.ai_parsed, null, 2) }}</pre>
+              <el-table v-if="parsedTableRows.length" :data="parsedTableRows" border size="small" class="parsed-table">
+                <el-table-column type="index" label="序" width="48" align="center" />
+                <el-table-column label="款号" prop="product_no" min-width="110" align="center" header-align="center" />
+                <el-table-column label="颜色" prop="color" min-width="100" align="center" header-align="center" />
+                <el-table-column v-for="size in parsedSizeColumns" :key="size" :label="size" width="68" align="center" header-align="center">
+                  <template #default="{ row }">
+                    {{ row.sizeMap[size] || '' }}
+                  </template>
+                </el-table-column>
+                <el-table-column label="合计" width="72" align="center" header-align="center">
+                  <template #default="{ row }">
+                    <span class="table-total">{{ row.total }}</span>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <el-empty v-else description="暂无解析明细" :image-size="44" />
+              <pre v-if="selectedRecord.ai_parsed.remark" class="json-block">{{ selectedRecord.ai_parsed.remark }}</pre>
             </div>
 
             <div class="detail-block" v-if="selectedRecord.qr_content">
@@ -128,7 +168,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElImageViewer, ElMessage, ElMessageBox } from 'element-plus'
 import { approveScanRecord, getScanRecords, voidScanRecord } from '@/api/shippingScans'
 
@@ -149,6 +189,8 @@ const pagination = reactive({
   pageSize: 20,
   total: 0
 })
+
+const preferredSizeOrder = ['XS', 'S', 'M', 'L', 'XL', '2XL', '3XL', '4XL', '5XL', '6XL']
 
 const mediaUrl = (msgLogId) => {
   const t = localStorage.getItem('token') || ''
@@ -174,6 +216,39 @@ const formatDate = (v) => {
   if (!v) return '-'
   return String(v).replace('T', ' ').slice(0, 19)
 }
+
+const parsedTableRows = computed(() => {
+  const items = selectedRecord.value?.ai_parsed?.items
+  if (!Array.isArray(items)) return []
+  return items.map((item, index) => {
+    const sizeMap = item?.sizes && typeof item.sizes === 'object' ? item.sizes : {}
+    const total = Object.values(sizeMap).reduce((sum, qty) => sum + (Number(qty) || 0), 0)
+    return {
+      id: `${selectedRecord.value?.id || 'record'}-${index}`,
+      product_no: item?.product_no || '',
+      color: item?.color || '',
+      sizeMap,
+      total
+    }
+  })
+})
+
+const parsedSizeColumns = computed(() => {
+  const sizeSet = new Set()
+  parsedTableRows.value.forEach(row => {
+    Object.keys(row.sizeMap || {}).forEach(size => {
+      if (size) sizeSet.add(String(size))
+    })
+  })
+  return Array.from(sizeSet).sort((a, b) => {
+    const ia = preferredSizeOrder.indexOf(a)
+    const ib = preferredSizeOrder.indexOf(b)
+    if (ia !== -1 && ib !== -1) return ia - ib
+    if (ia !== -1) return -1
+    if (ib !== -1) return 1
+    return a.localeCompare(b)
+  })
+})
 
 const handleCurrentChange = (row) => {
   selectedRecord.value = row || null
@@ -288,7 +363,7 @@ onMounted(() => {
 
 .review-layout {
   display: grid;
-  grid-template-columns: 420px 1fr;
+  grid-template-columns: 360px 1fr;
   gap: 16px;
   min-height: 0;
   flex: 1;
@@ -336,6 +411,35 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.summary-grid-compact {
+  margin-bottom: 12px;
+}
+
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: #fafafa;
+  border-radius: 6px;
+}
+
+.summary-label {
+  font-size: 12px;
+  color: #909399;
+}
+
+.summary-value {
+  color: #303133;
+  word-break: break-all;
 }
 
 .detail-block {
@@ -389,6 +493,15 @@ onMounted(() => {
   background: #fafafa;
   border-radius: 6px;
   padding: 12px;
+}
+
+.parsed-table {
+  width: 100%;
+}
+
+.table-total {
+  font-weight: 600;
+  color: #1f2329;
 }
 
 .review-actions {

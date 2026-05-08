@@ -1236,6 +1236,28 @@ async def rescan_unrecognized_messages() -> None:
             db2.close()
 
         if shipping_room and message_type in ("image", "img", "picture"):
+            # 先检查该消息是否已有非 failed 的扫码记录（纸张ID已识别过）
+            db_chk = SessionLocal()
+            try:
+                already_done = db_chk.execute(
+                    text(
+                        "SELECT id, scan_status FROM shipping_scan_records "
+                        "WHERE msg_log_id = :mid AND scan_status NOT IN ('failed') "
+                        "LIMIT 1"
+                    ),
+                    {"mid": msg_id},
+                ).mappings().first()
+            except Exception:
+                already_done = None
+            finally:
+                db_chk.close()
+
+            if already_done:
+                logger.info("[启动补扫] msg_log_id=%d 已有扫码记录(status=%s)，跳过",
+                            msg_id, already_done.get("scan_status"))
+                _mark_msg_recognized(msg_id)
+                continue
+
             db_cnt = SessionLocal()
             try:
                 count = increment_rescan_count(db_cnt, msg_id)

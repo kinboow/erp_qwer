@@ -276,6 +276,7 @@ import { getProducts } from '@/api/products'
 import { getSalesOrders } from '@/api/salesOrders'
 import { getSalesShipments } from '@/api/salesShipments'
 import { getUserList } from '@/api/user'
+import { buildBackendWsUrl } from '@/utils/backendUrl'
 
 const route = useRoute()
 const router = useRouter()
@@ -596,8 +597,7 @@ let _wechatOfflineNotification = null
 
 function connectWechatNotifyWs() {
   if (wechatNotifyWs && wechatNotifyWs.readyState <= 1) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  wechatNotifyWs = new WebSocket(`${proto}://${location.host}/ws/notify`)
+  wechatNotifyWs = new WebSocket(buildBackendWsUrl('/ws/notify'))
   wechatNotifyWs.onmessage = (evt) => {
     try {
       const msg = JSON.parse(evt.data)

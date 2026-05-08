@@ -182,12 +182,13 @@ CUSTOMER_GROUP_SYSTEM_PROMPT = """你是一个服装行业客户群的智能报�
 
 ## 二、消息格式
 - 每条消息前面会标注消息ID和发送者姓名，格式为 "[消息ID:123][发送者姓名] 消息内容"
-- 你能看到群里所有客户消息（不含机器人自身的消息、非图片/Excel的文件）
+- 你能看到群里的客户消息，以及机器人账号自己发送的消息（非图片/Excel的普通文件仍不会送入你）
 - 消息是实时推送给你的，每收到一条你就会处理一次
 - 图片会以 base64 格式提供，表格文件会转为 Markdown 表格
 - **撤回消息**：当客户撤回了一条消息，你会收到格式为 "[系统通知] XXX 撤回了一条消息。被撤回的原始内容：..." 的特殊消息
 - **员工与客户区分**：系统会在提示词末尾提供本公司员工名单。员工发的消息不是报货，但你仍然可以看到员工消息作为上下文（例如员工在群里确认客户的订单、回复客户问题等）。
   只有非员工（客户）发的消息才可能是报货信息，员工发的消息永远不要当作报货处理。
+- **当前实例账号消息**：你现在也会看到当前实例账号自己发送到群里的消息。这类消息会被明确标记为“当前实例账号发送”。它们只用于提供上下文，帮助你理解前后对话，绝不能当成客户报货、客户确认或员工接手的依据。
 
 ## 三、报货识别流程（核心，按顺序执行）
 
@@ -1694,6 +1695,11 @@ def _build_runtime_instruction(context: dict[str, Any]) -> str:
         lines.extend(employee_messages)
     if context.get("employee_replied"):
         lines.append("系统检测到本批次历史消息中已有员工发言。你必须优先判断员工是否已经接手处理；若已接手，则保持静默，不要继续自动处理。")
+    if context.get("last_sender_is_bot"):
+        lines.append("## 当前批次特殊说明")
+        lines.append("当前批次最后一条消息是当前实例账号自己发送到群里的消息。")
+        lines.append("这类消息只用于补充上下文，通常不代表客户有了新的需求。")
+        lines.append("如果当前批次里没有新的客户消息提供额外信息，你通常应该保持静默，不要回复，不要调用工具。")
     pending_followups = context.get("pending_followups") or []
     if pending_followups:
         lines.append("## 当前群待确认的未发货订单")
@@ -1734,6 +1740,7 @@ async def process_customer_group_message(
     返回: {"ok": True/False, "batched": bool, ...}
     """
     ensure_chat_table(db)
+    is_bot_account_message = bool(bot_wxid and sender_id and str(sender_id).strip() == str(bot_wxid).strip())
 
     # ---- 0. 图片/文件缺失 base64 时尝试从 CDN 下载 ----
     is_media = message_type in ("image", "img", "picture", "file")
@@ -1756,7 +1763,8 @@ async def process_customer_group_message(
             logger.info("客户群图片已自动转正: room=%s sender=%s angle=%d", room_id, sender_name or sender_id, rotated_angle)
 
     # ---- 1. 构建 user message content ----
-    prefix = f"[消息ID:{int(log_id)}][{sender_name or sender_id}] " if log_id else f"[{sender_name or sender_id}] "
+    sender_label = f"当前实例账号发送:{sender_name or sender_id}" if is_bot_account_message else (sender_name or sender_id)
+    prefix = f"[消息ID:{int(log_id)}][{sender_label}] " if log_id else f"[{sender_label}] "
     user_content: Any  # str 或 list (multimodal)
 
     if message_type in ("image", "img", "picture") and attachment_base64:
@@ -1774,8 +1782,8 @@ async def process_customer_group_message(
         user_content = prefix + (content_text or "")
 
     # ---- 2. 立即保存 user message 到对话历史 ----
-    _save_message(db, room_id, "user", content=user_content, name=sender_name)
-    logger.info("消息已入库: room=%s sender=%s type=%s", room_id, sender_name, message_type)
+    _save_message(db, room_id, "user", content=user_content, name=sender_label)
+    logger.info("消息已入库: room=%s sender=%s type=%s bot_self=%s", room_id, sender_name, message_type, is_bot_account_message)
 
     # ---- 2.5 熔断期间缓冲消息信息（消息仍入库，只是不送AI） ----
     from app.services.ai_circuit_breaker import is_tripped as _cb_is_tripped, buffer_message as _cb_buffer
@@ -1789,13 +1797,32 @@ async def process_customer_group_message(
             "message_type": message_type,
         })
 
-    # ---- 3. 批次窗口：35 秒内同群消息合并后统一送 AI ----
+    # ---- 3. 批次窗口：同群消息合并后统一送 AI ----
+    is_media_msg = message_type in ("image", "img", "picture", "file")
     batch = _room_batches.get(room_id)
+
+    if batch:
+        # 如果当前批次已包含图片/文件，且本条也是图片/文件 → 拆分批次
+        # 立即结束旧批次送 AI，新消息另起新批次
+        if is_media_msg and batch.get("media_count", 0) >= 1:
+            logger.info("批次拆分: room=%s 旧批次含 %d 张图片/文件, 新图片/文件到达 → 立即提交旧批次",
+                        room_id, batch.get("media_count", 0))
+            old_task = batch.get("task")
+            if old_task and not old_task.done():
+                old_task.cancel()
+            # 立即异步触发旧批次的 AI 处理
+            _room_batches.pop(room_id, None)
+            _asyncio.create_task(_batch_delayed_ai_call_immediate(room_id, batch))
+            # 本条消息 fall-through 到下方创建新批次
+            batch = None
 
     if batch:
         # 批次已在进行中 — 追加计数，刷新发送者信息，跳过 AI
         batch["count"] += 1
+        if is_media_msg:
+            batch["media_count"] = batch.get("media_count", 0) + 1
         batch["senders"][sender_id] = sender_name
+        batch["last_sender_is_bot"] = is_bot_account_message
         batch["is_history_backlog"] = batch.get("is_history_backlog", False) or is_history_backlog
         if customer:
             batch["customer"] = customer
@@ -1803,8 +1830,8 @@ async def process_customer_group_message(
             batch["instance_id"] = instance_id
         if is_history_backlog:
             batch["window_seconds"] = max(batch.get("window_seconds", BATCH_WINDOW_SECONDS), BACKLOG_WINDOW_SECONDS)
-        logger.info("消息加入批次窗口: room=%s count=%d 剩余 %.0fs",
-                    room_id, batch["count"],
+        logger.info("消息加入批次窗口: room=%s count=%d media=%d 剩余 %.0fs",
+                    room_id, batch["count"], batch.get("media_count", 0),
                     max(0, batch["trigger_ts"] + batch.get("window_seconds", BATCH_WINDOW_SECONDS) - time.time()))
         return {"ok": True, "batched": True, "batch_count": batch["count"]}
 
@@ -1813,9 +1840,11 @@ async def process_customer_group_message(
     batch_info: dict[str, Any] = {
         "trigger_ts": time.time(),
         "count": 1,
+        "media_count": 1 if is_media_msg else 0,
         "customer": dict(customer) if customer else None,
         "instance_id": instance_id or "",
         "senders": {sender_id: sender_name},
+        "last_sender_is_bot": is_bot_account_message,
         "is_history_backlog": is_history_backlog,
         "window_seconds": effective_window_seconds,
         "task": None,
@@ -1830,6 +1859,18 @@ async def process_customer_group_message(
     return {"ok": True, "batched": True, "batch_trigger": True}
 
 
+async def _batch_delayed_ai_call_immediate(room_id: str, batch_info: dict[str, Any]) -> None:
+    """立即触发旧批次的 AI 处理（用于批次拆分场景：新图片/文件到达时提交旧批次）。
+
+    与 _batch_delayed_ai_call 共享后半段逻辑，只是跳过 sleep 等待。
+    等 3 秒让旧批次中最后一条消息的 CDN 下载 / 入库完成。
+    """
+    await _asyncio.sleep(3)
+    msg_count = batch_info.get("count", 0)
+    logger.info("批次拆分提交: room=%s 立即处理旧批次 (%d 条消息)", room_id, msg_count)
+    await _batch_run_ai(room_id, batch_info)
+
+
 async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> None:
     """等待批次窗口结束后，加载完整历史并统一调用 AI。"""
     try:
@@ -1839,17 +1880,24 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
         logger.info("批次任务被取消: room=%s", room_id)
         return
 
+    logger.info("批次窗口到期: room=%s 共 %d 条消息", room_id, batch_info.get("count", 0))
+    await _batch_run_ai(room_id, batch_info)
+
+
+async def _batch_run_ai(room_id: str, batch_info: dict[str, Any]) -> None:
+    """批次 AI 处理的公共逻辑（被 _batch_delayed_ai_call 和 _batch_delayed_ai_call_immediate 复用）。"""
     msg_count = batch_info.get("count", 0)
     customer = batch_info.get("customer")
     instance_id = batch_info.get("instance_id", "")
     senders = batch_info.get("senders", {})
+    last_sender_is_bot = bool(batch_info.get("last_sender_is_bot", False))
     is_history_backlog = bool(batch_info.get("is_history_backlog", False))
     batch_started_at = float(batch_info.get("trigger_ts") or time.time())
     # 取最后一个发送者作为 sender_id / sender_name（工具调用可能需要）
     last_sender_id = list(senders.keys())[-1] if senders else ""
     last_sender_name = senders.get(last_sender_id, "")
 
-    logger.info("批次窗口到期，开始 AI 处理: room=%s 共 %d 条消息 history_backlog=%s", room_id, msg_count, is_history_backlog)
+    logger.info("开始 AI 处理: room=%s 共 %d 条消息 history_backlog=%s", room_id, msg_count, is_history_backlog)
 
     # 熔断检查：如果 AI 已暂停，缓冲消息而不调用
     from app.services.ai_circuit_breaker import is_tripped, buffer_message
@@ -1881,6 +1929,7 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
                     sender_name=last_sender_name,
                     customer=customer,
                     instance_id=instance_id,
+                    last_sender_is_bot=last_sender_is_bot,
                     is_history_backlog=is_history_backlog,
                     batch_started_at=batch_started_at,
                 )
@@ -1888,8 +1937,6 @@ async def _batch_delayed_ai_call(room_id: str, batch_info: dict[str, Any]) -> No
                 logger.error("批次 AI 处理异常: room=%s err=%s", room_id, exc, exc_info=True)
             finally:
                 db.close()
-
-    return {"ok": True, "ai_responded": True}
 
 
 async def _run_ai_on_history(
@@ -1900,6 +1947,7 @@ async def _run_ai_on_history(
     sender_name: str,
     customer: Optional[dict[str, Any]],
     instance_id: str,
+    last_sender_is_bot: bool = False,
     is_history_backlog: bool = False,
     batch_started_at: float | None = None,
 ) -> dict[str, Any]:
@@ -1913,6 +1961,7 @@ async def _run_ai_on_history(
         batch_started_at=batch_started_at or time.time(),
         is_history_backlog=is_history_backlog,
     )
+    runtime_context["last_sender_is_bot"] = last_sender_is_bot
     runtime_instruction = _build_runtime_instruction(runtime_context)
     suppress_actions = bool(runtime_context.get("is_history_backlog") and runtime_context.get("employee_replied"))
 

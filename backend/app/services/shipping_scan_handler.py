@@ -400,10 +400,14 @@ def parse_qr_content(qr_text: str) -> dict[str, str]:
 # 纸张ID去重检查
 # ---------------------------------------------------------------------------
 def is_paper_used(db: Session, paper_id: str) -> bool:
-    """检查纸张ID是否已使用（AI识别完成且成功下了发货单才算已使用）"""
+    """检查纸张ID是否已被识别过（非 failed 状态的记录都视为已使用，不允许重复识别）"""
     ensure_downstream_support_tables(db)
     row = db.execute(
-        text("SELECT id FROM shipping_scan_records WHERE paper_id = :pid AND scan_status = 'success' LIMIT 1"),
+        text(
+            "SELECT id FROM shipping_scan_records "
+            "WHERE paper_id = :pid AND scan_status NOT IN ('failed') "
+            "LIMIT 1"
+        ),
         {"pid": paper_id},
     ).first()
     return row is not None
@@ -432,7 +436,9 @@ def create_scan_record(db: Session, **kwargs) -> int:
         },
     )
     db.commit()
-    return result.lastrowid
+    record_id = result.lastrowid
+    _notify_scan_change("scan_created", record_id)
+    return record_id
 
 
 def update_scan_record(db: Session, record_id: int, **kwargs):
@@ -445,6 +451,154 @@ def update_scan_record(db: Session, record_id: int, **kwargs):
     if sets:
         db.execute(text(f"UPDATE shipping_scan_records SET {', '.join(sets)} WHERE id = :id"), params)
         db.commit()
+        _notify_scan_change("scan_updated", record_id, scan_status=kwargs.get("scan_status"))
+
+
+def _notify_scan_change(event_type: str, record_id: int, scan_status: str | None = None):
+    """通知前端发货扫码记录变动（SSE）"""
+    try:
+        from app.services.shipping_scan_events import notify_scan_record_change
+        notify_scan_record_change(event_type, {"record_id": record_id, "scan_status": scan_status})
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 启动时恢复卡住的扫码记录
+# ---------------------------------------------------------------------------
+async def recover_stuck_scan_records() -> None:
+    """
+    启动时恢复卡在 pending/parsing 状态的扫码记录（程序异常退出导致）。
+    - 无 ai_parsed_json → 标记 failed，允许 rescan_unrecognized_messages 重新触发。
+    - 有 ai_parsed_json → 查 ERP 发货单是否已创建，有则 success，无则 review_pending。
+    """
+    from datetime import timedelta
+
+    db = SessionLocal()
+    try:
+        ensure_downstream_support_tables(db)
+        from app.services.erp_sync import ensure_tables as ensure_erp_tables
+        ensure_erp_tables(db)
+
+        stuck_rows = db.execute(
+            text(
+                "SELECT id, order_no, paper_id, ai_parsed_json, scan_status "
+                "FROM shipping_scan_records "
+                "WHERE scan_status IN ('pending', 'parsing') "
+                "ORDER BY id ASC"
+            )
+        ).mappings().all()
+
+        if not stuck_rows:
+            logger.info("[启动恢复] 无卡住的发货扫码记录")
+            return
+
+        logger.info("[启动恢复] 发现 %d 条卡住的发货扫码记录", len(stuck_rows))
+
+        for row in stuck_rows:
+            record_id = row["id"]
+            order_no = str(row.get("order_no") or "").strip()
+            ai_parsed = str(row.get("ai_parsed_json") or "").strip()
+
+            # --- AI 未完成 → 标记失败（rescan 机制会重新下载图片触发识别）---
+            if not ai_parsed or ai_parsed in ("null", "{}", "[]"):
+                update_scan_record(
+                    db, record_id,
+                    scan_status="failed",
+                    error_message="程序异常中断，AI识别未完成，请重新扫描",
+                )
+                logger.info("[启动恢复] record=%d AI未完成 → failed (允许重扫)", record_id)
+                continue
+
+            # --- AI 已完成，检查 ERP 是否已有匹配的发货单 ---
+            # 1) 先查本地 erp_sales_shipments（remark 包含关联订单号）
+            shipment_no = _find_shipment_in_local_db(db, order_no) if order_no else None
+            if shipment_no:
+                update_scan_record(
+                    db, record_id,
+                    scan_status="success",
+                    shipment_no=shipment_no,
+                    error_message="",
+                )
+                logger.info("[启动恢复] record=%d 本地找到发货单 %s → success", record_id, shipment_no)
+                continue
+
+            # 2) 本地未找到 → 尝试 ERP API
+            if order_no:
+                try:
+                    shipment_no = await _find_shipment_from_erp_api(order_no)
+                except Exception as exc:
+                    logger.warning("[启动恢复] record=%d ERP API 查询失败: %s", record_id, exc)
+                    shipment_no = None
+
+                if shipment_no:
+                    update_scan_record(
+                        db, record_id,
+                        scan_status="success",
+                        shipment_no=shipment_no,
+                        error_message="",
+                    )
+                    logger.info("[启动恢复] record=%d ERP API 找到发货单 %s → success", record_id, shipment_no)
+                    continue
+
+            # 3) 未找到匹配 → 进入人工审核（AI 结果已保存，可在前端查看）
+            update_scan_record(
+                db, record_id,
+                scan_status="review_pending",
+                error_message="程序异常中断，AI已识别但发货单创建状态不确定，需人工审核",
+            )
+            logger.info("[启动恢复] record=%d → review_pending (人工审核)", record_id)
+
+    except Exception as exc:
+        logger.exception("[启动恢复] 发货扫码记录恢复异常: %s", exc)
+    finally:
+        db.close()
+
+
+def _find_shipment_in_local_db(db: Session, sales_order_no: str) -> str | None:
+    """在本地 erp_sales_shipments 表中查找由发货扫码自动创建的发货单"""
+    if not sales_order_no:
+        return None
+    row = db.execute(
+        text(
+            "SELECT order_no FROM erp_sales_shipments "
+            "WHERE remark LIKE :pattern "
+            "ORDER BY id DESC LIMIT 1"
+        ),
+        {"pattern": f"%发货扫码自动创建 关联订单:{sales_order_no}%"},
+    ).mappings().first()
+    return row["order_no"] if row else None
+
+
+async def _find_shipment_from_erp_api(sales_order_no: str) -> str | None:
+    """通过 ERP API 查询最近发货单，检查 remark 是否包含指定订单号"""
+    from datetime import timedelta
+    from app.services.erp_bridge import ERPBridge
+    from app.ncloud.services.shipments import list_shipments, get_shipment_detail
+
+    bridge = ERPBridge()
+    client = await bridge._ensure_login()
+
+    today = datetime.now()
+    dates = (today - timedelta(days=3)).strftime("%Y-%m-%d")
+    datee = today.strftime("%Y-%m-%d")
+
+    result = await list_shipments(client, dates=dates, datee=datee, state=None, page=1, rows=200)
+    for item in result.rows:
+        try:
+            detail = await get_shipment_detail(client, item.order_no)
+            remark = detail.main.remark or ""
+            if f"关联订单:{sales_order_no}" in remark:
+                # 顺便同步到本地
+                try:
+                    from app.services.erp_sync import sync_single_shipment
+                    await sync_single_shipment(item.order_no)
+                except Exception:
+                    pass
+                return item.order_no
+        except Exception:
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1158,20 +1312,38 @@ async def handle_shipping_scan(
                 _mark_msg_recognized(msg_log_id)
                 return
 
-            # 创建扫码记录
+            # 创建扫码记录（如有同 paper_id 的 failed 记录则复用，避免列表出现重复）
             room_info = resolve_shipping_room(db, room_id) or {}
-            record_id = create_scan_record(
-                db,
-                order_no=order_no,
-                paper_id=paper_id,
-                qr_content=qr_text,
-                code_source=code_source,
-                room_id=room_id,
-                room_name=room_info.get("room_name", ""),
-                instance_id=instance_id,
-                sender_id=sender_id,
-                msg_log_id=msg_log_id,
-            )
+            existing_failed = db.execute(
+                text(
+                    "SELECT id FROM shipping_scan_records "
+                    "WHERE paper_id = :pid AND scan_status = 'failed' "
+                    "ORDER BY id DESC LIMIT 1"
+                ),
+                {"pid": paper_id},
+            ).first()
+            if existing_failed:
+                record_id = existing_failed[0]
+                update_scan_record(
+                    db, record_id,
+                    order_no=order_no, qr_content=qr_text, code_source=code_source,
+                    room_id=room_id, room_name=room_info.get("room_name", ""),
+                    instance_id=instance_id, sender_id=sender_id, msg_log_id=msg_log_id,
+                    scan_status="pending", error_message="",
+                )
+            else:
+                record_id = create_scan_record(
+                    db,
+                    order_no=order_no,
+                    paper_id=paper_id,
+                    qr_content=qr_text,
+                    code_source=code_source,
+                    room_id=room_id,
+                    room_name=room_info.get("room_name", ""),
+                    instance_id=instance_id,
+                    sender_id=sender_id,
+                    msg_log_id=msg_log_id,
+                )
             if ai_agent_result:
                 update_scan_record(db, record_id, fallback_ocr_json=json.dumps(ai_agent_result, ensure_ascii=False))
         finally:

@@ -51,14 +51,15 @@
                               'is-trigger': msg.id === triggerMsgId,
                               'is-review': reviewMsgIds.includes(msg.id) && msg.id !== triggerMsgId,
                               'is-bot': isBotMsg(msg),
+                              'is-self': isSelfMsg(msg),
                             }"
                           >
-                            <div class="chat-sender-line" v-if="!isBotMsg(msg)">
+                            <div class="chat-sender-line" :class="{ 'sender-self': isSelfMsg(msg) }" v-if="!isBotMsg(msg)">
                               {{ msg.sender_name || msg.sender_id || '未知' }}<span class="chat-sender-via">@ 微信</span>
                               <el-tag v-if="msg.id === triggerMsgId" size="small" type="primary" class="chat-tag">本单触发</el-tag>
                               <el-tag v-else-if="reviewMsgIds.includes(msg.id)" size="small" type="info" class="chat-tag">关联审核单</el-tag>
                             </div>
-                            <div class="chat-bubble" :class="{ 'bubble-bot': isBotMsg(msg), 'bubble-trigger': msg.id === triggerMsgId }">
+                            <div class="chat-bubble" :class="{ 'bubble-bot': isBotMsg(msg), 'bubble-self': isSelfMsg(msg), 'bubble-trigger': msg.id === triggerMsgId }">
                               <template v-if="msg.message_type === 'image'">
                                 <img
                                   v-if="msg.media_url"
@@ -399,6 +400,7 @@ import { ElMessage, ElMessageBox, ElImageViewer } from 'element-plus'
 import { Loading, Picture, Document, WarningFilled } from '@element-plus/icons-vue'
 import { getCustomerList } from '@/api/customer'
 import { getProductOptions } from '@/api/products'
+import { getWechatGlobalConfig } from '@/api/wechat'
 import {
   approveReview,
   cancelUnshippedReview,
@@ -426,6 +428,7 @@ const reviewNote = ref('')
 const manualDialogVisible = ref(false)
 const manualCustomerId = ref(null)
 const productOptionsRaw = ref([])
+const currentWechatWxid = ref('')
 const productNos = computed(() => productOptionsRaw.value.map(p => p.product_no))
 const colorsByPno = computed(() => {
   const map = {}
@@ -500,7 +503,9 @@ const handleCancelUnshipped = async () => {
     })
     const d = res.data || {}
     _printDebugLogs(d)
-    ElMessage.success(`取消未发货成功，订单号: ${d.order_no || orderNo || '-'}，共取消 ${d.cancelled_rows || 0} 行未发货`)
+    const erpMsg = d.erp_message ? `，ERP: ${d.erp_message}` : ''
+    const rowIds = Array.isArray(d.target_row_ids) && d.target_row_ids.length ? `，行ID: ${d.target_row_ids.join(',')}` : ''
+    ElMessage.success(`取消未发货成功，订单号: ${d.order_no || orderNo || '-'}，共取消 ${d.cancelled_rows || 0} 行未发货${rowIds}${erpMsg}`)
     await fetchReviews()
   } finally {
     actionLoading.value = false
@@ -927,10 +932,30 @@ const previewImage = (src) => {
   previewImageUrl.value = src
 }
 
+const normalizeWechatIdentity = (value) => String(value || '').trim().toLowerCase()
+
 const isBotMsg = (msg) => {
   const name = (msg.sender_name || '').toLowerCase()
   return name.includes('bot') || name.includes('机器人') || name.includes('助手')
     || (msg.content_preview || '').startsWith('@') && (msg.content_preview || '').includes('订单已识别')
+}
+
+const isSelfMsg = (msg) => {
+  if (!msg || isBotMsg(msg)) return false
+  const currentWxid = normalizeWechatIdentity(currentWechatWxid.value)
+  if (!currentWxid) return false
+  const senderId = normalizeWechatIdentity(msg.sender_id)
+  if (!senderId) return false
+  return senderId === currentWxid || senderId.includes(currentWxid) || currentWxid.includes(senderId)
+}
+
+const loadWechatBoundConfig = async () => {
+  try {
+    const res = await getWechatGlobalConfig()
+    currentWechatWxid.value = String(res?.data?.selected_wxid || '').trim()
+  } catch {
+    currentWechatWxid.value = ''
+  }
 }
 
 const shouldShowTime = (idx) => {
@@ -1273,7 +1298,7 @@ const fetchProductOptions = async () => {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchCustomers(), fetchProductOptions()])
+  await Promise.all([fetchCustomers(), fetchProductOptions(), loadWechatBoundConfig()])
   await fetchReviews()
   _connectSSE()
 })
@@ -1281,6 +1306,7 @@ onMounted(async () => {
 onActivated(() => {
   // keep-alive 场景下重新激活时刷新客户列表（客户可能已新增/修改）
   fetchCustomers()
+  loadWechatBoundConfig()
 })
 
 onBeforeUnmount(() => {
@@ -1579,6 +1605,10 @@ onBeforeUnmount(() => {
   align-items: flex-end;
 }
 
+.chat-msg.is-self {
+  align-items: flex-end;
+}
+
 /* 发送者行 */
 .chat-sender-line {
   font-size: 12px;
@@ -1587,6 +1617,12 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.chat-sender-line.sender-self {
+  justify-content: flex-end;
+  align-self: flex-end;
+  text-align: right;
 }
 
 .chat-sender-via {
@@ -1619,6 +1655,11 @@ onBeforeUnmount(() => {
 
 .chat-bubble.bubble-bot {
   background: #C9E7FF;
+  color: #1a1a1a;
+}
+
+.chat-bubble.bubble-self {
+  background: #C9E7FD;
   color: #1a1a1a;
 }
 

@@ -218,7 +218,7 @@ function buildTable(page, payload) {
 
   // 表头行
   const header = [
-    { text: '款号', style: 'th' },
+    { text: '货号', style: 'th' },
     { text: '颜色', style: 'th' },
   ];
   for (const sz of payload.all_sizes) {

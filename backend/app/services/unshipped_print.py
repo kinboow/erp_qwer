@@ -126,7 +126,7 @@ def _group_items_to_product_blocks(items: list[dict[str, Any]]) -> list[dict[str
     from collections import OrderedDict
     grouped: OrderedDict[str, dict] = OrderedDict()
     for item in items:
-        pno = item.get("product_no") or "未知"
+        pno = item.get("display_product_no") or item.get("main_product_no") or item.get("product_no") or "未知"
         if pno not in grouped:
             grouped[pno] = {"product_no": pno, "size_set": set(), "color_rows": []}
         color = item.get("color") or "-"
@@ -242,13 +242,20 @@ def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str 
 
     rows = db.execute(
         text(
-            f"SELECT id, erp_row_id, order_no, order_date, customer_id, "
-            f"product_no, product_name, color, unit, "
-            f"order_qty, shipped_qty, unshipped_qty, unshipped_amount, "
-            f"stock_qty, price, remark, "
-            f"unshipped_sizes_json, order_sizes_json "
-            f"FROM erp_unshipped_report WHERE id IN ({placeholders}) "
-            f"ORDER BY order_no, product_no"
+            f"SELECT u.id, u.erp_row_id, u.order_no, u.order_date, u.customer_id, "
+            f"u.product_no, u.main_product_no, "
+            f"COALESCE(NULLIF(p.product_no,''), NULLIF(u.main_product_no,''), u.product_no) AS display_product_no, "
+            f"COALESCE(NULLIF(o.customer_name,''), NULLIF(c.customer_name,''), u.customer_id) AS customer_name, "
+            f"u.product_name, u.color, u.unit, "
+            f"u.order_qty, u.shipped_qty, u.unshipped_qty, u.unshipped_amount, "
+            f"u.stock_qty, u.price, u.remark, "
+            f"u.unshipped_sizes_json, u.order_sizes_json "
+            f"FROM erp_unshipped_report u "
+            f"LEFT JOIN erp_products p ON u.product_no = p.product_id "
+            f"LEFT JOIN erp_sales_orders o ON u.order_no = o.order_no "
+            f"LEFT JOIN downstream_customers c ON u.customer_id = c.erp_customer_id "
+            f"WHERE u.id IN ({placeholders}) "
+            f"ORDER BY u.order_no, u.product_no"
         ),
         params,
     ).mappings().all()
@@ -285,7 +292,7 @@ def generate_unshipped_pdf(db: Session, item_ids: list[int], customer_name: str 
         order_info = {
             "order_no": order_no,
             "order_date": str(order_extra.get("order_date") or first.get("order_date") or ""),
-            "customer_name": order_extra.get("customer_name") or customer_name or str(first.get("customer_id") or ""),
+            "customer_name": order_extra.get("customer_name") or customer_name or first.get("customer_name") or str(first.get("customer_id") or ""),
             "customer_tel": str(order_extra.get("customer_tel") or ""),
             "customer_addr": str(order_extra.get("customer_addr") or ""),
             "creator": str(order_extra.get("creator") or ""),

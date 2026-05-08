@@ -14,6 +14,7 @@ class UnshippedReportItem(BaseModel):
     customer_order_no: str | None = ""    # ERP: ddh
     brand: str | None = ""               # ERP: spbh
     product_no: str                       # ERP: huohao
+    main_product_no: str | None = ""      # ERP: bbreed_main
     product_name: str | None = ""         # ERP: spname
     color: str | None = ""               # ERP: color
     unit: str | None = ""                 # ERP: dw

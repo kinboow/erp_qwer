@@ -76,9 +76,9 @@
         <el-table-column label="解析内容" min-width="200" show-overflow-tooltip>
           <template #default="{ row }">
             <span v-if="row.parsed_order && row.parsed_order.items">
-              {{ row.parsed_order.items.length }} 款：
-              {{ row.parsed_order.items.slice(0, 3).map(i => i.product_no || '').filter(Boolean).join('、') }}
-              <span v-if="row.parsed_order.items.length > 3">…</span>
+              {{ [...new Set(row.parsed_order.items.map(i => i.product_no || '').filter(Boolean))].length }} 款：
+              {{ [...new Set(row.parsed_order.items.map(i => i.product_no || '').filter(Boolean))].slice(0, 3).join('、') }}
+              <span v-if="[...new Set(row.parsed_order.items.map(i => i.product_no || '').filter(Boolean))].length > 3">…</span>
             </span>
             <span v-else class="text-muted">无解析结果</span>
           </template>

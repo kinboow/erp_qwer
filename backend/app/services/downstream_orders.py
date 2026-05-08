@@ -1786,12 +1786,15 @@ async def cancel_unshipped_order_review(db: Session, review_id: int, customer_id
     end_date = datetime.now().strftime("%Y-%m-%d")
     _log(f"查询客户未发货报表，目标订单={target_order_no}")
     unshipped_rows = await erp_bridge.query_unshipped(erp_customer_id, product_nos=None, dates=begin_date, datee=end_date)
+    _log(f"未发货报表返回 {len(unshipped_rows)} 条，开始按订单号过滤")
     target_rows = [item for item in unshipped_rows if str(item.get("order_no") or "").strip() == target_order_no]
     if not target_rows:
         raise ValueError(f"订单 {target_order_no} 当前没有可取消的未发货明细")
 
-    _log(f"命中 {len(target_rows)} 条未发货行，准备取消")
-    cancel_result = await erp_bridge.cancel_unshipped([str(item.get("id") or "") for item in target_rows if str(item.get("id") or "").strip()])
+    target_row_ids = [str(item.get("id") or "").strip() for item in target_rows if str(item.get("id") or "").strip()]
+    _log(f"命中 {len(target_rows)} 条未发货行，行ID={target_row_ids}")
+    cancel_result = await erp_bridge.cancel_unshipped(target_row_ids)
+    _log(f"ERP 取消待发货接口返回: message={cancel_result.get('message') or '-'} cancelled_ids={cancel_result.get('cancelled_ids') or []}")
     pnos = sorted({str(item.get("product_no") or "").strip() for item in target_rows if str(item.get("product_no") or "").strip()})
 
     db.execute(
@@ -1834,6 +1837,8 @@ async def cancel_unshipped_order_review(db: Session, review_id: int, customer_id
         "review_status": "replaced",
         "order_no": target_order_no,
         "cancelled_rows": len(target_rows),
+        "target_row_ids": target_row_ids,
+        "erp_message": cancel_result.get("message") or "",
         "_debug_logs": _logs,
     }
 

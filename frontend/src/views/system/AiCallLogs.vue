@@ -113,6 +113,7 @@
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { getAiCallLogs } from '@/api/aiConfig'
+import { buildBackendWsUrl } from '@/utils/backendUrl'
 
 const loading = ref(false)
 const logs = ref([])
@@ -172,8 +173,7 @@ let reconnectTimer = null
 
 function connectNotifyWs() {
   if (notifyWs && notifyWs.readyState <= 1) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  notifyWs = new WebSocket(`${proto}://${location.host}/ws/notify`)
+  notifyWs = new WebSocket(buildBackendWsUrl('/ws/notify'))
   notifyWs.onmessage = (evt) => {
     try {
       const msg = JSON.parse(evt.data)

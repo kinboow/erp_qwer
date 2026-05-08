@@ -94,16 +94,19 @@ def api_list_unshipped(
         "total_unshipped_amount": agg["total_unshipped_amount"],
     }
 
-    # 数据 — LEFT JOIN 销售订单表获取客户名称
+    # 数据 — LEFT JOIN 销售订单表 + 客户表获取客户名称；货号优先从产品表取 bbreed/name_pk
     rows = db.execute(
         text(
             f"SELECT u.id, u.order_no, u.order_date, u.customer_id, "
-            f"COALESCE(o.customer_name, u.customer_id) AS customer_name, "
-            f"u.product_no, u.color, "
+            f"COALESCE(NULLIF(o.customer_name,''), NULLIF(c.customer_name,''), u.customer_id) AS customer_name, "
+            f"COALESCE(NULLIF(p.product_no,''), NULLIF(u.main_product_no,''), u.product_no) AS product_no, "
+            f"u.color, "
             f"u.order_qty, u.unshipped_qty, u.remark, "
             f"u.unshipped_sizes_json "
             f"FROM erp_unshipped_report u "
             f"LEFT JOIN erp_sales_orders o ON u.order_no = o.order_no "
+            f"LEFT JOIN downstream_customers c ON u.customer_id = c.erp_customer_id "
+            f"LEFT JOIN erp_products p ON u.product_no = p.product_id "
             f"WHERE {where_sql} "
             f"ORDER BY u.order_date DESC, u.order_no ASC, u.product_no ASC "
             f"LIMIT :limit OFFSET :offset"

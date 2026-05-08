@@ -274,6 +274,7 @@
 import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { Search, Refresh } from '@element-plus/icons-vue'
 import request from '@/utils/request'
+import { buildBackendWsUrl } from '@/utils/backendUrl'
 import AiCallLogs from './AiCallLogs.vue'
 
 const activeTab = ref('system')
@@ -426,8 +427,7 @@ let reconnectTimer = null
 
 function connectNotifyWs() {
   if (notifyWs && notifyWs.readyState <= 1) return
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-  notifyWs = new WebSocket(`${proto}://${location.host}/ws/notify`)
+  notifyWs = new WebSocket(buildBackendWsUrl('/ws/notify'))
   notifyWs.onmessage = (evt) => {
     try {
       const msg = JSON.parse(evt.data)

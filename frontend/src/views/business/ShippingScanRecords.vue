@@ -21,8 +21,7 @@
           <el-button @click="resetFilters">重置</el-button>
         </div>
         <div class="toolbar-right">
-          <el-button type="warning" plain @click="goToReviewPage">待审核页面</el-button>
-          <el-button @click="fetchStats">刷新统计</el-button>
+          <el-button type="primary" @click="goToReviewPage">待审核页面</el-button>
         </div>
       </div>
 
@@ -176,7 +175,7 @@
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElImageViewer } from 'element-plus'
 import { getScanRecords, getScanStats } from '@/api/shippingScans'
@@ -222,6 +221,9 @@ const fetchData = async () => {
     const d = res.data || {}
     tableData.value = d.list || []
     pagination.total = d.total || 0
+  } catch {
+    tableData.value = []
+    pagination.total = 0
   } finally {
     loading.value = false
   }
@@ -231,7 +233,9 @@ const fetchStats = async () => {
   try {
     const res = await getScanStats()
     stats.value = res.data || {}
-  } catch (e) { /* ignore */ }
+  } catch {
+    stats.value = {}
+  }
 }
 
 const goToReviewPage = () => {
@@ -280,9 +284,38 @@ const goToOrder = (orderNo) => {
   if (orderNo) router.push(`/sales/${encodeURIComponent(orderNo)}`)
 }
 
+// ---------------------------------------------------------------------------
+// SSE 实时推送：发货扫码记录变动时自动刷新列表
+// ---------------------------------------------------------------------------
+let _eventSource = null
+
+const _connectSSE = () => {
+  _disconnectSSE()
+  _eventSource = new EventSource('/api/shipping/scan-records/stream')
+  _eventSource.onmessage = async () => {
+    try {
+      await fetchData()
+      await fetchStats()
+    } catch {}
+  }
+  _eventSource.onerror = () => {
+    _disconnectSSE()
+    setTimeout(_connectSSE, 5000)
+  }
+}
+
+const _disconnectSSE = () => {
+  if (_eventSource) { _eventSource.close(); _eventSource = null }
+}
+
 onMounted(() => {
   fetchData()
   fetchStats()
+  _connectSSE()
+})
+
+onBeforeUnmount(() => {
+  _disconnectSSE()
 })
 </script>
 

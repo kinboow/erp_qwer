@@ -1,9 +1,11 @@
 """发货单扫码识别结果列表 API"""
+import asyncio
 import json
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -174,3 +176,25 @@ def void_scan_record_api(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/scan-records/stream", summary="SSE 实时推送发货扫码记录变动")
+async def scan_records_stream(request: Request):
+    """Server-Sent Events 端点，发货扫码记录变动时实时推送通知"""
+    from app.services.shipping_scan_events import subscribe
+
+    async def event_generator():
+        try:
+            async for payload in subscribe():
+                if await request.is_disconnected():
+                    break
+                data = json.dumps(payload, ensure_ascii=False)
+                yield f"data: {data}\n\n"
+        except asyncio.CancelledError:
+            pass
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )

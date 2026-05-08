@@ -1,5 +1,6 @@
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
+import { buildBackendWsUrl } from '@/utils/backendUrl'
 import request from '@/utils/request'
 
 /**
@@ -42,8 +43,7 @@ export function useSyncStatus(module, onSyncComplete) {
   // WebSocket 连接 — 监听 sync_complete 事件
   function connectWs() {
     if (notifyWs && notifyWs.readyState <= 1) return
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    notifyWs = new WebSocket(`${proto}://${location.host}/ws/notify`)
+    notifyWs = new WebSocket(buildBackendWsUrl('/ws/notify'))
     notifyWs.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data)

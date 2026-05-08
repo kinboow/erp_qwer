@@ -268,6 +268,60 @@ def _append_schedule_log(lines: list[str], message: str) -> None:
     lines.append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}")
 
 
+def _sync_unshipped_report_before_print(log_lines: list[str]) -> dict[str, Any]:
+    from app.services.erp_bridge import _erp_client
+    from app.services.erp_sync import _sync_module, is_module_syncing, sync_unshipped_report
+
+    if _erp_client is None:
+        raise ValueError("ERP 客户端未初始化，无法在打印前同步未发货报表")
+
+    sync_days_back = 30
+    wait_seconds = 0
+    wait_timeout_seconds = 600
+    wait_step_seconds = 2
+    waiting_logged = False
+
+    while True:
+        if is_module_syncing("unshipped"):
+            if not waiting_logged:
+                _append_schedule_log(log_lines, "检测到未发货报表正在同步，等待当前同步完成后再执行打印前预同步")
+                waiting_logged = True
+            time.sleep(wait_step_seconds)
+            wait_seconds += wait_step_seconds
+            if wait_seconds >= wait_timeout_seconds:
+                raise TimeoutError("等待未发货报表同步完成超时，无法继续执行打印任务")
+            continue
+
+        _append_schedule_log(log_lines, f"开始打印前预同步未发货报表（窗口天数={sync_days_back}）")
+        started_at = time.time()
+        sync_result = asyncio.run(
+            _sync_module(
+                "unshipped",
+                sync_unshipped_report(_erp_client, days_back=sync_days_back),
+                trigger="scheduled_preprint",
+            )
+        )
+        if sync_result is None:
+            if not waiting_logged:
+                _append_schedule_log(log_lines, "打印前预同步遇到并发同步占用，等待对方完成后重试")
+                waiting_logged = True
+            time.sleep(wait_step_seconds)
+            wait_seconds += wait_step_seconds
+            if wait_seconds >= wait_timeout_seconds:
+                raise TimeoutError("未发货报表预同步并发等待超时，无法继续执行打印任务")
+            continue
+
+        elapsed = round(time.time() - started_at, 2)
+        _append_schedule_log(
+            log_lines,
+            "打印前预同步完成："
+            f"发现 {sync_result.get('total_found', 0)} 条，"
+            f"成功 {sync_result.get('synced', 0)} 条，"
+            f"失败 {sync_result.get('failed', 0)} 条，耗时 {elapsed}s",
+        )
+        return sync_result
+
+
 def _json_text(data: Any) -> str:
     try:
         return json.dumps(data, ensure_ascii=False)
@@ -341,10 +395,12 @@ def queue_yesterday_unshipped_orders_for_print(db: Session, target_date: str) ->
 
     rows = db.execute(
         text(
-            "SELECT u.id, u.order_no, COALESCE(o.customer_name, '') AS customer_name "
+            "SELECT u.id, u.order_no, "
+            "COALESCE(NULLIF(o.customer_name,''), NULLIF(c.customer_name,''), u.customer_id) AS customer_name "
             "FROM erp_unshipped_report u "
             "LEFT JOIN erp_sales_orders o ON u.order_no = o.order_no "
-            "WHERE LEFT(u.order_date, 10) = :target_date "
+            "LEFT JOIN downstream_customers c ON u.customer_id = c.erp_customer_id "
+            "WHERE LEFT(u.order_date, 10) <= :target_date "
             "  AND COALESCE(u.unshipped_qty, 0) > 0 "
             "ORDER BY u.order_no ASC, u.product_no ASC, u.id ASC"
         ),
@@ -352,7 +408,7 @@ def queue_yesterday_unshipped_orders_for_print(db: Session, target_date: str) ->
     ).mappings().all()
 
     if not rows:
-        logger.info("[定时任务] %s 无符合条件的昨日未发货订单", target_date)
+        logger.info("[定时任务] %s 无符合条件的截至昨日仍未发货订单", target_date)
         return {"target_date": target_date, "order_count": 0, "queued_count": 0, "orders": []}
 
     from collections import OrderedDict
@@ -381,7 +437,7 @@ def queue_yesterday_unshipped_orders_for_print(db: Session, target_date: str) ->
         enqueue_existing_pdf(db, order_no, doc_type="unshipped", pdf_object=pdf_object)
         queued_orders.append(order_no)
 
-    logger.info("[定时任务] %s 昨日未发货订单已入打印队列: %s", target_date, queued_orders)
+    logger.info("[定时任务] %s 截至昨日仍未发货订单已入打印队列: %s", target_date, queued_orders)
     return {
         "target_date": target_date,
         "order_count": len(order_groups),
@@ -955,10 +1011,11 @@ def _run_daily_unshipped_schedule_once(trigger_type: str = "scheduled", mark_run
             result_json="{}",
         )
         target_client, target_printer = _validate_remote_schedule_target(cfg)
-        _append_schedule_log(log_lines, f"开始执行昨天下单未发货自动打印 trigger={trigger_type}")
-        _append_schedule_log(log_lines, f"统计日期范围：{target_date} 00:00:00 - 24:00:00")
+        _append_schedule_log(log_lines, f"开始执行截至昨天仍未发货自动打印 trigger={trigger_type}")
+        _append_schedule_log(log_lines, f"统计条件：下单日期 <= {target_date}，且当前未发货数量 > 0")
         _append_schedule_log(log_lines, f"远程打印客户端：{target_client}")
         _append_schedule_log(log_lines, f"远程打印机：{target_printer or '跟随客户端默认打印机'}")
+        pre_sync_result = _sync_unshipped_report_before_print(log_lines)
         client_status = get_client_status_by_hostname(target_client)
         if not client_status.get("online"):
             _append_schedule_log(log_lines, f"远程打印客户端当前离线，任务会先入队等待客户端上线：{target_client}")
@@ -979,6 +1036,7 @@ def _run_daily_unshipped_schedule_once(trigger_type: str = "scheduled", mark_run
             "target_date": target_date,
             "schedule_time": schedule_time,
             "trigger_type": trigger_type,
+            "pre_sync_unshipped": pre_sync_result,
             **result,
         }
         _update_scheduled_task_log(
@@ -1053,9 +1111,9 @@ async def _check_and_run_due_schedule(*, on_startup: bool) -> None:
     if last_run_date != today:
         try:
             result = await run_in_threadpool(lambda: trigger_unshipped_schedule_run(trigger_type=trigger_type, mark_run_date=True))
-            logger.info("[定时任务] 昨日未发货自动打印完成: %s", result)
+            logger.info("[定时任务] 截至昨天仍未发货自动打印完成: %s", result)
         except Exception as exc:
-            logger.warning("[定时任务] 昨日未发货自动打印失败: %s", exc, exc_info=True)
+            logger.warning("[定时任务] 截至昨天仍未发货自动打印失败: %s", exc, exc_info=True)
     if notify_last_run_date != today:
         try:
             notify_result = await _run_third_day_unshipped_notify_once(trigger_type=trigger_type, mark_run_date=True)
@@ -1071,10 +1129,10 @@ async def _scheduled_unshipped_loop() -> None:
             await _check_and_run_due_schedule(on_startup=False)
             await asyncio.sleep(30)
         except asyncio.CancelledError:
-            logger.info("[定时任务] 昨日未发货自动打印循环已停止")
+            logger.info("[定时任务] 截至昨天仍未发货自动打印循环已停止")
             raise
         except Exception as exc:
-            logger.warning("[定时任务] 昨日未发货自动打印循环异常: %s", exc, exc_info=True)
+            logger.warning("[定时任务] 截至昨天仍未发货自动打印循环异常: %s", exc, exc_info=True)
             await asyncio.sleep(30)
 
 
@@ -1083,7 +1141,7 @@ def start_unshipped_schedule_task() -> None:
     if _scheduled_unshipped_task is not None and not _scheduled_unshipped_task.done():
         return
     _scheduled_unshipped_task = asyncio.create_task(_scheduled_unshipped_loop())
-    logger.info("[定时任务] 昨日未发货自动打印任务已启动")
+    logger.info("[定时任务] 截至昨天仍未发货自动打印任务已启动")
 
 
 def stop_unshipped_schedule_task() -> None:

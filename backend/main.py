@@ -131,6 +131,13 @@ async def lifespan(application: FastAPI):
     from app.services.printer_service import start_unshipped_schedule_task
     start_unshipped_schedule_task()
 
+    from app.services.shipping_scan_handler import recover_stuck_scan_records
+    try:
+        await recover_stuck_scan_records()
+        logger.info("[Startup] 发货扫码卡住记录恢复完成")
+    except Exception as e:
+        logger.warning("[Startup] 发货扫码卡住记录恢复失败: %s", e)
+
     from app.services.at_order_handler import rescan_unrecognized_messages
     asyncio.create_task(rescan_unrecognized_messages())
     logger.info("[Startup] 未识别消息补扫任务已启动")
