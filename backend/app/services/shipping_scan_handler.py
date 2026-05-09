@@ -482,7 +482,7 @@ async def recover_stuck_scan_records() -> None:
 
         stuck_rows = db.execute(
             text(
-                "SELECT id, order_no, paper_id, ai_parsed_json, scan_status "
+                "SELECT id, order_no, paper_id, ai_parsed_json, scan_status, notification_sent "
                 "FROM shipping_scan_records "
                 "WHERE scan_status IN ('pending', 'parsing') "
                 "ORDER BY id ASC"
@@ -520,6 +520,14 @@ async def recover_stuck_scan_records() -> None:
                     shipment_no=shipment_no,
                     error_message="",
                 )
+                await _notify_recovered_scan_success(
+                    db,
+                    record_id=record_id,
+                    order_no=order_no,
+                    shipment_no=shipment_no,
+                    ai_parsed=ai_parsed,
+                    notification_sent=row.get("notification_sent"),
+                )
                 logger.info("[启动恢复] record=%d 本地找到发货单 %s → success", record_id, shipment_no)
                 continue
 
@@ -538,6 +546,14 @@ async def recover_stuck_scan_records() -> None:
                         shipment_no=shipment_no,
                         error_message="",
                     )
+                    await _notify_recovered_scan_success(
+                        db,
+                        record_id=record_id,
+                        order_no=order_no,
+                        shipment_no=shipment_no,
+                        ai_parsed=ai_parsed,
+                        notification_sent=row.get("notification_sent"),
+                    )
                     logger.info("[启动恢复] record=%d ERP API 找到发货单 %s → success", record_id, shipment_no)
                     continue
 
@@ -553,6 +569,38 @@ async def recover_stuck_scan_records() -> None:
         logger.exception("[启动恢复] 发货扫码记录恢复异常: %s", exc)
     finally:
         db.close()
+
+
+async def _notify_recovered_scan_success(
+    db: Session,
+    record_id: int,
+    order_no: str,
+    shipment_no: str,
+    ai_parsed: str,
+    notification_sent: Any = 0,
+) -> None:
+    if not shipment_no or int(notification_sent or 0) == 1:
+        return
+
+    shipping_status = None
+    try:
+        parsed = json.loads(ai_parsed or "{}")
+        parsed_items = (parsed or {}).get("items") or []
+        if order_no and parsed_items:
+            order_detail = await get_erp_order_detail(order_no)
+            shipping_status = calc_shipping_status(order_detail, parsed_items)
+    except Exception as exc:
+        logger.warning("[启动恢复] record=%d 计算发货状态失败，改为发送简版成功通知: %s", record_id, exc)
+
+    try:
+        if shipping_status:
+            await send_notification_to_groups(db, order_no, shipment_no, True, shipping_status)
+        else:
+            from app.services.notify_group import send_to_notification_groups
+            await send_to_notification_groups(db, f"📦 订单 {order_no or '-'} 发货成功！\n发货单号：{shipment_no}")
+        update_scan_record(db, record_id, notification_sent=1)
+    except Exception as exc:
+        logger.warning("[启动恢复] record=%d 补发通知群成功消息失败: %s", record_id, exc)
 
 
 def _find_shipment_in_local_db(db: Session, sales_order_no: str) -> str | None:

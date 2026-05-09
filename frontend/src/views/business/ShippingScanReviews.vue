@@ -1,16 +1,22 @@
 <template>
-  <div class="shipping-review-page">
-    <div class="lark-page-header">
-      <div class="header-title">发货单审核</div>
-      <div class="header-desc">审核触发 AI 码下文字兜底的发货单识别记录，确认后再下发货单</div>
-    </div>
-
-    <div class="review-layout">
-      <div class="review-list-panel">
-        <div class="panel-toolbar">
-          <div class="toolbar-left">
-            <el-input v-model="filters.order_no" placeholder="搜索订单号" clearable style="width: 220px" @keyup.enter="handleSearch" />
-            <el-select v-model="filters.scan_status" placeholder="状态" style="width: 140px" @change="handleSearch">
+  <div class="review-page">
+    <div class="review-main">
+      <div class="detail-panel">
+        <div class="detail-header">
+          <div class="detail-header-left">
+            <el-button :disabled="!hasPrev" @click="goPrev" size="default">&laquo; 上一条</el-button>
+            <span class="nav-index">{{ currentAbsoluteIndex }} / {{ pagination.total }}</span>
+            <el-button :disabled="!hasNext" @click="goNext" size="default">下一条 &raquo;</el-button>
+            <el-divider direction="vertical" />
+            <span class="detail-room">{{ selectedRecord?.order_no || '暂无记录' }}</span>
+            <span class="detail-sender">/ 纸张ID {{ selectedRecord?.paper_id || '-' }}</span>
+            <el-tag v-if="selectedRecord" size="small" :type="statusTagType(selectedRecord.scan_status)" style="margin-left:8px">{{ statusText(selectedRecord.scan_status) }}</el-tag>
+            <el-tag v-if="selectedRecord" size="small" type="info" style="margin-left:4px">{{ sourceText(selectedRecord.code_source) }}</el-tag>
+            <span v-if="selectedRecord?.shipment_no" class="detail-uid">{{ selectedRecord.shipment_no }}</span>
+          </div>
+          <div class="detail-header-right">
+            <el-input v-model="filters.order_no" placeholder="搜索订单号" clearable style="width: 180px" @clear="handleSearch" @keyup.enter="handleSearch" />
+            <el-select v-model="filters.scan_status" size="default" style="width: 130px" @change="handleSearch">
               <el-option label="待审核" value="review_pending" />
               <el-option label="已作废" value="voided" />
               <el-option label="已成功" value="success" />
@@ -20,150 +26,101 @@
           </div>
         </div>
 
-        <el-table
-          :data="tableData"
-          v-loading="loading"
-          height="100%"
-          highlight-current-row
-          @current-change="handleCurrentChange"
-        >
-          <el-table-column label="订单号" prop="order_no" min-width="140" show-overflow-tooltip />
-          <el-table-column label="纸张ID" prop="paper_id" min-width="170" show-overflow-tooltip />
-          <el-table-column label="状态" width="100" align="center">
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.scan_status)" size="small">{{ statusText(row.scan_status) }}</el-tag>
-            </template>
-          </el-table-column>
-        </el-table>
-
-        <div class="list-footer">
-          <el-pagination
-            v-model:current-page="pagination.page"
-            v-model:page-size="pagination.pageSize"
-            :total="pagination.total"
-            :page-sizes="[20, 50, 100]"
-            layout="total, sizes, prev, pager, next"
-            @current-change="fetchData"
-            @size-change="handleSearch"
-          />
-        </div>
-      </div>
-
-      <div class="review-detail-panel">
         <template v-if="selectedRecord">
-          <div class="detail-header-row">
-            <div>
-              <div class="detail-title">{{ selectedRecord.order_no || '未识别订单号' }}</div>
-              <div class="detail-subtitle">
-                <el-tag :type="statusTagType(selectedRecord.scan_status)" size="small">{{ statusText(selectedRecord.scan_status) }}</el-tag>
-                <el-tag size="small" effect="plain" style="margin-left:8px">纸张ID：{{ selectedRecord.paper_id || '-' }}</el-tag>
+
+          <div class="detail-body">
+            <div class="compare-grid">
+              <div class="compare-left">
+                <el-tabs v-model="leftTab" class="left-tabs">
+                  <el-tab-pane label="信息来源" name="source">
+                    <div class="source-panel">
+                      <div v-if="sourceImageUrl" class="source-img-viewport">
+                        <img :src="sourceImageUrl" class="source-preview-img" @click="previewImage(sourceImageUrl)" />
+                      </div>
+                      <el-empty v-else description="暂无来源图片" :image-size="48" />
+                    </div>
+                  </el-tab-pane>
+                  <el-tab-pane label="识别辅助" name="aux">
+                    <div class="uncertain-panel">
+                      <template v-if="hasAuxInfo">
+                        <div class="aux-grid" v-if="selectedRecord.fallback_ocr">
+                          <div class="summary-item" v-if="selectedRecord.fallback_ocr.order_no">
+                            <span class="summary-label">识别订单号</span>
+                            <strong class="summary-value">{{ selectedRecord.fallback_ocr.order_no }}</strong>
+                          </div>
+                          <div class="summary-item" v-if="selectedRecord.fallback_ocr.paper_id">
+                            <span class="summary-label">识别纸张ID</span>
+                            <strong class="summary-value">{{ selectedRecord.fallback_ocr.paper_id }}</strong>
+                          </div>
+                          <div class="summary-item" v-if="selectedRecord.fallback_ocr.confidence !== undefined && selectedRecord.fallback_ocr.confidence !== null">
+                            <span class="summary-label">置信度</span>
+                            <strong class="summary-value">{{ selectedRecord.fallback_ocr.confidence }}</strong>
+                          </div>
+                        </div>
+                        <pre v-if="selectedRecord.fallback_ocr?.combined_text" class="json-block">{{ selectedRecord.fallback_ocr.combined_text }}</pre>
+                        <pre v-if="selectedRecord.qr_content" class="json-block">{{ selectedRecord.qr_content }}</pre>
+                        <div v-if="selectedRecord.error_message" class="uncertain-item">{{ selectedRecord.error_message }}</div>
+                      </template>
+                      <el-empty v-else description="暂无辅助信息" :image-size="48" />
+                    </div>
+                  </el-tab-pane>
+                </el-tabs>
+              </div>
+
+              <el-image-viewer
+                v-if="previewUrl"
+                :url-list="[previewUrl]"
+                :initial-index="0"
+                @close="previewUrl = ''"
+                teleported
+              />
+
+              <div class="compare-right">
+                <div class="panel-label">解析结果（下发货内容）</div>
+                <div class="order-info-bar">
+                  <span>订单号：{{ selectedRecord.order_no || '-' }}</span>
+                  <span>纸张ID：{{ selectedRecord.paper_id || '-' }}</span>
+                  <span>识别来源：{{ sourceText(selectedRecord.code_source) }}</span>
+                  <span>扫码时间：{{ formatDate(selectedRecord.created_at) }}</span>
+                </div>
+                <div class="edit-form-area">
+                  <el-table v-if="parsedTableRows.length" :data="parsedTableRows" border size="small" class="order-table">
+                    <el-table-column type="index" label="序" width="40" align="center" />
+                    <el-table-column label="款号" prop="product_no" min-width="90" align="center" header-align="center" />
+                    <el-table-column label="颜色" prop="color" min-width="80" align="center" header-align="center" />
+                    <el-table-column v-for="size in parsedSizeColumns" :key="size" :label="size" width="58" align="center" class-name="size-col">
+                      <template #default="{ row }">
+                        {{ row.sizeMap[size] || '' }}
+                      </template>
+                    </el-table-column>
+                    <el-table-column label="合计" width="54" align="center" class-name="total-col">
+                      <template #default="{ row }">
+                        <span class="cell-total">{{ row.total }}</span>
+                      </template>
+                    </el-table-column>
+                  </el-table>
+                  <el-empty v-else description="暂无解析明细" :image-size="48" />
+                  <pre v-if="selectedRecord.ai_parsed?.remark" class="json-block parsed-remark">{{ selectedRecord.ai_parsed.remark }}</pre>
+                </div>
               </div>
             </div>
           </div>
 
-          <div class="detail-grid">
-            <div class="detail-block">
-              <div class="block-title">基础信息</div>
-              <div class="summary-grid">
-                <div class="summary-item">
-                  <span class="summary-label">订单号</span>
-                  <strong class="summary-value">{{ selectedRecord.order_no || '-' }}</strong>
-                </div>
-                <div class="summary-item">
-                  <span class="summary-label">纸张ID</span>
-                  <strong class="summary-value">{{ selectedRecord.paper_id || '-' }}</strong>
-                </div>
-                <div class="summary-item">
-                  <span class="summary-label">审核状态</span>
-                  <strong class="summary-value">{{ statusText(selectedRecord.scan_status) }}</strong>
-                </div>
-                <div class="summary-item">
-                  <span class="summary-label">识别来源</span>
-                  <strong class="summary-value">{{ sourceText(selectedRecord.code_source) }}</strong>
-                </div>
-                <div class="summary-item">
-                  <span class="summary-label">扫码时间</span>
-                  <strong class="summary-value">{{ formatDate(selectedRecord.created_at) }}</strong>
-                </div>
-              </div>
-              <div class="info-row" v-if="selectedRecord.error_message"><span>提示</span><strong class="danger-text">{{ selectedRecord.error_message }}</strong></div>
+          <div class="detail-footer">
+            <div class="footer-form">
+              <el-input v-model="reviewNote" placeholder="审核备注（选填）" style="flex:1" />
             </div>
-
-            <div class="detail-block">
-              <div class="block-title">扫码图片</div>
-              <div class="image-wrap" v-if="selectedRecord.msg_log_id && selectedRecord.image_oss_key">
-                <img :src="mediaUrl(selectedRecord.msg_log_id)" class="detail-img" @click="previewImage(selectedRecord)" />
-              </div>
-              <el-empty v-else description="无图片" :image-size="44" />
-            </div>
-
-            <div class="detail-block" v-if="selectedRecord.fallback_ocr">
-              <div class="block-title">码下文字兜底识别</div>
-              <div class="summary-grid summary-grid-compact">
-                <div class="summary-item" v-if="selectedRecord.fallback_ocr.order_no">
-                  <span class="summary-label">识别订单号</span>
-                  <strong class="summary-value">{{ selectedRecord.fallback_ocr.order_no }}</strong>
-                </div>
-                <div class="summary-item" v-if="selectedRecord.fallback_ocr.paper_id">
-                  <span class="summary-label">识别纸张ID</span>
-                  <strong class="summary-value">{{ selectedRecord.fallback_ocr.paper_id }}</strong>
-                </div>
-                <div class="summary-item" v-if="selectedRecord.fallback_ocr.confidence !== undefined && selectedRecord.fallback_ocr.confidence !== null">
-                  <span class="summary-label">置信度</span>
-                  <strong class="summary-value">{{ selectedRecord.fallback_ocr.confidence }}</strong>
-                </div>
-              </div>
-              <pre v-if="selectedRecord.fallback_ocr.combined_text" class="json-block">{{ selectedRecord.fallback_ocr.combined_text }}</pre>
-            </div>
-
-            <div class="detail-block" v-if="selectedRecord.ai_parsed">
-              <div class="block-title">表格 AI 解析结果</div>
-              <el-table v-if="parsedTableRows.length" :data="parsedTableRows" border size="small" class="parsed-table">
-                <el-table-column type="index" label="序" width="48" align="center" />
-                <el-table-column label="款号" prop="product_no" min-width="110" align="center" header-align="center" />
-                <el-table-column label="颜色" prop="color" min-width="100" align="center" header-align="center" />
-                <el-table-column v-for="size in parsedSizeColumns" :key="size" :label="size" width="68" align="center" header-align="center">
-                  <template #default="{ row }">
-                    {{ row.sizeMap[size] || '' }}
-                  </template>
-                </el-table-column>
-                <el-table-column label="合计" width="72" align="center" header-align="center">
-                  <template #default="{ row }">
-                    <span class="table-total">{{ row.total }}</span>
-                  </template>
-                </el-table-column>
-              </el-table>
-              <el-empty v-else description="暂无解析明细" :image-size="44" />
-              <pre v-if="selectedRecord.ai_parsed.remark" class="json-block">{{ selectedRecord.ai_parsed.remark }}</pre>
-            </div>
-
-            <div class="detail-block" v-if="selectedRecord.qr_content">
-              <div class="block-title">码内容</div>
-              <pre class="json-block">{{ selectedRecord.qr_content }}</pre>
-            </div>
-          </div>
-
-          <div class="review-actions">
-            <el-input v-model="reviewNote" placeholder="审核备注（选填）" clearable />
-            <div class="action-buttons" v-if="selectedRecord.scan_status === 'review_pending'">
-              <el-button type="primary" :loading="actionLoading" @click="handleApprove">审核通过并下发货单</el-button>
-              <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">作废</el-button>
+            <div class="footer-actions">
+              <template v-if="selectedRecord.scan_status === 'review_pending'">
+                <el-button type="primary" :loading="actionLoading" @click="handleApprove">审核通过并下发货单</el-button>
+                <el-button type="danger" plain :loading="actionLoading" @click="handleVoid">作废</el-button>
+              </template>
             </div>
           </div>
         </template>
-        <div v-else class="empty-detail">
-          <el-empty description="请选择一条发货单识别记录" />
-        </div>
+        <el-empty v-else :description="loading ? '加载中...' : '暂无待审核数据'" class="detail-empty" />
       </div>
     </div>
-
-    <el-image-viewer
-      v-if="previewUrl"
-      :url-list="[previewUrl]"
-      :initial-index="0"
-      @close="previewUrl = ''"
-      teleported
-    />
   </div>
 </template>
 
@@ -178,6 +135,7 @@ const tableData = ref([])
 const selectedRecord = ref(null)
 const reviewNote = ref('')
 const previewUrl = ref('')
+const leftTab = ref('source')
 
 const filters = reactive({
   order_no: '',
@@ -250,51 +208,125 @@ const parsedSizeColumns = computed(() => {
   })
 })
 
+const currentIndex = computed(() => {
+  if (!selectedRecord.value) return -1
+  return tableData.value.findIndex(item => item.id === selectedRecord.value.id)
+})
+
+const currentAbsoluteIndex = computed(() => {
+  if (currentIndex.value < 0) return 0
+  return (pagination.page - 1) * pagination.pageSize + currentIndex.value + 1
+})
+
+const hasPrev = computed(() => {
+  if (!selectedRecord.value) return false
+  return currentIndex.value > 0 || pagination.page > 1
+})
+
+const hasNext = computed(() => {
+  if (!selectedRecord.value || currentIndex.value < 0) return false
+  if (currentIndex.value < tableData.value.length - 1) return true
+  return pagination.page * pagination.pageSize < pagination.total
+})
+
+const sourceImageUrl = computed(() => {
+  const row = selectedRecord.value
+  if (!row?.msg_log_id || !row?.image_oss_key) return ''
+  return mediaUrl(row.msg_log_id)
+})
+
+const hasAuxInfo = computed(() => {
+  const row = selectedRecord.value
+  return !!(row?.fallback_ocr || row?.qr_content || row?.error_message)
+})
+
 const handleCurrentChange = (row) => {
   selectedRecord.value = row || null
   reviewNote.value = row?.review_note || ''
 }
 
-const fetchData = async () => {
+const fetchData = async (options = {}) => {
+  const targetPage = options.page || pagination.page
   loading.value = true
   try {
     const res = await getScanRecords({
-      page: pagination.page,
+      page: targetPage,
       pageSize: pagination.pageSize,
       scan_status: filters.scan_status || undefined,
       order_no: filters.order_no || undefined
     })
     const data = res.data || {}
-    tableData.value = data.list || []
+    const rows = data.list || []
+    tableData.value = rows
+    pagination.page = targetPage
     pagination.total = data.total || 0
-    if (tableData.value.length === 0) {
+
+    if (!rows.length) {
+      if (targetPage > 1 && pagination.total > 0) {
+        return await fetchData({ ...options, page: targetPage - 1, selectStrategy: 'last' })
+      }
       selectedRecord.value = null
       reviewNote.value = ''
-      return
+      return null
     }
-    const currentId = selectedRecord.value?.id
-    selectedRecord.value = tableData.value.find(item => item.id === currentId) || tableData.value[0]
-    reviewNote.value = selectedRecord.value?.review_note || ''
+
+    let nextRow = null
+    if (options.selectId) {
+      nextRow = rows.find(item => item.id === options.selectId) || null
+    }
+    if (!nextRow && options.selectStrategy === 'last') {
+      nextRow = rows[rows.length - 1]
+    }
+    if (!nextRow && options.selectStrategy === 'first') {
+      nextRow = rows[0]
+    }
+    if (!nextRow) {
+      const currentId = selectedRecord.value?.id
+      nextRow = rows.find(item => item.id === currentId) || rows[0]
+    }
+
+    handleCurrentChange(nextRow)
+    return nextRow
   } finally {
     loading.value = false
   }
 }
 
-const handleSearch = () => {
+const handleSearch = async () => {
   pagination.page = 1
-  fetchData()
+  await fetchData({ page: 1, selectStrategy: 'first' })
 }
 
-const resetFilters = () => {
+const resetFilters = async () => {
   filters.order_no = ''
   filters.scan_status = 'review_pending'
-  handleSearch()
+  await handleSearch()
 }
 
-const previewImage = (row) => {
-  if (row?.msg_log_id && row?.image_oss_key) {
-    previewUrl.value = mediaUrl(row.msg_log_id)
+const goPrev = async () => {
+  if (!hasPrev.value) return
+  if (currentIndex.value > 0) {
+    handleCurrentChange(tableData.value[currentIndex.value - 1])
+    return
   }
+  if (pagination.page > 1) {
+    await fetchData({ page: pagination.page - 1, selectStrategy: 'last' })
+  }
+}
+
+const goNext = async () => {
+  if (!hasNext.value) return
+  if (currentIndex.value < tableData.value.length - 1) {
+    handleCurrentChange(tableData.value[currentIndex.value + 1])
+    return
+  }
+  if (pagination.page * pagination.pageSize < pagination.total) {
+    await fetchData({ page: pagination.page + 1, selectStrategy: 'first' })
+  }
+}
+
+const previewImage = (url) => {
+  if (url) previewUrl.value = url
 }
 
 const handleApprove = async () => {
@@ -309,7 +341,7 @@ const handleApprove = async () => {
     const res = await approveScanRecord(selectedRecord.value.id, { review_note: reviewNote.value })
     const data = res.data || {}
     ElMessage.success(`审核成功，发货单号：${data.shipment_no || '-'}`)
-    await fetchData()
+    await fetchData({ page: pagination.page, selectStrategy: 'first' })
   } finally {
     actionLoading.value = false
   }
@@ -326,101 +358,232 @@ const handleVoid = async () => {
   try {
     await voidScanRecord(selectedRecord.value.id, { review_note: reviewNote.value })
     ElMessage.success('已作废')
-    await fetchData()
+    await fetchData({ page: pagination.page, selectStrategy: 'first' })
   } finally {
     actionLoading.value = false
   }
 }
 
 onMounted(() => {
-  fetchData()
+  fetchData({ page: 1, selectStrategy: 'first' })
 })
 </script>
 
 <style scoped>
-.shipping-review-page {
+.review-page {
+  height: calc(100vh - 100px);
   display: flex;
   flex-direction: column;
+}
+
+.review-main {
+  flex: 1;
+  display: flex;
+  gap: 16px;
+  min-height: 0;
+}
+
+.nav-index {
+  font-size: 13px;
+  color: var(--lark-text-secondary);
+  min-width: 72px;
+  text-align: center;
+}
+
+.detail-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.detail-panel {
+  flex: 1;
+  min-width: 0;
+  background: var(--lark-bg-base);
+  border-radius: var(--lark-radius-lg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.detail-empty {
+  margin: auto;
+}
+
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--lark-border-light);
+  flex-shrink: 0;
+}
+
+.detail-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.detail-room {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--lark-text-primary);
+  white-space: nowrap;
+}
+
+.detail-sender {
+  font-size: 13px;
+  color: var(--lark-text-secondary);
+  white-space: nowrap;
+}
+
+.detail-uid {
+  font-size: 12px;
+  color: #909399;
+  font-family: 'Courier New', monospace;
+  margin-left: 8px;
+  background: #f4f4f5;
+  padding: 1px 6px;
+  border-radius: 3px;
+}
+
+.detail-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 16px 20px;
+}
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 470px 1fr;
   gap: 16px;
   height: 100%;
 }
 
-.lark-page-header {
-  flex-shrink: 0;
+.compare-left,
+.compare-right {
+  display: flex;
+  flex-direction: column;
 }
 
-.header-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--lark-text-primary, #1f2329);
+.compare-left {
+  border-right: 1px solid var(--lark-border-light);
+  padding-right: 16px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.header-desc {
+.compare-left::-webkit-scrollbar {
+  display: none;
+}
+
+.compare-right {
+  overflow-y: auto;
+  min-height: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  padding: 0 4px;
+}
+
+.compare-right::-webkit-scrollbar {
+  display: none;
+}
+
+.panel-label {
   font-size: 13px;
-  color: var(--lark-text-secondary, #646a73);
-  margin-top: 4px;
+  font-weight: 600;
+  color: var(--lark-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 4px 0;
+  background: var(--lark-bg-base, #fff);
 }
 
-.review-layout {
-  display: grid;
-  grid-template-columns: 360px 1fr;
-  gap: 16px;
-  min-height: 0;
-  flex: 1;
-}
-
-.review-list-panel,
-.review-detail-panel {
-  background: #fff;
-  border-radius: 8px;
-  padding: 16px;
-  min-height: 0;
+.left-tabs {
   display: flex;
   flex-direction: column;
+  height: 100%;
 }
 
-.panel-toolbar,
-.list-footer,
-.review-actions {
+.left-tabs :deep(.el-tabs__header) {
+  margin-bottom: 0;
   flex-shrink: 0;
 }
 
-.toolbar-left {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-bottom: 12px;
+.left-tabs :deep(.el-tabs__content) {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
 }
 
-.review-detail-panel {
-  gap: 14px;
-  overflow: auto;
+.left-tabs :deep(.el-tabs__content)::-webkit-scrollbar {
+  display: none;
 }
 
-.detail-title {
-  font-size: 20px;
-  font-weight: 600;
+.left-tabs :deep(.el-tab-pane) {
+  height: 100%;
 }
 
-.detail-subtitle {
-  margin-top: 8px;
-}
-
-.detail-grid {
+.source-panel {
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 12px;
 }
 
-.summary-grid {
+.source-img-viewport {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.source-preview-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.uncertain-panel {
+  padding: 12px 10px;
+  height: 100%;
+  overflow-y: auto;
+}
+
+.uncertain-item {
+  font-size: 13px;
+  color: #8c6d1f;
+  background: #fffbe6;
+  border: 1px solid #ffe58f;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-top: 10px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.aux-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.summary-grid-compact {
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .summary-item {
@@ -442,47 +605,6 @@ onMounted(() => {
   word-break: break-all;
 }
 
-.detail-block {
-  border: 1px solid #ebeef5;
-  border-radius: 8px;
-  padding: 12px;
-}
-
-.block-title {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-
-.info-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.info-row span {
-  color: #606266;
-}
-
-.info-row strong {
-  color: #303133;
-  word-break: break-all;
-  text-align: right;
-}
-
-.image-wrap {
-  text-align: center;
-}
-
-.detail-img {
-  max-width: 100%;
-  max-height: 360px;
-  border-radius: 6px;
-  cursor: pointer;
-  border: 1px solid #ebeef5;
-}
-
 .json-block {
   margin: 0;
   white-space: pre-wrap;
@@ -495,40 +617,124 @@ onMounted(() => {
   padding: 12px;
 }
 
-.parsed-table {
-  width: 100%;
+.json-block + .json-block {
+  margin-top: 10px;
 }
 
-.table-total {
-  font-weight: 600;
-  color: #1f2329;
+.order-info-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--lark-text-regular);
+  margin-bottom: 12px;
 }
 
-.review-actions {
+.edit-form-area {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-.action-buttons {
-  display: flex;
-  gap: 10px;
-}
-
-.danger-text {
-  color: #f56c6c;
-}
-
-.empty-detail {
   flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.order-table {
+  margin-bottom: 0;
+  flex: 1;
+  min-height: 0;
+}
+
+.order-table :deep(.el-table__header-wrapper th.el-table__cell) {
+  padding: 6px 0 !important;
+  height: 36px;
+  background: #fafafa;
+  font-weight: 600;
+  font-size: 12px;
+  color: #606266;
+}
+
+.order-table :deep(.el-table__body-wrapper) {
+  flex: 1;
+  min-height: 0;
+}
+
+.order-table :deep(.el-table__cell) {
+  padding: 0 !important;
+  height: 32px;
+}
+
+.order-table :deep(.cell) {
+  padding: 0 !important;
+  line-height: 32px;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
-.list-footer {
+.order-table .size-col .cell,
+.order-table .total-col .cell {
+  padding: 0 !important;
+  height: 100%;
+}
+
+.cell-total {
+  font-weight: 600;
+  color: #303133;
+}
+
+.parsed-remark {
+  margin-top: 10px;
+}
+
+.detail-footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--lark-border-light);
+  padding: 12px 20px;
   display: flex;
-  justify-content: flex-end;
-  margin-top: 12px;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.footer-form {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+@media (max-width: 1400px) {
+  .compare-grid {
+    grid-template-columns: 420px 1fr;
+  }
+}
+
+@media (max-width: 1100px) {
+  .detail-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .detail-header-right {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .compare-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .compare-left {
+    border-right: none;
+    border-bottom: 1px solid var(--lark-border-light);
+    padding-right: 0;
+    padding-bottom: 16px;
+  }
 }
 </style>
